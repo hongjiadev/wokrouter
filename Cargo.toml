@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/wokrouter-core",
+  "crates/wokrouter-storage",
+  "crates/wokrouter-platform",
+  "crates/wokrouter-control",
+  "crates/wokrouter-daemon",
+  "apps/cli",
+  "apps/desktop/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.97.1"
+
+[workspace.dependencies]
+anyhow = "1"
+arc-swap = "1.7"
+async-trait = "0.1.91"
+axum = "0.8.9"
+bytes = "1.12.1"
+clap = { version = "4.6.4", features = ["derive"] }
+eventsource-stream = "0.2"
+futures = "0.3.33"
+interprocess = { version = "2.4.2", features = ["tokio"] }
+jiff = "0.2.34"
+keyring = "4.1.5"
+oauth2 = "5.0.0"
+proptest = "1.11.0"
+prost = "0.14"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+rustls = "0.23"
+rustls-pemfile = "2"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+secrecy = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+sys-locale = "0.3"
+tauri = "2.11.5"
+tauri-build = "2.6.3"
+tempfile = "3"
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = "0.26"
+toml_edit = { version = "0.25", features = ["serde"] }
+tower-http = "0.7.0"
+tracing = "0.1.44"
+url = { version = "2.5.8", features = ["serde"] }
+uuid = { version = "1.24.0", features = ["serde", "v4"] }
+wiremock = "0.6.5"
+zeroize = "1.9.0"
