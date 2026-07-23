@@ -11,7 +11,9 @@ pub struct ProviderId(String);
 pub struct AccountId(String);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("identifier must contain 1 to 128 lowercase ASCII letters, digits, '.', '_' or '-'")]
+#[error(
+    "identifier must contain an ASCII letter or digit and use only lowercase ASCII letters, digits, '.', '_' or '-'"
+)]
 pub struct InvalidId;
 
 macro_rules! identifier {
@@ -54,7 +56,26 @@ identifier!(AccountId);
 fn is_valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_IDENTIFIER_LENGTH
+        && value != "."
+        && value != ".."
+        && value.bytes().any(|byte| byte.is_ascii_alphanumeric())
         && value.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AccountId, ProviderId};
+
+    #[test]
+    fn identifiers_reject_path_segments_and_separator_only_values() {
+        for invalid in [".", "..", "-", "_", "-_.", "...---___"] {
+            assert!(ProviderId::new(invalid).is_err());
+            assert!(AccountId::new(invalid).is_err());
+        }
+
+        assert!(ProviderId::new("openai-compatible.v1").is_ok());
+        assert!(AccountId::new("primary-account_01").is_ok());
+    }
 }

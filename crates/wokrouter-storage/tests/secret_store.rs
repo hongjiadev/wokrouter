@@ -6,8 +6,8 @@ use wokrouter_core::{
     secret::{SecretPurpose, SecretRef, SecretScope},
 };
 use wokrouter_storage::{
-    EnvironmentSecretStore, HeadlessSecretStoreConfig, MemorySecretStore,
-    PermissionedFileSecretStore, SecretStore, StorageError,
+    AppConfig, ConfigStore, EnvironmentSecretStore, HeadlessSecretStoreConfig, MemorySecretStore,
+    PermissionedFileSecretStore, SecretStore, StateStore, StorageError,
 };
 
 fn scope() -> SecretScope {
@@ -153,46 +153,85 @@ async fn permissioned_file_store_rejects_acls_granting_other_principals() {
 }
 
 #[tokio::test]
-async fn deleting_an_orphan_secret_leaves_no_plaintext_repository_artifact() {
+async fn orphan_secret_persistence_stores_only_an_opaque_recoverable_reference() {
+    let app_home = tempfile::tempdir().unwrap();
+    let config_store = ConfigStore::new(app_home.path().join("config.toml"));
+    let committed = config_store.commit(0, &AppConfig::default()).unwrap();
+    let state_path = app_home.path().join("state.db");
+    let state_store = StateStore::open(&state_path).unwrap();
     let store = MemorySecretStore::default();
-    let plaintext = ["orphan", "fixture", "plaintext"].join("-");
+    let plaintext = ["persistent", "orphan", "canary"].join("-");
     let secret_ref = store
         .put(&scope(), SecretString::from(plaintext.clone()))
         .await
         .unwrap();
 
-    store.delete(&secret_ref).await.unwrap();
-
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
+    state_store
+        .record_orphan_secret(&secret_ref, "2026-07-24T00:00:00Z")
         .unwrap();
-    assert_repository_files_do_not_contain(repository, plaintext.as_bytes());
+
+    assert!(config_store.load().unwrap() == committed);
+    assert!(state_store.orphan_secret_refs().unwrap() == vec![secret_ref.clone()]);
+    assert_persistent_files_do_not_contain(app_home.path(), plaintext.as_bytes());
+
+    drop(state_store);
+    let reopened = StateStore::open(&state_path).unwrap();
+    assert!(reopened.orphan_secret_refs().unwrap() == vec![secret_ref]);
 }
 
-fn assert_repository_files_do_not_contain(directory: &Path, needle: &[u8]) {
-    for entry in fs::read_dir(directory).unwrap() {
-        let entry = entry.unwrap();
+#[test]
+fn persistent_scan_detects_plaintext_in_database_sidecars_locks_and_logs() {
+    let plaintext = ["scanner", "fixture", "plaintext"].join("-");
+
+    for file_name in [
+        "config.toml",
+        "state.db",
+        "state.db-wal",
+        "state.db-shm",
+        "state.db.lock",
+        "daemon.log",
+        "README.md",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join(file_name), plaintext.as_bytes()).unwrap();
+
+        let detected = !persistent_files_containing(directory.path(), plaintext.as_bytes())
+            .unwrap()
+            .is_empty();
+
+        assert!(detected, "persistent scan missed {file_name}");
+    }
+}
+
+fn assert_persistent_files_do_not_contain(directory: &Path, needle: &[u8]) {
+    let matches = persistent_files_containing(directory, needle).unwrap();
+    assert!(
+        matches.is_empty(),
+        "plaintext secret found in persistent file {}",
+        matches[0].display()
+    );
+}
+
+fn persistent_files_containing(
+    directory: &Path,
+    needle: &[u8],
+) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let mut matches = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
         let path = entry.path();
         let name = entry.file_name();
         if name == ".git" || name == "target" || name == ".worktrees" {
             continue;
         }
         if path.is_dir() {
-            assert_repository_files_do_not_contain(&path, needle);
-        } else if matches!(
-            path.extension().and_then(|extension| extension.to_str()),
-            Some("rs" | "toml" | "sql" | "md" | "json")
-        ) {
-            assert!(
-                !fs::read(&path)
-                    .unwrap()
-                    .windows(needle.len())
-                    .any(|window| window == needle),
-                "plaintext secret found in repository file {}",
-                path.display()
-            );
+            matches.extend(persistent_files_containing(&path, needle)?);
+        } else if fs::read(&path)?
+            .windows(needle.len())
+            .any(|window| window == needle)
+        {
+            matches.push(path);
         }
     }
+    Ok(matches)
 }

@@ -5,6 +5,7 @@ use std::{
 
 use fs4::fs_std::FileExt;
 use rusqlite::{Connection, ErrorCode, TransactionBehavior, params};
+use wokrouter_core::secret::SecretRef;
 
 use crate::StorageError;
 
@@ -124,6 +125,41 @@ impl StateStore {
             )
             .map_err(map_database_error)?;
         Ok(())
+    }
+
+    pub fn record_orphan_secret(
+        &self,
+        secret_ref: &SecretRef,
+        created_at: &str,
+    ) -> Result<(), StorageError> {
+        self.connection
+            .execute(
+                "INSERT INTO orphan_secrets (secret_ref, created_at) VALUES (?1, ?2) ON CONFLICT(secret_ref) DO UPDATE SET created_at = excluded.created_at",
+                params![secret_ref.as_str(), created_at],
+            )
+            .map_err(map_database_error)?;
+        Ok(())
+    }
+
+    pub fn orphan_secret_refs(&self) -> Result<Vec<SecretRef>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT secret_ref FROM orphan_secrets ORDER BY secret_ref")
+            .map_err(map_database_error)?;
+        let references = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(map_database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_database_error)?;
+
+        references
+            .into_iter()
+            .map(|secret_ref| {
+                SecretRef::parse(secret_ref).map_err(|_| StorageError::StateDatabaseCorrupt {
+                    message: "orphan secret metadata contains an invalid reference".to_owned(),
+                })
+            })
+            .collect()
     }
 
     pub fn pragma_journal_mode(&self) -> Result<String, StorageError> {
