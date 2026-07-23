@@ -1,3 +1,6 @@
+pub mod id;
+pub mod secret;
+
 pub mod build {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct BuildInfo {

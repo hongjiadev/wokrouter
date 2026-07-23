@@ -1,9 +1,14 @@
 //! Durable, non-secret storage for WokRouter.
 
 pub mod config;
+pub mod secrets;
 pub mod state;
 
 pub use config::{AppConfig, ConfigStore, ServerConfig, UiConfig, VersionedConfig};
+pub use secrets::{
+    EnvironmentSecretStore, HeadlessSecretStoreConfig, MemorySecretStore, NativeSecretStore,
+    PermissionedFileSecretStore, SecretStore,
+};
 pub use state::{RequestMetric, StateHealth, StateStore};
 
 #[derive(Debug, thiserror::Error)]
@@ -26,4 +31,18 @@ pub enum StorageError {
         #[source]
         source: rusqlite::Error,
     },
+    #[error("secret was not found")]
+    SecretNotFound,
+    #[error("the native credential service is unavailable")]
+    CredentialServiceUnavailable,
+    #[error("the secret backend failed without exposing secret material")]
+    SecretBackendFailure,
+    #[error("the selected secret backend is read-only")]
+    ReadOnlySecretStore,
+    #[error("the explicit headless secret backend configuration does not match this store")]
+    InvalidHeadlessSecretStoreConfig,
+    #[error("the secret file grants access beyond the current user")]
+    InsecureSecretFilePermissions,
+    #[error("secret material is not valid UTF-8")]
+    InvalidSecretEncoding,
 }

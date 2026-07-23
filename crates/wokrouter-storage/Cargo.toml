@@ -6,12 +6,29 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 fs4 = "0.13"
+keyring.workspace = true
 rusqlite.workspace = true
+secrecy.workspace = true
 serde.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 toml_edit.workspace = true
+wokrouter-core = { path = "../wokrouter-core" }
+zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Memory",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio.workspace = true
