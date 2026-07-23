@@ -35,6 +35,8 @@ impl DaemonRuntime {
             shutdown,
             #[cfg(test)]
             reload_loaded: None,
+            #[cfg(test)]
+            candidate_prepared: None,
         });
         let handler_state = Arc::clone(&state);
         let after_send_state = Arc::clone(&state);
@@ -103,6 +105,8 @@ struct RuntimeState {
     shutdown: watch::Sender<bool>,
     #[cfg(test)]
     reload_loaded: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+    #[cfg(test)]
+    candidate_prepared: Option<Arc<dyn Fn(u16) + Send + Sync>>,
 }
 
 struct RuntimeData {
@@ -201,19 +205,22 @@ impl RuntimeState {
             observer(loaded.revision);
         }
 
-        let mut data = self.data.lock().await;
-        let active = data
-            .as_mut()
-            .expect("runtime data must be initialized before requests are handled");
-        if expected_revision < active.revision {
-            return ControlResponse::Error(ControlError::RevisionConflict {
-                expected: expected_revision,
-                actual: active.revision,
-            });
-        }
-        if active.config.server.host != loaded.config.server.host
-            || active.config.server.port != loaded.config.server.port
-        {
+        let address_changed = {
+            let data = self.data.lock().await;
+            let active = data
+                .as_ref()
+                .expect("runtime data must be initialized before requests are handled");
+            if expected_revision < active.revision {
+                return ControlResponse::Error(ControlError::RevisionConflict {
+                    expected: expected_revision,
+                    actual: active.revision,
+                });
+            }
+            active.config.server.host != loaded.config.server.host
+                || active.config.server.port != loaded.config.server.port
+        };
+
+        let candidate_listener = if address_changed {
             let listener = match bind_data_plane(&loaded.config).await {
                 Ok(listener) => listener,
                 Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
@@ -227,6 +234,26 @@ impl RuntimeState {
                     });
                 }
             };
+            #[cfg(test)]
+            if let Some(observer) = &self.candidate_prepared {
+                observer(loaded.config.server.port);
+            }
+            Some(listener)
+        } else {
+            None
+        };
+
+        let mut data = self.data.lock().await;
+        let active = data
+            .as_mut()
+            .expect("runtime data must be initialized before requests are handled");
+        if expected_revision < active.revision {
+            return ControlResponse::Error(ControlError::RevisionConflict {
+                expected: expected_revision,
+                actual: active.revision,
+            });
+        }
+        if let Some(listener) = candidate_listener {
             active._data_plane = listener;
         }
         active.config = loaded.config;
@@ -325,6 +352,7 @@ mod tests {
             ready,
             shutdown,
             reload_loaded: None,
+            candidate_prepared: None,
         };
 
         assert_eq!(
@@ -373,6 +401,7 @@ mod tests {
                     observer_release.wait();
                 }
             })),
+            candidate_prepared: None,
         });
 
         let old_state = Arc::clone(&state);
@@ -407,5 +436,91 @@ mod tests {
             state.data.lock().await.as_ref().unwrap().revision,
             second.revision
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn candidate_listener_preparation_does_not_block_active_revision_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path().join("config.toml"));
+        let initial_listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let initial_port = initial_listener.local_addr().unwrap().port();
+        let mut initial_config = AppConfig::default();
+        initial_config.server.port = initial_port;
+        let first = store.commit(0, &initial_config).unwrap();
+
+        let candidate_probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let candidate_port = candidate_probe.local_addr().unwrap().port();
+        drop(candidate_probe);
+        assert_ne!(candidate_port, initial_port);
+        let mut candidate_config = first.config.clone();
+        candidate_config.server.port = candidate_port;
+        let second = store.commit(first.revision, &candidate_config).unwrap();
+
+        let (ready, _) = watch::channel(true);
+        let (shutdown, _) = watch::channel(false);
+        let (prepared_sender, prepared_receiver) = mpsc::sync_channel(1);
+        let release_candidate = Arc::new(Barrier::new(2));
+        let observer_release = Arc::clone(&release_candidate);
+        let state = Arc::new(RuntimeState {
+            store,
+            data: Mutex::new(Some(RuntimeData {
+                config: first.config,
+                revision: first.revision,
+                _data_plane: initial_listener,
+            })),
+            ready,
+            shutdown,
+            reload_loaded: None,
+            candidate_prepared: Some(Arc::new(move |port| {
+                if port == candidate_port {
+                    prepared_sender.send(()).unwrap();
+                    observer_release.wait();
+                }
+            })),
+        });
+
+        let reload_state = Arc::clone(&state);
+        let reload = tokio::spawn(async move { reload_state.reload(second.revision).await });
+        tokio::task::spawn_blocking(move || {
+            prepared_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap();
+        })
+        .await
+        .unwrap();
+
+        let active_read =
+            tokio::time::timeout(Duration::from_millis(100), state.active_revision()).await;
+        tokio::task::spawn_blocking(move || release_candidate.wait())
+            .await
+            .unwrap();
+        let reload_response = reload.await.unwrap();
+
+        assert_eq!(
+            active_read.expect("candidate preparation blocked active revision reads"),
+            first.revision
+        );
+        assert_eq!(
+            reload_response,
+            ControlResponse::Accepted {
+                revision: second.revision,
+            }
+        );
+        assert_eq!(
+            state.data.lock().await.as_ref().unwrap().revision,
+            second.revision
+        );
+        let old_rebound = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, initial_port))
+            .await
+            .unwrap();
+        drop(old_rebound);
+        drop(state);
+        let candidate_rebound =
+            tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, candidate_port))
+                .await
+                .unwrap();
+        drop(candidate_rebound);
     }
 }
