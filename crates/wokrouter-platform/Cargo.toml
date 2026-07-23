@@ -4,3 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+jiff = { workspace = true, features = ["tzdb-concatenated"] }
+sys-locale.workspace = true
+thiserror.workspace = true
+wokrouter-storage = { path = "../wokrouter-storage" }
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio.workspace = true
+wokrouter-storage = { path = "../wokrouter-storage" }
