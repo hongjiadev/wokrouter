@@ -63,17 +63,6 @@ impl ControlEndpoint {
     pub fn as_path(&self) -> &std::path::Path {
         &self.path
     }
-
-    pub(crate) fn cleanup(&self) {
-        #[cfg(unix)]
-        {
-            match std::fs::remove_file(&self.path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(_) => {}
-            }
-        }
-    }
 }
 
 impl AsRef<OsStr> for ControlEndpoint {
@@ -86,5 +75,51 @@ impl AsRef<OsStr> for ControlEndpoint {
         {
             self.as_path().as_os_str()
         }
+    }
+}
+
+#[cfg(any(unix, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EndpointIdentity {
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
+    pub(crate) is_socket: bool,
+}
+
+#[cfg(any(unix, test))]
+pub(crate) fn stale_socket_removal_allowed(
+    probed: EndpointIdentity,
+    current: Option<EndpointIdentity>,
+) -> bool {
+    current.is_some_and(|current| probed.is_socket && current.is_socket && probed == current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EndpointIdentity, stale_socket_removal_allowed};
+
+    #[test]
+    fn replaced_stale_socket_identity_is_rejected_before_delete() {
+        let probed = EndpointIdentity {
+            device: 7,
+            inode: 11,
+            is_socket: true,
+        };
+        let replacement = EndpointIdentity {
+            device: 7,
+            inode: 12,
+            is_socket: true,
+        };
+
+        assert!(!stale_socket_removal_allowed(probed, Some(replacement)));
+        assert!(stale_socket_removal_allowed(probed, Some(probed)));
+        assert!(!stale_socket_removal_allowed(
+            probed,
+            Some(EndpointIdentity {
+                is_socket: false,
+                ..probed
+            })
+        ));
+        assert!(!stale_socket_removal_allowed(probed, None));
     }
 }

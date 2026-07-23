@@ -9,8 +9,9 @@ use crate::{
 };
 
 pub struct ControlClient {
+    endpoint: ControlEndpoint,
     protocol_version: u16,
-    stream: Mutex<ClientStream>,
+    stream: Mutex<Option<ClientStream>>,
 }
 
 impl ControlClient {
@@ -24,34 +25,48 @@ impl ControlClient {
     ) -> Result<Self, ControlError> {
         let stream = connect(endpoint).await?;
         Ok(Self {
+            endpoint: endpoint.clone(),
             protocol_version,
-            stream: Mutex::new(stream),
+            stream: Mutex::new(Some(stream)),
         })
     }
 
     pub async fn request(&self, request: ControlRequest) -> Result<ControlResponse, ControlError> {
-        let request_id = Uuid::new_v4();
-        let request = Frame {
-            protocol_version: self.protocol_version,
-            request_id,
-            payload: request,
-        };
-        let mut stream = self.stream.lock().await;
-        write_frame(&mut *stream, &request).await?;
-        let response: Frame<ControlResponse> = read_frame(&mut *stream).await?;
+        let mut stream_slot = self.stream.lock().await;
+        if stream_slot.is_none() {
+            *stream_slot = Some(connect(&self.endpoint).await?);
+        }
+        let mut stream = stream_slot
+            .take()
+            .expect("connected control stream must be present");
+        let response = async {
+            let request_id = Uuid::new_v4();
+            let request = Frame {
+                protocol_version: self.protocol_version,
+                request_id,
+                payload: request,
+            };
+            write_frame(&mut stream, &request).await?;
+            let response: Frame<ControlResponse> = read_frame(&mut stream).await?;
 
-        if response.request_id != request_id {
-            return Err(ControlError::RequestIdMismatch);
+            if response.request_id != request_id {
+                return Err(ControlError::RequestIdMismatch);
+            }
+            if let ControlResponse::Error(error) = response.payload {
+                return Err(error);
+            }
+            if response.protocol_version != self.protocol_version {
+                return Err(ControlError::IncompatibleVersion {
+                    client: self.protocol_version,
+                    daemon: response.protocol_version,
+                });
+            }
+            Ok(response.payload)
         }
-        if let ControlResponse::Error(error) = response.payload {
-            return Err(error);
+        .await;
+        if response.is_ok() {
+            *stream_slot = Some(stream);
         }
-        if response.protocol_version != self.protocol_version {
-            return Err(ControlError::IncompatibleVersion {
-                client: self.protocol_version,
-                daemon: response.protocol_version,
-            });
-        }
-        Ok(response.payload)
+        response
     }
 }

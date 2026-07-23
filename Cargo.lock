@@ -1588,6 +1588,7 @@ version = "0.1.0"
 name = "wokrouter-control"
 version = "0.1.0"
 dependencies = [
+ "fs4",
  "serde",
  "serde_json",
  "thiserror",

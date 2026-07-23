@@ -2,12 +2,15 @@ use std::{
     io,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::Notify,
+};
 use wokrouter_control::{
     CONTROL_PROTOCOL_VERSION, ControlClient, ControlEndpoint, ControlError, ControlRequest,
     ControlResponse, ControlServer, DaemonState, DaemonStatus,
@@ -93,6 +96,37 @@ async fn oversized_prefix_is_rejected_before_reading_a_body() {
     server.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn partial_frames_time_out_without_exhausting_connection_capacity() {
+    let endpoint = ControlEndpoint::temporary("foundation-partial-timeout").unwrap();
+    let server = ControlServer::bind(endpoint.clone(), ping_handler)
+        .await
+        .unwrap();
+    let mut partial_clients = Vec::new();
+
+    for _ in 0..64 {
+        let mut stream = connect_raw(&endpoint).await.unwrap();
+        stream.write_all(&64_u32.to_be_bytes()).await.unwrap();
+        stream.write_all(b"{").await.unwrap();
+        stream.flush().await.unwrap();
+        partial_clients.push(stream);
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let response = tokio::time::timeout(Duration::from_secs(3), async {
+        let client = ControlClient::connect(&endpoint).await?;
+        client.request(ControlRequest::Ping).await
+    })
+    .await
+    .expect("partial frames prevented a healthy client from completing")
+    .expect("server did not recover capacity from partial frames");
+
+    assert!(matches!(response, ControlResponse::Pong { .. }));
+
+    drop(partial_clients);
+    server.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn incompatible_protocol_version_returns_typed_error_without_dispatch() {
     let endpoint = ControlEndpoint::temporary("foundation-version").unwrap();
@@ -123,6 +157,53 @@ async fn incompatible_protocol_version_returns_typed_error_without_dispatch() {
         }
     );
     assert!(!dispatched.load(Ordering::SeqCst));
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_request_reconnects_before_the_next_transaction() {
+    let endpoint = ControlEndpoint::temporary("foundation-cancelled-request").unwrap();
+    let dispatch_count = Arc::new(AtomicUsize::new(0));
+    let first_dispatched = Arc::new(Notify::new());
+    let server = ControlServer::bind(endpoint.clone(), {
+        let dispatch_count = Arc::clone(&dispatch_count);
+        let first_dispatched = Arc::clone(&first_dispatched);
+        move |request| {
+            let call = dispatch_count.fetch_add(1, Ordering::SeqCst);
+            let first_dispatched = Arc::clone(&first_dispatched);
+            async move {
+                assert_eq!(request, ControlRequest::Ping);
+                if call == 0 {
+                    first_dispatched.notify_one();
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                ControlResponse::Pong {
+                    protocol_version: CONTROL_PROTOCOL_VERSION,
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let client = Arc::new(ControlClient::connect(&endpoint).await.unwrap());
+    let first_request = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.request(ControlRequest::Ping).await }
+    });
+
+    first_dispatched.notified().await;
+    first_request.abort();
+    assert!(first_request.await.unwrap_err().is_cancelled());
+
+    let response = client.request(ControlRequest::Ping).await.unwrap();
+    assert_eq!(
+        response,
+        ControlResponse::Pong {
+            protocol_version: CONTROL_PROTOCOL_VERSION,
+        }
+    );
+    assert_eq!(dispatch_count.load(Ordering::SeqCst), 2);
+
     server.shutdown().await.unwrap();
 }
 
@@ -201,6 +282,7 @@ async fn stale_unix_endpoint_is_removed_only_when_no_listener_accepts() {
         .await
         .unwrap();
     server.shutdown().await.unwrap();
+    assert!(!stale_endpoint.as_path().exists());
 
     let live_endpoint = ControlEndpoint::temporary("foundation-live").unwrap();
     let live_listener = UnixListener::bind(live_endpoint.as_path()).unwrap();
@@ -241,7 +323,18 @@ async fn connect_raw(endpoint: &ControlEndpoint) -> io::Result<tokio::net::UnixS
 async fn connect_raw(
     endpoint: &ControlEndpoint,
 ) -> io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
-    tokio::net::windows::named_pipe::ClientOptions::new().open(endpoint.as_pipe_name())
+    use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+
+    for _ in 0..100 {
+        match tokio::net::windows::named_pipe::ClientOptions::new().open(endpoint.as_pipe_name()) {
+            Ok(stream) => return Ok(stream),
+            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::from_raw_os_error(ERROR_PIPE_BUSY as i32))
 }
 
 #[cfg(windows)]

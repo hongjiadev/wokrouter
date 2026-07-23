@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Arc};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use tokio::{sync::watch, task::JoinSet};
 
@@ -10,6 +10,7 @@ use crate::{
 };
 
 const MAX_CONNECTION_TASKS: usize = 64;
+const FRAME_READ_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
 pub struct ControlServer {
@@ -26,7 +27,7 @@ impl ControlServer {
         let listener = bind(&endpoint).await?;
         let (shutdown, receiver) = watch::channel(false);
         let handler = Arc::new(handler);
-        let task = tokio::spawn(run_server(listener, endpoint, handler, receiver));
+        let task = tokio::spawn(run_server(listener, handler, receiver));
         Ok(Self {
             shutdown,
             task: Some(task),
@@ -50,7 +51,6 @@ impl Drop for ControlServer {
 
 async fn run_server<H, F>(
     mut listener: crate::transport::Listener,
-    endpoint: ControlEndpoint,
     handler: Arc<H>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ControlError>
@@ -85,7 +85,6 @@ where
     connections.abort_all();
     while connections.join_next().await.is_some() {}
     drop(listener);
-    endpoint.cleanup();
     result
 }
 
@@ -105,9 +104,10 @@ async fn serve_connection<H, F>(
         let request: Frame<ControlRequest> = tokio::select! {
             biased;
             _ = shutdown.changed() => return,
-            request = read_frame(&mut stream) => match request {
-                Ok(request) => request,
+            request = tokio::time::timeout(FRAME_READ_TIMEOUT, read_frame(&mut stream)) => match request {
+                Ok(Ok(request)) => request,
                 Err(_) => return,
+                Ok(Err(_)) => return,
             },
         };
 
