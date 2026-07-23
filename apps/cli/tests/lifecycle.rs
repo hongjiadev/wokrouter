@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{Read, Seek},
     net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream},
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
     sync::{Barrier, Mutex},
     thread,
     time::{Duration, Instant},
@@ -10,14 +10,18 @@ use std::{
 
 use wokrouter_control::{
     CONTROL_PROTOCOL_VERSION, ControlClient, ControlEndpoint, ControlError, ControlRequest,
-    ControlResponse, DaemonState, DaemonStatus,
+    ControlResponse, ControlServer, DaemonState, DaemonStatus,
 };
 use wokrouter_daemon::DaemonRuntime;
 use wokrouter_platform::AppPaths;
 use wokrouter_storage::{AppConfig, ConfigStore};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const DAEMON_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+const START_DEADLINE_TOLERANCE: Duration = Duration::from_millis(125);
+const UNRESPONSIVE_COMMAND_GUARD: Duration = Duration::from_secs(2);
+const CONTROL_FAILURE_LIMIT: Duration = Duration::from_secs(1);
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 #[test]
@@ -141,6 +145,58 @@ fn persisted_port_conflict_is_typed_and_does_not_drift_config() {
 }
 
 #[test]
+fn start_respects_the_hard_five_second_deadline() {
+    if daemon_helper_mode() {
+        return;
+    }
+    let _serial = TEST_LOCK.lock().unwrap();
+    let home = TestHome::with_persisted_free_port();
+    let started = Instant::now();
+
+    let start = wokrouter_with_daemon_mode(&home, &["start"], "unresponsive");
+    let elapsed = started.elapsed();
+
+    assert!(!start.status.success());
+    assert!(stderr(&start).contains("within five seconds"));
+    assert!(
+        elapsed <= Duration::from_secs(5) + START_DEADLINE_TOLERANCE,
+        "start exceeded its hard deadline: {elapsed:?}"
+    );
+}
+
+#[test]
+fn status_times_out_on_an_unresponsive_control_endpoint() {
+    if daemon_helper_mode() {
+        return;
+    }
+    let _serial = TEST_LOCK.lock().unwrap();
+    let fixture = UnresponsiveEndpoint::start();
+    let started = Instant::now();
+
+    let status = wokrouter_with_timeout(&fixture.home, &["status"], UNRESPONSIVE_COMMAND_GUARD);
+
+    assert!(!status.status.success());
+    assert!(stderr(&status).contains("control request timed out"));
+    assert!(started.elapsed() <= CONTROL_FAILURE_LIMIT);
+}
+
+#[test]
+fn stop_times_out_on_an_unresponsive_control_endpoint() {
+    if daemon_helper_mode() {
+        return;
+    }
+    let _serial = TEST_LOCK.lock().unwrap();
+    let fixture = UnresponsiveEndpoint::start();
+    let started = Instant::now();
+
+    let stop = wokrouter_with_timeout(&fixture.home, &["stop"], UNRESPONSIVE_COMMAND_GUARD);
+
+    assert!(!stop.status.success());
+    assert!(stderr(&stop).contains("control request timed out"));
+    assert!(started.elapsed() <= CONTROL_FAILURE_LIMIT);
+}
+
+#[test]
 fn reload_requires_the_committed_revision_and_shutdown_closes_ipc() {
     if daemon_helper_mode() {
         return;
@@ -229,6 +285,19 @@ fn daemon_process_helper() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
         let paths = AppPaths::discover().unwrap();
+        if std::env::var_os("WOKROUTER_TEST_DAEMON_MODE").as_deref()
+            == Some(std::ffi::OsStr::new("unresponsive"))
+        {
+            fs::create_dir_all(&paths.runtime_dir).unwrap();
+            let endpoint = ControlEndpoint::for_runtime_dir(&paths.runtime_dir).unwrap();
+            let _server = ControlServer::bind(endpoint, |_| async {
+                std::future::pending::<ControlResponse>().await
+            })
+            .await
+            .unwrap();
+            fs::write(paths.runtime_dir.join("unresponsive.ready"), b"ready").unwrap();
+            std::future::pending::<()>().await;
+        }
         let daemon = DaemonRuntime::start(paths)
             .await
             .unwrap_or_else(|error| panic!("{error}"));
@@ -239,6 +308,56 @@ fn daemon_process_helper() {
 struct TestHome {
     directory: tempfile::TempDir,
     paths: AppPaths,
+}
+
+struct UnresponsiveEndpoint {
+    child: Child,
+    home: TestHome,
+}
+
+impl UnresponsiveEndpoint {
+    fn start() -> Self {
+        let home = TestHome::with_persisted_free_port();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "daemon_process_helper",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("APPDATA", home.directory.path().join("config"))
+            .env("LOCALAPPDATA", home.directory.path().join("state"))
+            .env("USERPROFILE", home.directory.path())
+            .env("HOME", home.directory.path())
+            .env("WOKROUTER_TEST_DAEMON", "1")
+            .env("WOKROUTER_TEST_DAEMON_MODE", "unresponsive")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().unwrap();
+        let ready = home.paths.runtime_dir.join("unresponsive.ready");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !ready.exists() {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "unresponsive fixture exited before becoming ready"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "unresponsive fixture did not become ready"
+            );
+            thread::sleep(COMMAND_POLL_INTERVAL);
+        }
+        Self { child, home }
+    }
+}
+
+impl Drop for UnresponsiveEndpoint {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 impl TestHome {
@@ -334,6 +453,16 @@ fn wokrouter(home: &TestHome, arguments: &[&str]) -> Output {
     run_command(wokrouter_command(home, arguments), COMMAND_TIMEOUT)
 }
 
+fn wokrouter_with_timeout(home: &TestHome, arguments: &[&str], timeout: Duration) -> Output {
+    run_command(wokrouter_command(home, arguments), timeout)
+}
+
+fn wokrouter_with_daemon_mode(home: &TestHome, arguments: &[&str], mode: &str) -> Output {
+    let mut command = wokrouter_command(home, arguments);
+    command.env("WOKROUTER_TEST_DAEMON_MODE", mode);
+    run_command(command, COMMAND_TIMEOUT)
+}
+
 fn wokrouter_command(home: &TestHome, arguments: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_wokrouter"));
     command
@@ -384,7 +513,7 @@ fn run_command(mut command: Command, timeout: Duration) -> Output {
                 stderr(&output),
             );
         }
-        thread::sleep(Duration::from_millis(20));
+        thread::sleep(COMMAND_POLL_INTERVAL);
     }
 }
 

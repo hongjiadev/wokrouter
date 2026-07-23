@@ -15,3 +15,6 @@ tokio = { workspace = true, features = ["net"] }
 wokrouter-control = { path = "../wokrouter-control" }
 wokrouter-platform = { path = "../wokrouter-platform" }
 wokrouter-storage = { path = "../wokrouter-storage" }
+
+[dev-dependencies]
+tempfile.workspace = true

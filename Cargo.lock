@@ -1620,6 +1620,7 @@ dependencies = [
 name = "wokrouter-daemon"
 version = "0.1.0"
 dependencies = [
+ "tempfile",
  "thiserror",
  "tokio",
  "wokrouter-control",

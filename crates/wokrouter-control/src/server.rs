@@ -24,10 +24,24 @@ impl ControlServer {
         H: Fn(ControlRequest) -> F + Send + Sync + 'static,
         F: Future<Output = ControlResponse> + Send + 'static,
     {
+        Self::bind_with_after_send(endpoint, handler, |_, _| {}).await
+    }
+
+    pub async fn bind_with_after_send<H, F, O>(
+        endpoint: ControlEndpoint,
+        handler: H,
+        after_send: O,
+    ) -> Result<Self, ControlError>
+    where
+        H: Fn(ControlRequest) -> F + Send + Sync + 'static,
+        F: Future<Output = ControlResponse> + Send + 'static,
+        O: Fn(&ControlRequest, &ControlResponse) + Send + Sync + 'static,
+    {
         let listener = bind(&endpoint).await?;
         let (shutdown, receiver) = watch::channel(false);
         let handler = Arc::new(handler);
-        let task = tokio::spawn(run_server(listener, handler, receiver));
+        let after_send = Arc::new(after_send);
+        let task = tokio::spawn(run_server(listener, handler, after_send, receiver));
         Ok(Self {
             shutdown,
             task: Some(task),
@@ -49,14 +63,16 @@ impl Drop for ControlServer {
     }
 }
 
-async fn run_server<H, F>(
+async fn run_server<H, F, O>(
     mut listener: crate::transport::Listener,
     handler: Arc<H>,
+    after_send: Arc<O>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ControlError>
 where
     H: Fn(ControlRequest) -> F + Send + Sync + 'static,
     F: Future<Output = ControlResponse> + Send + 'static,
+    O: Fn(&ControlRequest, &ControlResponse) + Send + Sync + 'static,
 {
     let mut connections = JoinSet::new();
     let result = loop {
@@ -72,6 +88,7 @@ where
                         connections.spawn(serve_connection(
                             stream,
                             Arc::clone(&handler),
+                            Arc::clone(&after_send),
                             shutdown.clone(),
                         ));
                     }
@@ -92,13 +109,15 @@ fn has_connection_capacity(active: usize) -> bool {
     active < MAX_CONNECTION_TASKS
 }
 
-async fn serve_connection<H, F>(
+async fn serve_connection<H, F, O>(
     mut stream: ServerStream,
     handler: Arc<H>,
+    after_send: Arc<O>,
     mut shutdown: watch::Receiver<bool>,
 ) where
     H: Fn(ControlRequest) -> F + Send + Sync + 'static,
     F: Future<Output = ControlResponse> + Send + 'static,
+    O: Fn(&ControlRequest, &ControlResponse) + Send + Sync + 'static,
 {
     loop {
         let request: Frame<ControlRequest> = tokio::select! {
@@ -124,6 +143,7 @@ async fn serve_connection<H, F>(
             return;
         }
 
+        let sent_request = request.payload.clone();
         let response = tokio::select! {
             biased;
             _ = shutdown.changed() => return,
@@ -137,6 +157,7 @@ async fn serve_connection<H, F>(
         if write_frame(&mut stream, &response).await.is_err() {
             return;
         }
+        after_send(&sent_request, &response.payload);
     }
 }
 

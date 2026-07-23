@@ -2,20 +2,22 @@ use std::{
     ffi::OsString,
     io::Read,
     process::{Child, Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
+use tokio::time::Instant;
 use wokrouter_control::ControlError;
 use wokrouter_platform::AppPaths;
 
-use super::{CommandError, endpoint, ping};
+use super::{CommandError, endpoint, operation_deadline, ping_before};
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_DELAY: Duration = Duration::from_millis(50);
 
 pub async fn execute(paths: &AppPaths) -> Result<u8, CommandError> {
+    let deadline = Instant::now() + START_TIMEOUT;
     let endpoint = endpoint(paths)?;
-    match ping(&endpoint).await {
+    match ping_before(&endpoint, operation_deadline(deadline)).await {
         Ok(()) => {
             println!("WokRouter daemon is already running.");
             return Ok(0);
@@ -25,10 +27,12 @@ pub async fn execute(paths: &AppPaths) -> Result<u8, CommandError> {
     }
 
     let mut child = spawn_daemon()?;
-    let deadline = Instant::now() + START_TIMEOUT;
     let mut startup_error = None;
     loop {
-        match ping(&endpoint).await {
+        if Instant::now() >= deadline {
+            return finish_timed_out_start(&mut child, startup_error);
+        }
+        match ping_before(&endpoint, operation_deadline(deadline)).await {
             Ok(()) => {
                 println!("WokRouter daemon is running.");
                 return Ok(0);
@@ -42,18 +46,25 @@ pub async fn execute(paths: &AppPaths) -> Result<u8, CommandError> {
             startup_error = read_stderr(&mut child)?;
         }
         if Instant::now() >= deadline {
-            if child.try_wait()?.is_none() {
-                child.kill()?;
-                child.wait()?;
-                startup_error = read_stderr(&mut child)?;
-            }
-            return startup_error
-                .filter(|message| !message.is_empty())
-                .map(|message| Err(CommandError::DaemonFailed { message }))
-                .unwrap_or(Err(CommandError::StartTimedOut));
+            return finish_timed_out_start(&mut child, startup_error);
         }
-        tokio::time::sleep(RETRY_DELAY).await;
+        tokio::time::sleep_until(std::cmp::min(deadline, Instant::now() + RETRY_DELAY)).await;
     }
+}
+
+fn finish_timed_out_start(
+    child: &mut Child,
+    mut startup_error: Option<String>,
+) -> Result<u8, CommandError> {
+    if child.try_wait()?.is_none() {
+        child.kill()?;
+        child.wait()?;
+        startup_error = read_stderr(child)?;
+    }
+    startup_error
+        .filter(|message| !message.is_empty())
+        .map(|message| Err(CommandError::DaemonFailed { message }))
+        .unwrap_or(Err(CommandError::StartTimedOut))
 }
 
 fn spawn_daemon() -> Result<Child, CommandError> {

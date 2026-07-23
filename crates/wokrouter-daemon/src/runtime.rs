@@ -33,12 +33,19 @@ impl DaemonRuntime {
             data: Mutex::new(None),
             ready,
             shutdown,
+            #[cfg(test)]
+            reload_loaded: None,
         });
         let handler_state = Arc::clone(&state);
-        let server = ControlServer::bind(endpoint, move |request| {
-            let state = Arc::clone(&handler_state);
-            async move { state.handle(request).await }
-        })
+        let after_send_state = Arc::clone(&state);
+        let server = ControlServer::bind_with_after_send(
+            endpoint,
+            move |request| {
+                let state = Arc::clone(&handler_state);
+                async move { state.handle(request).await }
+            },
+            move |request, response| after_send_state.after_response_sent(request, response),
+        )
         .await?;
 
         if let Err(error) = state.initialize(&paths).await {
@@ -94,6 +101,8 @@ struct RuntimeState {
     data: Mutex<Option<RuntimeData>>,
     ready: watch::Sender<bool>,
     shutdown: watch::Sender<bool>,
+    #[cfg(test)]
+    reload_loaded: Option<Arc<dyn Fn(u64) + Send + Sync>>,
 }
 
 struct RuntimeData {
@@ -148,11 +157,9 @@ impl RuntimeState {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
             }),
             ControlRequest::Reload { expected_revision } => self.reload(expected_revision).await,
-            ControlRequest::Shutdown => {
-                let revision = self.active_revision().await;
-                let _ = self.shutdown.send(true);
-                ControlResponse::Accepted { revision }
-            }
+            ControlRequest::Shutdown => ControlResponse::Accepted {
+                revision: self.active_revision().await,
+            },
         }
     }
 
@@ -162,6 +169,15 @@ impl RuntimeState {
             if receiver.changed().await.is_err() {
                 return;
             }
+        }
+    }
+
+    fn after_response_sent(&self, request: &ControlRequest, response: &ControlResponse) {
+        if matches!(
+            (request, response),
+            (ControlRequest::Shutdown, ControlResponse::Accepted { .. })
+        ) {
+            let _ = self.shutdown.send(true);
         }
     }
 
@@ -180,11 +196,21 @@ impl RuntimeState {
                 actual: loaded.revision,
             });
         }
+        #[cfg(test)]
+        if let Some(observer) = &self.reload_loaded {
+            observer(loaded.revision);
+        }
 
         let mut data = self.data.lock().await;
         let active = data
             .as_mut()
             .expect("runtime data must be initialized before requests are handled");
+        if expected_revision < active.revision {
+            return ControlResponse::Error(ControlError::RevisionConflict {
+                expected: expected_revision,
+                actual: active.revision,
+            });
+        }
         if active.config.server.host != loaded.config.server.host
             || active.config.server.port != loaded.config.server.port
         {
@@ -268,4 +294,118 @@ pub enum DaemonError {
     ConfiguredPortInUse { port: u16 },
     #[error("daemon shutdown channel closed unexpectedly")]
     ShutdownChannelClosed,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+    use std::sync::{Arc, Barrier, mpsc};
+    use std::time::Duration;
+
+    use tokio::sync::{Mutex, watch};
+    use wokrouter_control::{ControlRequest, ControlResponse};
+    use wokrouter_storage::{AppConfig, ConfigStore};
+
+    use super::{RuntimeData, RuntimeState};
+
+    #[tokio::test]
+    async fn shutdown_is_not_published_by_the_pre_flush_handler() {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let (ready, _) = watch::channel(true);
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        let state = RuntimeState {
+            store: ConfigStore::new("unused-config.toml"),
+            data: Mutex::new(Some(RuntimeData {
+                config: AppConfig::default(),
+                revision: 7,
+                _data_plane: listener,
+            })),
+            ready,
+            shutdown,
+            reload_loaded: None,
+        };
+
+        assert_eq!(
+            state.handle(ControlRequest::Shutdown).await,
+            ControlResponse::Accepted { revision: 7 }
+        );
+        assert!(
+            !*shutdown_receiver.borrow(),
+            "shutdown must remain unpublished until the Accepted response is flushed"
+        );
+        state.after_response_sent(
+            &ControlRequest::Shutdown,
+            &ControlResponse::Accepted { revision: 7 },
+        );
+        assert!(*shutdown_receiver.borrow());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_concurrent_reload_cannot_roll_back_the_active_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path().join("config.toml"));
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let mut config = AppConfig::default();
+        config.server.port = listener.local_addr().unwrap().port();
+        let first = store.commit(0, &config).unwrap();
+        let (ready, _) = watch::channel(true);
+        let (shutdown, _) = watch::channel(false);
+        let (loaded_sender, loaded_receiver) = mpsc::sync_channel(1);
+        let release_old = Arc::new(Barrier::new(2));
+        let observer_release = Arc::clone(&release_old);
+        let first_revision = first.revision;
+        let state = Arc::new(RuntimeState {
+            store: store.clone(),
+            data: Mutex::new(Some(RuntimeData {
+                config: first.config.clone(),
+                revision: first.revision,
+                _data_plane: listener,
+            })),
+            ready,
+            shutdown,
+            reload_loaded: Some(Arc::new(move |revision| {
+                if revision == first_revision {
+                    loaded_sender.send(()).unwrap();
+                    observer_release.wait();
+                }
+            })),
+        });
+
+        let old_state = Arc::clone(&state);
+        let old_reload = tokio::spawn(async move { old_state.reload(first.revision).await });
+        tokio::task::spawn_blocking(move || {
+            loaded_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap();
+        })
+        .await
+        .unwrap();
+
+        let second = store.commit(first.revision, &first.config).unwrap();
+        assert_eq!(
+            state.reload(second.revision).await,
+            ControlResponse::Accepted {
+                revision: second.revision,
+            }
+        );
+        tokio::task::spawn_blocking(move || release_old.wait())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            old_reload.await.unwrap(),
+            ControlResponse::Error(wokrouter_control::ControlError::RevisionConflict {
+                expected: first.revision,
+                actual: second.revision,
+            })
+        );
+        assert_eq!(
+            state.data.lock().await.as_ref().unwrap().revision,
+            second.revision
+        );
+    }
 }
