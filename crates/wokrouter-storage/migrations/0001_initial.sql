@@ -1,5 +1,5 @@
 PRAGMA foreign_keys = ON;
-CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE accounts(id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, display_name TEXT NOT NULL, secret_ref TEXT, auth_state TEXT NOT NULL);
 CREATE TABLE quota_windows(account_id TEXT NOT NULL, kind TEXT NOT NULL, used REAL NOT NULL, resets_at TEXT, PRIMARY KEY(account_id, kind));
 CREATE TABLE thread_affinities(thread_key TEXT PRIMARY KEY, account_id TEXT NOT NULL, updated_at TEXT NOT NULL);

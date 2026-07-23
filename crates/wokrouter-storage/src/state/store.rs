@@ -1,6 +1,10 @@
-use std::path::Path;
+use std::{
+    fs::OpenOptions,
+    path::{Path, PathBuf},
+};
 
-use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
+use fs4::fs_std::FileExt;
+use rusqlite::{Connection, ErrorCode, TransactionBehavior, params};
 
 use crate::StorageError;
 
@@ -31,24 +35,51 @@ pub struct StateStore {
 
 impl StateStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        let path = path.as_ref();
+        let setup_lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(Self::setup_lock_path(path))
+            .map_err(|source| StorageError::Io { source })?;
+        setup_lock
+            .lock_exclusive()
+            .map_err(|source| StorageError::Io { source })?;
+        let result = Self::open_locked(path);
+        let unlock_result =
+            FileExt::unlock(&setup_lock).map_err(|source| StorageError::Io { source });
+
+        match (result, unlock_result) {
+            (Ok(store), Ok(())) => Ok(store),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    fn open_locked(path: &Path) -> Result<Self, StorageError> {
         let mut connection = Connection::open(path).map_err(map_database_error)?;
         connection
             .execute_batch(
-                "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
+                "PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;",
             )
             .map_err(map_database_error)?;
 
-        let transaction = connection.transaction().map_err(map_database_error)?;
-        let has_migrations = transaction
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
-                [],
-                |_| Ok(()),
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(map_database_error)?;
+        transaction
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
             )
-            .optional()
+            .map_err(map_database_error)?;
+        let schema_version = transaction
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get::<_, Option<i64>>(0)
+            })
             .map_err(map_database_error)?
-            .is_some();
-        if !has_migrations {
+            .unwrap_or_default();
+        if schema_version < 1 {
             transaction
                 .execute_batch(INITIAL_MIGRATION)
                 .map_err(map_database_error)?;
@@ -56,6 +87,12 @@ impl StateStore {
         transaction.commit().map_err(map_database_error)?;
 
         Ok(Self { connection })
+    }
+
+    fn setup_lock_path(path: &Path) -> PathBuf {
+        let mut lock_path = path.as_os_str().to_os_string();
+        lock_path.push(".lock");
+        lock_path.into()
     }
 
     pub fn health(&self) -> Result<StateHealth, StorageError> {

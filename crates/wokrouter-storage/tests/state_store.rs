@@ -1,4 +1,8 @@
-use std::fs;
+use std::{
+    fs,
+    sync::{Arc, Barrier},
+    thread,
+};
 
 use wokrouter_storage::{RequestMetric, StateStore, StorageError};
 
@@ -22,6 +26,53 @@ fn reopening_database_preserves_the_migrated_schema() {
     let reopened = StateStore::open(path).unwrap();
 
     assert_eq!(reopened.health().unwrap().schema_version, 1);
+}
+
+#[test]
+fn opening_database_with_empty_migration_ledger_applies_version_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.db");
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+
+    let store = StateStore::open(&path).unwrap();
+
+    assert_eq!(store.health().unwrap().schema_version, 1);
+    let connection = rusqlite::Connection::open(path).unwrap();
+    let table_count = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('accounts', 'quota_windows', 'thread_affinities', 'request_metrics', 'orphan_secrets')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(table_count, 5);
+}
+
+#[test]
+fn concurrent_first_opens_complete_the_initial_migration() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.db");
+    let barrier = Arc::new(Barrier::new(2));
+
+    let handles = (0..2)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            let path = path.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                StateStore::open(path).unwrap().health().unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for handle in handles {
+        assert_eq!(handle.join().unwrap().schema_version, 1);
+    }
 }
 
 #[test]
