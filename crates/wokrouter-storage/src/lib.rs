@@ -1,8 +1,10 @@
 //! Durable, non-secret storage for WokRouter.
 
 pub mod config;
+pub mod state;
 
 pub use config::{AppConfig, ConfigStore, ServerConfig, UiConfig, VersionedConfig};
+pub use state::{RequestMetric, StateHealth, StateStore};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -16,5 +18,12 @@ pub enum StorageError {
     Io {
         #[source]
         source: std::io::Error,
+    },
+    #[error("state database is corrupt: {message}")]
+    StateDatabaseCorrupt { message: String },
+    #[error("state database error: {source}")]
+    StateDatabase {
+        #[source]
+        source: rusqlite::Error,
     },
 }
