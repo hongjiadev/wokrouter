@@ -4,7 +4,10 @@ use tokio::net::windows::named_pipe::{
     ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
 };
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, ERROR_PIPE_BUSY, HANDLE, LocalFree},
+    Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND,
+        ERROR_PIPE_BUSY, HANDLE, LocalFree,
+    },
     Security::{
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -41,9 +44,15 @@ impl Listener {
 }
 
 pub(crate) async fn bind(endpoint: &ControlEndpoint) -> Result<Listener, ControlError> {
+    let pending = create_server(endpoint, true).map_err(|error| match error.raw_os_error() {
+        Some(code) if code == ERROR_ACCESS_DENIED as i32 || code == ERROR_PIPE_BUSY as i32 => {
+            ControlError::EndpointInUse
+        }
+        _ => error.into(),
+    })?;
     Ok(Listener {
         endpoint: endpoint.clone(),
-        pending: Some(create_server(endpoint, true)?),
+        pending: Some(pending),
     })
 }
 
@@ -53,6 +62,16 @@ pub(crate) async fn connect(endpoint: &ControlEndpoint) -> Result<ClientStream, 
             Ok(stream) => return Ok(stream),
             Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
                 tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(code)
+                        if code == ERROR_FILE_NOT_FOUND as i32
+                            || code == ERROR_PATH_NOT_FOUND as i32
+                ) =>
+            {
+                return Err(ControlError::EndpointUnavailable);
             }
             Err(error) => return Err(error.into()),
         }

@@ -4,3 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+
+[[bin]]
+name = "wokrouter"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+wokrouter-control = { path = "../../crates/wokrouter-control" }
+wokrouter-platform = { path = "../../crates/wokrouter-platform" }
+
+[dev-dependencies]
+tempfile.workspace = true
+wokrouter-daemon = { path = "../../crates/wokrouter-daemon" }
+wokrouter-storage = { path = "../../crates/wokrouter-storage" }

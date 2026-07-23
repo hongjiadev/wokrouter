@@ -1583,6 +1583,16 @@ dependencies = [
 [[package]]
 name = "wokrouter-cli"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "wokrouter-control",
+ "wokrouter-daemon",
+ "wokrouter-platform",
+ "wokrouter-storage",
+]
 
 [[package]]
 name = "wokrouter-control"
@@ -1609,6 +1619,13 @@ dependencies = [
 [[package]]
 name = "wokrouter-daemon"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tokio",
+ "wokrouter-control",
+ "wokrouter-platform",
+ "wokrouter-storage",
+]
 
 [[package]]
 name = "wokrouter-desktop"

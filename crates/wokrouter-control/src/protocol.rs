@@ -43,6 +43,10 @@ pub enum ControlError {
     FrameTooLarge { length: u32, max: u32 },
     #[error("control endpoint is already in use")]
     EndpointInUse,
+    #[error("control endpoint is unavailable")]
+    EndpointUnavailable,
+    #[error("configured data-plane port {port} is already in use")]
+    DataPlanePortInUse { port: u16 },
     #[error("invalid control frame: {message}")]
     InvalidFrame { message: String },
     #[error("control transport failed: {message}")]
@@ -51,6 +55,8 @@ pub enum ControlError {
     RequestIdMismatch,
     #[error("control server task failed")]
     ServerTaskFailed,
+    #[error("configuration revision conflict: expected {expected}, found {actual}")]
+    RevisionConflict { expected: u64, actual: u64 },
 }
 
 impl From<std::io::Error> for ControlError {

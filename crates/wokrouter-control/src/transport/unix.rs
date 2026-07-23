@@ -37,7 +37,12 @@ impl Drop for Listener {
 pub(crate) async fn connect(endpoint: &ControlEndpoint) -> Result<ClientStream, ControlError> {
     UnixStream::connect(endpoint.as_path())
         .await
-        .map_err(Into::into)
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
+                ControlError::EndpointUnavailable
+            }
+            _ => error.into(),
+        })
 }
 
 pub(crate) async fn bind(endpoint: &ControlEndpoint) -> Result<Listener, ControlError> {

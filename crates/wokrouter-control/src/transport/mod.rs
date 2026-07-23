@@ -1,4 +1,4 @@
-use std::{ffi::OsStr, io};
+use std::{ffi::OsStr, io, path::Path};
 
 use uuid::Uuid;
 
@@ -21,6 +21,37 @@ pub struct ControlEndpoint {
 }
 
 impl ControlEndpoint {
+    pub fn for_runtime_dir(runtime_dir: &Path) -> io::Result<Self> {
+        if !runtime_dir.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "control runtime directory must be absolute",
+            ));
+        }
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+
+            let mut hash = 0xcbf29ce484222325_u64;
+            for word in runtime_dir.as_os_str().encode_wide() {
+                for byte in word.to_le_bytes() {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+            }
+            Ok(Self {
+                pipe_name: format!(r"\\.\pipe\wokrouter-{hash:016x}"),
+            })
+        }
+        #[cfg(unix)]
+        {
+            Ok(Self {
+                path: runtime_dir.join("control.sock"),
+            })
+        }
+    }
+
     pub fn temporary(label: &str) -> io::Result<Self> {
         if label.is_empty() {
             return Err(io::Error::new(
