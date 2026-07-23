@@ -74,6 +74,7 @@ fn normalize_locale(value: &str) -> Option<String> {
         index += 1;
     }
 
+    let mut extension_singletons = Vec::new();
     while let Some(subtag) = subtags.get(index) {
         if subtag.eq_ignore_ascii_case("x") {
             let private_use = &subtags[index + 1..];
@@ -91,8 +92,13 @@ fn normalize_locale(value: &str) -> Option<String> {
             return None;
         }
 
+        let singleton = subtag.to_ascii_lowercase();
+        if extension_singletons.contains(&singleton) {
+            return None;
+        }
         normalized.push('-');
-        normalized.push_str(&subtag.to_ascii_lowercase());
+        normalized.push_str(&singleton);
+        extension_singletons.push(singleton);
         index += 1;
 
         let payload_start = index;
@@ -231,6 +237,33 @@ mod tests {
         assert_eq!(
             normalize_locale("en-u-ca-gregory"),
             Some("en-u-ca-gregory".into())
+        );
+    }
+
+    #[test]
+    fn duplicate_extension_singleton_falls_back_to_the_next_locale_candidate() {
+        let context = context_from_candidates(
+            &UiConfig {
+                locale_override: Some("en-u-ca-u-nu-latn".into()),
+                timezone_override: None,
+            },
+            Some("fr_FR"),
+            None,
+        );
+
+        assert_eq!(context.locale, "fr-FR");
+    }
+
+    #[test]
+    fn duplicate_extension_singletons_are_case_insensitive_after_separator_normalization() {
+        assert_eq!(normalize_locale("en_U_ca_u_NU_latn"), None);
+    }
+
+    #[test]
+    fn distinct_extension_singletons_with_payloads_are_valid() {
+        assert_eq!(
+            normalize_locale("en-a-foo-b-bar"),
+            Some("en-a-foo-b-bar".into())
         );
     }
 
