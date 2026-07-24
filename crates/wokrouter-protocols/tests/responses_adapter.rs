@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use serde_json::{Value, json};
 use wokrouter_protocols::{
-    ResponsesCodec, ResponsesEncodeContext,
+    ResponsesCodec, ResponsesEncodeContext, ResponsesResponseTemplate,
     canonical::{
         CanonicalEvent, GatewayError, ImageDetail, InputItem, PublicModelId, RequestId, Usage,
     },
@@ -21,10 +21,79 @@ fn fixture_json(path: &str) -> Value {
     serde_json::from_slice(&fixture_bytes(path)).unwrap()
 }
 
+const FORMAL_RESPONSE_KEYS: [&str; 24] = [
+    "completed_at",
+    "created_at",
+    "error",
+    "id",
+    "incomplete_details",
+    "instructions",
+    "max_output_tokens",
+    "metadata",
+    "model",
+    "object",
+    "output",
+    "parallel_tool_calls",
+    "previous_response_id",
+    "reasoning",
+    "status",
+    "store",
+    "temperature",
+    "text",
+    "tool_choice",
+    "tools",
+    "top_p",
+    "truncation",
+    "usage",
+    "user",
+];
+
+fn assert_formal_response_fields(response: &Value) {
+    let response = response.as_object().unwrap();
+    assert_eq!(
+        response.len(),
+        FORMAL_RESPONSE_KEYS.len(),
+        "unexpected Response fields: {:?}",
+        response.keys().collect::<Vec<_>>()
+    );
+    for key in FORMAL_RESPONSE_KEYS {
+        assert!(response.contains_key(key), "missing Response field {key}");
+    }
+}
+
 fn encode_context() -> ResponsesEncodeContext {
     ResponsesEncodeContext {
         model: PublicModelId::new("gpt-test"),
         created_at: 1_723_456_789,
+        response: ResponsesResponseTemplate {
+            completed_at: Some(1_723_456_790),
+            error: None,
+            incomplete_details: None,
+            instructions: Some(json!("trusted instructions")),
+            max_output_tokens: Some(512),
+            metadata: BTreeMap::from([("fixture".to_owned(), json!("trusted"))]),
+            parallel_tool_calls: false,
+            previous_response_id: Some("resp_previous".to_owned()),
+            reasoning: json!({"effort": "high", "summary": "auto"}),
+            store: false,
+            temperature: Some(0.25),
+            text: json!({
+                "format": {"type": "text"},
+                "verbosity": "low"
+            }),
+            tool_choice: json!({
+                "type": "function",
+                "name": "read_file"
+            }),
+            tools: vec![json!({
+                "type": "function",
+                "name": "read_file",
+                "parameters": {"type": "object"}
+            })],
+            top_p: Some(0.9),
+            truncation: json!("auto"),
+            user: None,
+        },
     }
 }
 
@@ -333,6 +402,69 @@ fn non_stream_response_matches_golden_and_preserves_safe_usage_extensions() {
         ResponsesCodec::encode_response(encode_context(), &canonical_events()).unwrap(),
         fixture_json("response/complete.json")
     );
+}
+
+#[test]
+fn non_stream_response_has_the_formal_official_field_set() {
+    let response = ResponsesCodec::encode_response(encode_context(), &canonical_events()).unwrap();
+
+    assert_formal_response_fields(&response);
+    assert_eq!(response["completed_at"], 1_723_456_790_u64);
+    assert_eq!(response["error"], Value::Null);
+    assert_eq!(response["incomplete_details"], Value::Null);
+    assert_eq!(response["instructions"], "trusted instructions");
+    assert_eq!(response["max_output_tokens"], 512);
+    assert_eq!(response["metadata"], json!({"fixture": "trusted"}));
+    assert_eq!(response["parallel_tool_calls"], false);
+    assert_eq!(response["previous_response_id"], "resp_previous");
+    assert_eq!(
+        response["reasoning"],
+        json!({"effort": "high", "summary": "auto"})
+    );
+    assert_eq!(response["store"], false);
+    assert_eq!(response["temperature"], 0.25);
+    assert_eq!(
+        response["text"],
+        json!({"format": {"type": "text"}, "verbosity": "low"})
+    );
+    assert_eq!(
+        response["tool_choice"],
+        json!({"type": "function", "name": "read_file"})
+    );
+    assert_eq!(
+        response["tools"],
+        json!([{
+            "type": "function",
+            "name": "read_file",
+            "parameters": {"type": "object"}
+        }])
+    );
+    assert_eq!(response["top_p"], 0.9);
+    assert_eq!(response["truncation"], "auto");
+    assert_eq!(response["user"], Value::Null);
+}
+
+#[test]
+fn reasoning_items_have_the_official_returned_status() {
+    let mut codec = ResponsesCodec::new(encode_context());
+    codec
+        .encode_event(&CanonicalEvent::Created {
+            response_id: "resp_reasoning".to_owned(),
+        })
+        .unwrap();
+    let encoded = codec
+        .encode_event(&CanonicalEvent::ReasoningDelta {
+            item_id: "reasoning_1".to_owned(),
+            delta: "inspect".to_owned(),
+        })
+        .unwrap();
+    let mut decoder = SseDecoder::default();
+    let frames = decoder.push(&encoded).unwrap();
+    let added: Value = serde_json::from_str(&frames[0].data).unwrap();
+    assert_eq!(added["item"]["status"], "in_progress");
+
+    let response = ResponsesCodec::encode_response(encode_context(), &canonical_events()).unwrap();
+    assert_eq!(response["output"][1]["status"], "completed");
 }
 
 #[test]

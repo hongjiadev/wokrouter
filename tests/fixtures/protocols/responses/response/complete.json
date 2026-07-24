@@ -3,6 +3,11 @@
   "object": "response",
   "created_at": 1723456789,
   "status": "completed",
+  "completed_at": 1723456790,
+  "error": null,
+  "incomplete_details": null,
+  "instructions": "trusted instructions",
+  "max_output_tokens": 512,
   "model": "gpt-test",
   "output": [
     {
@@ -21,6 +26,7 @@
     {
       "id": "reasoning_1",
       "type": "reasoning",
+      "status": "completed",
       "summary": [
         {
           "type": "summary_text",
@@ -37,6 +43,35 @@
       "status": "completed"
     }
   ],
+  "parallel_tool_calls": false,
+  "previous_response_id": "resp_previous",
+  "reasoning": {
+    "effort": "high",
+    "summary": "auto"
+  },
+  "store": false,
+  "temperature": 0.25,
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "low"
+  },
+  "tool_choice": {
+    "type": "function",
+    "name": "read_file"
+  },
+  "tools": [
+    {
+      "type": "function",
+      "name": "read_file",
+      "parameters": {
+        "type": "object"
+      }
+    }
+  ],
+  "top_p": 0.9,
+  "truncation": "auto",
   "usage": {
     "input_tokens": 10,
     "input_tokens_details": {
@@ -48,5 +83,9 @@
     },
     "total_tokens": 15,
     "vendor_usage": "kept"
+  },
+  "user": null,
+  "metadata": {
+    "fixture": "trusted"
   }
 }

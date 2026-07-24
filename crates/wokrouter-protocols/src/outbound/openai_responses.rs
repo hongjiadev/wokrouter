@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use bytes::Bytes;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -7,10 +9,32 @@ use crate::{
     stream::encode_sse,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ResponsesEncodeContext {
     pub model: PublicModelId,
     pub created_at: u64,
+    pub response: ResponsesResponseTemplate,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResponsesResponseTemplate {
+    pub completed_at: Option<u64>,
+    pub error: Option<Value>,
+    pub incomplete_details: Option<Value>,
+    pub instructions: Option<Value>,
+    pub max_output_tokens: Option<u64>,
+    pub metadata: BTreeMap<String, Value>,
+    pub parallel_tool_calls: bool,
+    pub previous_response_id: Option<String>,
+    pub reasoning: Value,
+    pub store: bool,
+    pub temperature: Option<f64>,
+    pub text: Value,
+    pub tool_choice: Value,
+    pub tools: Vec<Value>,
+    pub top_p: Option<f64>,
+    pub truncation: Value,
+    pub user: Option<String>,
 }
 
 pub struct ResponsesCodec {
@@ -231,6 +255,7 @@ impl ResponsesCodec {
                             json!({
                                 "id": item_id,
                                 "type": "reasoning",
+                                "status": "in_progress",
                                 "summary": [],
                             }),
                         ),
@@ -592,14 +617,36 @@ impl ResponsesCodec {
     }
 
     fn response_value(&self, status: &str, output: Vec<Value>, usage: Value) -> Value {
+        let completed_at = if status == "completed" {
+            json!(self.context.response.completed_at)
+        } else {
+            Value::Null
+        };
         json!({
             "id": self.response_id.as_deref().unwrap_or_default(),
             "object": "response",
             "created_at": self.context.created_at,
             "status": status,
+            "completed_at": completed_at,
+            "error": self.context.response.error,
+            "incomplete_details": self.context.response.incomplete_details,
+            "instructions": self.context.response.instructions,
+            "max_output_tokens": self.context.response.max_output_tokens,
             "model": self.context.model.as_str(),
             "output": output,
+            "parallel_tool_calls": self.context.response.parallel_tool_calls,
+            "previous_response_id": self.context.response.previous_response_id,
+            "reasoning": self.context.response.reasoning,
+            "store": self.context.response.store,
+            "temperature": self.context.response.temperature,
+            "text": self.context.response.text,
+            "tool_choice": self.context.response.tool_choice,
+            "tools": self.context.response.tools,
+            "top_p": self.context.response.top_p,
+            "truncation": self.context.response.truncation,
             "usage": usage,
+            "user": self.context.response.user,
+            "metadata": self.context.response.metadata,
         })
     }
 
@@ -647,6 +694,7 @@ impl ResponsesOutput {
             Self::Reasoning { item_id, text } => json!({
                 "id": item_id,
                 "type": "reasoning",
+                "status": "completed",
                 "summary": [{
                     "type": "summary_text",
                     "text": text,

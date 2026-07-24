@@ -4,4 +4,4 @@ pub mod stream;
 mod inbound;
 mod outbound;
 
-pub use outbound::{ResponsesCodec, ResponsesEncodeContext};
+pub use outbound::{ResponsesCodec, ResponsesEncodeContext, ResponsesResponseTemplate};
