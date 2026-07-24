@@ -5,8 +5,9 @@ mod inbound;
 mod outbound;
 
 pub use outbound::{
-    ChatCodec, ChatEncodeContext, ChatFinishReason, ChatResponseTemplate, ResponsesCodec,
-    ResponsesEncodeContext, ResponsesResponseTemplate,
+    AnthropicCodec, AnthropicEncodeContext, AnthropicResponseTemplate, AnthropicStopReason,
+    AnthropicTokenCount, ChatCodec, ChatEncodeContext, ChatFinishReason, ChatResponseTemplate,
+    ResponsesCodec, ResponsesEncodeContext, ResponsesResponseTemplate, TokenCounter,
 };
 
 pub(crate) fn valid_chat_function_name(value: &str) -> bool {
