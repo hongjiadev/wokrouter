@@ -21,8 +21,9 @@ use tokio::time::timeout;
 use tower::ServiceExt;
 use wokrouter_core::secret::SecretRef;
 use wokrouter_daemon::data_plane::{
-    CanonicalStream, DataPlaneState, ExecutionContext, FrontDoorMetric, ImmutableSnapshot,
-    ListenerSecurity, MetricsSink, RequestLimits, TlsConfig, UpstreamExecutor, build_data_plane,
+    CanonicalStream, ClientProtocol, DataPlaneState, ExecutionContext, FrontDoorMetric,
+    ImmutableSnapshot, ListenerSecurity, MetricsSink, ProtocolRegistry, RequestLimits, TlsConfig,
+    UpstreamExecutor, build_data_plane,
 };
 use wokrouter_protocols::canonical::{CanonicalRequest, GatewayError};
 
@@ -166,6 +167,40 @@ fn default_json_body_limit_is_16_mib() {
     assert_eq!(RequestLimits::default().json_body_bytes, 16 * 1024 * 1024);
 }
 
+#[test]
+fn protocol_registry_maps_every_frozen_v1_path() {
+    assert_eq!(
+        ProtocolRegistry::resolve("/v1/responses"),
+        Some(ClientProtocol::OpenAiResponses)
+    );
+    assert_eq!(
+        ProtocolRegistry::resolve("/v1/chat/completions"),
+        Some(ClientProtocol::OpenAiChatCompletions)
+    );
+    assert_eq!(
+        ProtocolRegistry::resolve("/v1/messages"),
+        Some(ClientProtocol::AnthropicMessages)
+    );
+    assert_eq!(
+        ProtocolRegistry::resolve("/v1/messages/count_tokens"),
+        Some(ClientProtocol::AnthropicCountTokens)
+    );
+    assert_eq!(
+        ProtocolRegistry::resolve("/v1/models"),
+        Some(ClientProtocol::OpenAiModels)
+    );
+    assert_eq!(
+        ProtocolRegistry::resolve("/v1/images/generations"),
+        Some(ClientProtocol::OpenAiImageGenerations)
+    );
+    assert_eq!(
+        ProtocolRegistry::resolve("/v1/images/edits"),
+        Some(ClientProtocol::OpenAiImageEdits)
+    );
+    assert_eq!(ProtocolRegistry::resolve("/healthz"), None);
+    assert_eq!(ProtocolRegistry::resolve("/v1/unknown"), None);
+}
+
 async fn send(app: &Router, request: Request<Body>) -> axum::response::Response {
     timeout(TEST_TIMEOUT, app.clone().oneshot(request))
         .await
@@ -185,6 +220,52 @@ fn request(method: Method, path: &str, body: impl Into<Body>) -> Request<Body> {
 async fn json_body(response: axum::response::Response) -> Value {
     let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+#[derive(Clone, Copy)]
+enum ErrorFamily {
+    OpenAi,
+    Anthropic,
+}
+
+struct ErrorCase {
+    body: &'static str,
+    content_type: &'static str,
+    authorization: Option<&'static str>,
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+}
+
+async fn assert_family_error(app: &Router, family: ErrorFamily, path: &str, case: &ErrorCase) {
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header("x-request-id", "family-error-id")
+        .header(header::CONTENT_TYPE, case.content_type);
+    if let Some(authorization) = case.authorization {
+        request = request.header(header::AUTHORIZATION, authorization);
+    }
+    let response = send(app, request.body(Body::from(case.body)).unwrap()).await;
+    assert_eq!(response.status(), case.status, "{path}: {}", case.code);
+    assert_eq!(response.headers()["x-request-id"], "family-error-id");
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    let body = json_body(response).await;
+
+    match family {
+        ErrorFamily::OpenAi => {
+            assert_eq!(body["error"]["type"], "gateway_error");
+            assert_eq!(body["error"]["code"], case.code);
+            assert_eq!(body["error"]["message"], case.message);
+            assert_eq!(body["error"]["request_id"], "family-error-id");
+        }
+        ErrorFamily::Anthropic => {
+            assert_eq!(body["type"], "error");
+            assert_eq!(body["error"]["type"], case.code);
+            assert_eq!(body["error"]["message"], case.message);
+            assert_eq!(body["request_id"], "family-error-id");
+        }
+    }
 }
 
 #[tokio::test]
@@ -360,6 +441,36 @@ async fn bearer_auth_is_required_compared_and_stripped_before_handlers() {
     assert!(!rendered.contains(secret));
     assert!(!rendered.to_ascii_lowercase().contains("authorization"));
     assert_eq!(test.executor.calls(), 0);
+
+    for scheme in ["bearer", "BEARER"] {
+        let valid = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/responses")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("{scheme} {secret}"))
+            .body(Body::from("{}"))
+            .unwrap();
+        let response = send(&test.app, valid).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    for invalid in [
+        "Bearer",
+        "Bearer ",
+        "Basic lan-token-that-must-not-leak",
+        "Bearer lan-token-that-must-not-leak extra",
+        "Bearer lan-token-that-must-not-leak ",
+    ] {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/responses")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, invalid)
+            .body(Body::from("{}"))
+            .unwrap();
+        let response = send(&test.app, request).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{invalid:?}");
+    }
 }
 
 #[tokio::test]
@@ -383,6 +494,59 @@ async fn errors_use_safe_typed_envelopes_with_request_id() {
         body["error"]["message"],
         "The requested capability is not supported."
     );
+}
+
+#[tokio::test]
+async fn active_protocol_selects_openai_or_anthropic_error_envelopes() {
+    let test = test_app(8, Some("family-secret"));
+    let cases = [
+        ErrorCase {
+            body: "{",
+            content_type: "application/json",
+            authorization: Some("Bearer family-secret"),
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_request",
+            message: "The request is invalid.",
+        },
+        ErrorCase {
+            body: "{}",
+            content_type: "application/json",
+            authorization: None,
+            status: StatusCode::UNAUTHORIZED,
+            code: "unauthorized",
+            message: "The request is not authorized.",
+        },
+        ErrorCase {
+            body: "123456789",
+            content_type: "application/json",
+            authorization: Some("Bearer family-secret"),
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: "payload_too_large",
+            message: "The request body exceeds the configured limit.",
+        },
+        ErrorCase {
+            body: "{}",
+            content_type: "text/plain",
+            authorization: Some("Bearer family-secret"),
+            status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            code: "unsupported_media_type",
+            message: "Content-Type must be application/json.",
+        },
+        ErrorCase {
+            body: "{}",
+            content_type: "application/json",
+            authorization: Some("Bearer family-secret"),
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "unsupported_capability",
+            message: "The requested capability is not supported.",
+        },
+    ];
+
+    for case in &cases {
+        assert_family_error(&test.app, ErrorFamily::OpenAi, "/v1/responses", case).await;
+        assert_family_error(&test.app, ErrorFamily::Anthropic, "/v1/messages", case).await;
+    }
+    assert_eq!(test.executor.calls(), 0);
 }
 
 #[test]

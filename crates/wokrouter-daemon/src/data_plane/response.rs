@@ -1,20 +1,21 @@
 use axum::{
     Json,
-    body::Bytes,
-    extract::{Extension, rejection::BytesRejection},
+    extract::Extension,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
 use wokrouter_protocols::canonical::{GatewayError, RequestId};
 
+use super::{extract::ValidatedJsonBody, registry::ClientProtocol};
+
 #[derive(Serialize)]
-struct ErrorEnvelope<'a> {
-    error: PublicError<'a>,
+struct OpenAiErrorEnvelope<'a> {
+    error: OpenAiPublicError<'a>,
 }
 
 #[derive(Serialize)]
-struct PublicError<'a> {
+struct OpenAiPublicError<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
     code: &'a str,
@@ -22,50 +23,62 @@ struct PublicError<'a> {
     request_id: &'a str,
 }
 
+#[derive(Serialize)]
+struct AnthropicErrorEnvelope<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    error: AnthropicPublicError<'a>,
+    request_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct AnthropicPublicError<'a> {
+    #[serde(rename = "type")]
+    code: &'a str,
+    message: &'a str,
+}
+
 pub(crate) async fn health() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
-pub(crate) async fn unsupported(Extension(request_id): Extension<RequestId>) -> Response {
-    gateway_error_response(GatewayError::unsupported_capability(), &request_id)
+pub(crate) async fn unsupported(
+    Extension(request_id): Extension<RequestId>,
+    Extension(protocol): Extension<ClientProtocol>,
+) -> Response {
+    gateway_error_response(
+        GatewayError::unsupported_capability(),
+        &request_id,
+        protocol,
+    )
 }
 
 pub(crate) async fn unsupported_json(
     Extension(request_id): Extension<RequestId>,
-    body: Result<Bytes, BytesRejection>,
+    Extension(protocol): Extension<ClientProtocol>,
+    _body: ValidatedJsonBody,
 ) -> Response {
-    let body = match body {
-        Ok(body) => body,
-        Err(rejection) => {
-            let status = rejection.status();
-            if status == StatusCode::PAYLOAD_TOO_LARGE {
-                return public_error_response(
-                    status,
-                    "payload_too_large",
-                    "The request body exceeds the configured limit.",
-                    &request_id,
-                );
-            }
-            return public_error_response(
-                status,
-                "invalid_body",
-                "The request body could not be read.",
-                &request_id,
-            );
-        }
-    };
-
-    if serde_json::from_slice::<serde_json::Value>(&body).is_err() {
-        return gateway_error_response(GatewayError::invalid_request(), &request_id);
-    }
-
-    gateway_error_response(GatewayError::unsupported_capability(), &request_id)
+    gateway_error_response(
+        GatewayError::unsupported_capability(),
+        &request_id,
+        protocol,
+    )
 }
 
-pub(crate) fn gateway_error_response(error: GatewayError, request_id: &RequestId) -> Response {
+pub(crate) fn gateway_error_response(
+    error: GatewayError,
+    request_id: &RequestId,
+    protocol: ClientProtocol,
+) -> Response {
     let status =
         StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    public_error_response(status, error.code(), error.public_message(), request_id)
+    public_error_response(
+        status,
+        error.code(),
+        error.public_message(),
+        request_id,
+        Some(protocol),
+    )
 }
 
 pub(crate) fn public_error_response(
@@ -73,11 +86,24 @@ pub(crate) fn public_error_response(
     code: &str,
     message: &str,
     request_id: &RequestId,
+    protocol: Option<ClientProtocol>,
 ) -> Response {
+    if protocol.is_some_and(ClientProtocol::is_anthropic) {
+        return (
+            status,
+            Json(AnthropicErrorEnvelope {
+                kind: "error",
+                error: AnthropicPublicError { code, message },
+                request_id: request_id.as_str(),
+            }),
+        )
+            .into_response();
+    }
+
     (
         status,
-        Json(ErrorEnvelope {
-            error: PublicError {
+        Json(OpenAiErrorEnvelope {
+            error: OpenAiPublicError {
                 kind: "gateway_error",
                 code,
                 message,

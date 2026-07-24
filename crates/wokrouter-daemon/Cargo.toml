@@ -12,7 +12,6 @@ path = "src/main.rs"
 [dependencies]
 async-trait.workspace = true
 axum.workspace = true
-bytes.workspace = true
 futures.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
