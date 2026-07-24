@@ -5093,6 +5093,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wokrouter-protocols"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "wokrouter-storage"
 version = "0.1.0"
 dependencies = [

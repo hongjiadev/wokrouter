@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/wokrouter-core",
+  "crates/wokrouter-protocols",
   "crates/wokrouter-storage",
   "crates/wokrouter-platform",
   "crates/wokrouter-control",
