@@ -5096,8 +5096,11 @@ dependencies = [
 name = "wokrouter-protocols"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "serde",
  "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
  "url",
 ]
 
