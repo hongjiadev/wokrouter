@@ -40,6 +40,7 @@ function Edit-Workflow {
         [string]$OldText,
 
         [Parameter(Mandatory)]
+        [AllowEmptyString()]
         [string]$NewText
     )
 
@@ -173,6 +174,45 @@ try {
             -Root $root `
             -ExpectedText "cargo fmt" `
             -Scenario "misplaced required commands"
+    }
+
+    Invoke-Scenario -Name "missing sidecar staging is rejected" -Test {
+        $root = New-ContractFixture
+        Edit-Workflow `
+            -Root $root `
+            -OldText @"
+      - name: Stage native sidecars
+        run: node apps/desktop/scripts/stage-sidecars.mjs
+"@ `
+            -NewText ""
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "stage-sidecars" `
+            -Scenario "missing sidecar staging"
+    }
+
+    Invoke-Scenario -Name "sidecar staging in the wrong job is rejected" -Test {
+        $root = New-ContractFixture
+        Edit-Workflow `
+            -Root $root `
+            -OldText @"
+      - name: Stage native sidecars
+        run: node apps/desktop/scripts/stage-sidecars.mjs
+"@ `
+            -NewText ""
+        $frontendCommand = "        run: pnpm --dir apps/desktop typecheck"
+        Edit-Workflow `
+            -Root $root `
+            -OldText $frontendCommand `
+            -NewText @"
+$frontendCommand
+      - name: Misplaced native sidecar staging
+        run: node apps/desktop/scripts/stage-sidecars.mjs
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "stage-sidecars" `
+            -Scenario "misplaced sidecar staging"
     }
 
     Invoke-Scenario -Name "broken platform matrix is rejected" -Test {

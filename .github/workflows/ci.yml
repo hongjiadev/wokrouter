@@ -36,6 +36,8 @@ jobs:
         with:
           toolchain: 1.97.1
           components: clippy, rustfmt
+      - name: Stage native sidecars
+        run: node apps/desktop/scripts/stage-sidecars.mjs
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint workspace
@@ -104,6 +106,8 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: 1.97.1
+      - name: Stage native sidecars
+        run: node apps/desktop/scripts/stage-sidecars.mjs
       - name: Self-test foundation CI/configuration contract
         shell: pwsh
         run: pwsh tests/scripts/check-foundation-contract.tests.ps1

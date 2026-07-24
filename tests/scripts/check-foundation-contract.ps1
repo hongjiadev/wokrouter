@@ -496,6 +496,7 @@ foreach ($jobName in $requiredJobs) {
 if ($jobs.ContainsKey("rust")) {
     $rustSteps = @(Get-JobSteps -Job $jobs["rust"])
     foreach ($command in @(
+            "node apps/desktop/scripts/stage-sidecars.mjs",
             "cargo fmt --all -- --check",
             "cargo clippy --workspace --all-targets --all-features -- -D warnings",
             "cargo test --workspace --all-features"
@@ -584,6 +585,7 @@ if ($jobs.ContainsKey("platform-check-matrix")) {
     }
 
     foreach ($command in @(
+            "node apps/desktop/scripts/stage-sidecars.mjs",
             "pwsh tests/scripts/check-foundation-contract.tests.ps1",
             "pwsh tests/scripts/check-foundation-contract.ps1",
             "pwsh tests/scripts/check-no-body-persistence.tests.ps1",
