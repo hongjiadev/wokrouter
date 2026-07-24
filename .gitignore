@@ -1,2 +1,5 @@
+.pnpm-store/
 .superpowers/
+.subpowers/
 .worktrees/
+/docs/superpowers/
