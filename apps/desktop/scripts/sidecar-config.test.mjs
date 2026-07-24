@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 
 const configPath = resolve(process.cwd(), "src-tauri/tauri.conf.json");
 const config = JSON.parse(readFileSync(configPath, "utf8"));
+const packagePath = resolve(process.cwd(), "package.json");
+const packageJson = JSON.parse(readFileSync(packagePath, "utf8"));
 
 describe("desktop bundle contract", () => {
   it("bundles both lifecycle sidecars", () => {
@@ -15,6 +17,9 @@ describe("desktop bundle contract", () => {
     ]);
     expect(config.build.beforeBuildCommand).toBe("pnpm build:bundle");
     expect(config.build.beforeBundleCommand).toBe("pnpm stage:sidecars");
+    expect(packageJson.scripts["stage:sidecars"]).toBe(
+      "node scripts/stage-sidecars.mjs",
+    );
   });
 
   it("uses the committed cross-platform desktop icons", () => {

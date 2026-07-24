@@ -14,9 +14,82 @@ import {
 import { fileURLToPath } from "node:url";
 
 const sidecarNames = ["wokrouter", "wokrouterd"];
+const supportedTargetTriples = new Set([
+  "x86_64-pc-windows-msvc",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+]);
+const tauriTargets = new Map([
+  ["windows/x86_64", "x86_64-pc-windows-msvc"],
+  ["macos/x86_64", "x86_64-apple-darwin"],
+  ["macos/aarch64", "aarch64-apple-darwin"],
+  ["linux/x86_64", "x86_64-unknown-linux-gnu"],
+  ["linux/aarch64", "aarch64-unknown-linux-gnu"],
+]);
 
-export function sidecarFileName(binaryName, targetTriple, platform) {
-  const extension = platform === "win32" ? ".exe" : "";
+function normalized(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function supportedTargetTriple(targetTriple) {
+  if (!supportedTargetTriples.has(targetTriple)) {
+    throw new Error(`Unsupported target triple: ${targetTriple}`);
+  }
+  return targetTriple;
+}
+
+export function tauriTargetTriple({ platform, arch }) {
+  const key = `${normalized(platform)}/${normalized(arch)}`;
+  const targetTriple = tauriTargets.get(key);
+  if (!targetTriple) {
+    throw new Error(`Unsupported Tauri target: ${key}`);
+  }
+  return targetTriple;
+}
+
+export function resolveTargetTriple({
+  explicitTarget,
+  cargoBuildTarget,
+  tauriPlatform,
+  tauriArch,
+  hostTargetTriple,
+}) {
+  const configuredTarget = normalized(explicitTarget) ?? normalized(cargoBuildTarget);
+  if (configuredTarget) {
+    return supportedTargetTriple(configuredTarget);
+  }
+  if (normalized(tauriPlatform) || normalized(tauriArch)) {
+    return tauriTargetTriple({ platform: tauriPlatform, arch: tauriArch });
+  }
+  const nativeTarget = normalized(hostTargetTriple);
+  if (!nativeTarget) {
+    throw new Error("Unable to resolve a sidecar target triple");
+  }
+  return supportedTargetTriple(nativeTarget);
+}
+
+export function cargoBuildArguments(targetTriple) {
+  return [
+    "build",
+    "--locked",
+    "--release",
+    "--target",
+    supportedTargetTriple(targetTriple),
+    "-p",
+    "wokrouter-cli",
+    "-p",
+    "wokrouter-daemon",
+  ];
+}
+
+function targetExtension(targetTriple) {
+  return targetTriple === "x86_64-pc-windows-msvc" ? ".exe" : "";
+}
+
+export function sidecarFileName(binaryName, targetTriple) {
+  const extension = targetExtension(targetTriple);
   return `${binaryName}-${targetTriple}${extension}`;
 }
 
@@ -26,17 +99,22 @@ export function sidecarPaths({
   targetDir,
   binaryName,
   targetTriple,
-  platform,
+  hostPlatform,
 }) {
-  const path = platform === "win32" ? win32 : posix;
-  const extension = platform === "win32" ? ".exe" : "";
+  const path = hostPlatform === "win32" ? win32 : posix;
+  const extension = targetExtension(targetTriple);
   const buildTargetDir = targetDir ?? path.join(workspaceRoot, "target");
   return {
-    source: path.join(buildTargetDir, "release", `${binaryName}${extension}`),
+    source: path.join(
+      buildTargetDir,
+      targetTriple,
+      "release",
+      `${binaryName}${extension}`,
+    ),
     destination: path.join(
       tauriDir,
       "binaries",
-      sidecarFileName(binaryName, targetTriple, platform),
+      sidecarFileName(binaryName, targetTriple),
     ),
   };
 }
@@ -46,7 +124,7 @@ export function stageBuiltSidecars({
   tauriDir,
   targetDir,
   targetTriple,
-  platform,
+  hostPlatform,
   fileSystem = { copyFileSync, existsSync, mkdirSync },
 }) {
   const paths = sidecarNames.map((binaryName) =>
@@ -56,12 +134,14 @@ export function stageBuiltSidecars({
       targetDir,
       binaryName,
       targetTriple,
-      platform,
+      hostPlatform,
     }),
   );
   for (const path of paths) {
     if (!fileSystem.existsSync(path.source)) {
-      throw new Error(`Built sidecar is missing: ${path.source}`);
+      throw new Error(
+        `Built sidecar is missing for ${targetTriple}: ${path.source}`,
+      );
     }
   }
 
@@ -90,24 +170,33 @@ function main() {
   if (!rustVersion.startsWith("rustc 1.97.1 ")) {
     throw new Error(`Rust 1.97.1 is required; found ${rustVersion}`);
   }
-  const targetTriple = commandOutput(rustc, ["--print", "host-tuple"]);
-  if (!targetTriple) {
-    throw new Error("rustc did not return a host target triple");
-  }
+  const configuredTarget =
+    normalized(process.env.WOKROUTER_TARGET_TRIPLE) ||
+    normalized(process.env.CARGO_BUILD_TARGET) ||
+    normalized(process.env.TAURI_ENV_PLATFORM) ||
+    normalized(process.env.TAURI_ENV_ARCH);
+  const hostTargetTriple = configuredTarget
+    ? undefined
+    : commandOutput(rustc, ["--print", "host-tuple"]);
+  const targetTriple = resolveTargetTriple({
+    explicitTarget: process.env.WOKROUTER_TARGET_TRIPLE,
+    cargoBuildTarget: process.env.CARGO_BUILD_TARGET,
+    tauriPlatform: process.env.TAURI_ENV_PLATFORM,
+    tauriArch: process.env.TAURI_ENV_ARCH,
+    hostTargetTriple,
+  });
 
-  execFileSync(
-    cargo,
-    [
-      "build",
-      "--locked",
-      "--release",
-      "-p",
-      "wokrouter-cli",
-      "-p",
-      "wokrouter-daemon",
-    ],
-    { cwd: workspaceRoot, stdio: "inherit" },
-  );
+  process.stdout.write(`Building sidecars for ${targetTriple}\n`);
+  try {
+    execFileSync(cargo, cargoBuildArguments(targetTriple), {
+      cwd: workspaceRoot,
+      stdio: "inherit",
+    });
+  } catch (error) {
+    throw new Error(`Failed to build sidecars for ${targetTriple}`, {
+      cause: error,
+    });
+  }
   const targetDir = process.env.CARGO_TARGET_DIR
     ? resolve(workspaceRoot, process.env.CARGO_TARGET_DIR)
     : join(workspaceRoot, "target");
@@ -116,7 +205,7 @@ function main() {
     tauriDir,
     targetDir,
     targetTriple,
-    platform: process.platform,
+    hostPlatform: process.platform,
   });
   for (const path of staged) {
     process.stdout.write(`Staged ${path.destination}\n`);
