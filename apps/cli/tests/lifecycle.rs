@@ -3,7 +3,7 @@ use std::{
     io::{Read, Seek},
     net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream},
     process::{Child, Command, Output, Stdio},
-    sync::{Barrier, Mutex},
+    sync::{Barrier, Mutex, MutexGuard},
     thread,
     time::{Duration, Instant},
 };
@@ -24,13 +24,30 @@ const UNRESPONSIVE_COMMAND_GUARD: Duration = Duration::from_secs(2);
 const CONTROL_FAILURE_LIMIT: Duration = Duration::from_secs(1);
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn test_lock() -> MutexGuard<'static, ()> {
+    TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[test]
+fn ordinary_lifecycle_fixture_defers_port_assignment_to_daemon() {
+    if daemon_helper_mode() {
+        return;
+    }
+    let home = TestHome::with_daemon_assigned_port();
+
+    assert_eq!(home.committed_config().config.server.port, 0);
+}
+
 #[test]
 fn cli_starts_reports_and_stops_daemon() {
     if daemon_helper_mode() {
         return;
     }
-    let _serial = TEST_LOCK.lock().unwrap();
-    let home = TestHome::with_persisted_free_port();
+    let _serial = test_lock();
+    let home = TestHome::with_daemon_assigned_port();
 
     assert_success(wokrouter(&home, &["start"]));
 
@@ -69,8 +86,8 @@ fn duplicate_concurrent_start_returns_success_with_one_daemon_pid() {
     if daemon_helper_mode() {
         return;
     }
-    let _serial = TEST_LOCK.lock().unwrap();
-    let home = TestHome::with_persisted_free_port();
+    let _serial = test_lock();
+    let home = TestHome::with_daemon_assigned_port();
     let barrier = Barrier::new(2);
 
     thread::scope(|scope| {
@@ -99,7 +116,7 @@ fn first_start_persists_one_free_fallback_port_and_reuses_it() {
     if daemon_helper_mode() {
         return;
     }
-    let _serial = TEST_LOCK.lock().unwrap();
+    let _serial = test_lock();
     let occupied_default = TcpListener::bind((Ipv4Addr::LOCALHOST, 10101)).unwrap();
     let home = TestHome::new();
 
@@ -129,7 +146,7 @@ fn persisted_port_conflict_is_typed_and_does_not_drift_config() {
     if daemon_helper_mode() {
         return;
     }
-    let _serial = TEST_LOCK.lock().unwrap();
+    let _serial = test_lock();
     let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = occupied.local_addr().unwrap().port();
     let home = TestHome::with_persisted_port(port);
@@ -149,8 +166,8 @@ fn start_respects_the_hard_five_second_deadline() {
     if daemon_helper_mode() {
         return;
     }
-    let _serial = TEST_LOCK.lock().unwrap();
-    let home = TestHome::with_persisted_free_port();
+    let _serial = test_lock();
+    let home = TestHome::with_daemon_assigned_port();
     let started = Instant::now();
 
     let start = wokrouter_with_daemon_mode(&home, &["start"], "unresponsive");
@@ -169,7 +186,7 @@ fn status_times_out_on_an_unresponsive_control_endpoint() {
     if daemon_helper_mode() {
         return;
     }
-    let _serial = TEST_LOCK.lock().unwrap();
+    let _serial = test_lock();
     let fixture = UnresponsiveEndpoint::start();
     let started = Instant::now();
 
@@ -185,7 +202,7 @@ fn stop_times_out_on_an_unresponsive_control_endpoint() {
     if daemon_helper_mode() {
         return;
     }
-    let _serial = TEST_LOCK.lock().unwrap();
+    let _serial = test_lock();
     let fixture = UnresponsiveEndpoint::start();
     let started = Instant::now();
 
@@ -201,8 +218,8 @@ fn reload_requires_the_committed_revision_and_shutdown_closes_ipc() {
     if daemon_helper_mode() {
         return;
     }
-    let _serial = TEST_LOCK.lock().unwrap();
-    let home = TestHome::with_persisted_free_port();
+    let _serial = test_lock();
+    let home = TestHome::with_daemon_assigned_port();
     assert_success(wokrouter(&home, &["start"]));
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -317,7 +334,7 @@ struct UnresponsiveEndpoint {
 
 impl UnresponsiveEndpoint {
     fn start() -> Self {
-        let home = TestHome::with_persisted_free_port();
+        let home = TestHome::with_daemon_assigned_port();
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args([
@@ -388,11 +405,8 @@ impl TestHome {
         Self { directory, paths }
     }
 
-    fn with_persisted_free_port() -> Self {
-        let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
-        Self::with_persisted_port(port)
+    fn with_daemon_assigned_port() -> Self {
+        Self::with_persisted_port(0)
     }
 
     fn with_persisted_port(port: u16) -> Self {
