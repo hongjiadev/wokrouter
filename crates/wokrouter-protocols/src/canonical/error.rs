@@ -2,8 +2,6 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::PublicModelId;
-
 const REDACTED: &str = "[redacted]";
 
 #[derive(Clone)]
@@ -58,8 +56,8 @@ pub enum RetryClass {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ErrorKind {
     InvalidRequest,
-    ModelNotFound { model: PublicModelId },
-    UnsupportedCapability { capability: String },
+    ModelNotFound,
+    UnsupportedCapability,
     UpstreamAuth,
     RateLimited { retry_after_seconds: Option<u64> },
     UpstreamError { status: u16 },
@@ -80,14 +78,12 @@ impl GatewayError {
         Self::new(ErrorKind::InvalidRequest)
     }
 
-    pub fn unknown_model(model: PublicModelId) -> Self {
-        Self::new(ErrorKind::ModelNotFound { model })
+    pub fn unknown_model() -> Self {
+        Self::new(ErrorKind::ModelNotFound)
     }
 
-    pub fn unsupported_capability(capability: impl Into<String>) -> Self {
-        Self::new(ErrorKind::UnsupportedCapability {
-            capability: capability.into(),
-        })
+    pub fn unsupported_capability() -> Self {
+        Self::new(ErrorKind::UnsupportedCapability)
     }
 
     pub fn upstream_auth(diagnostic: impl Into<String>) -> Self {
@@ -119,8 +115,8 @@ impl GatewayError {
     pub fn code(&self) -> &'static str {
         match self.kind {
             ErrorKind::InvalidRequest => "invalid_request",
-            ErrorKind::ModelNotFound { .. } => "model_not_found",
-            ErrorKind::UnsupportedCapability { .. } => "unsupported_capability",
+            ErrorKind::ModelNotFound => "model_not_found",
+            ErrorKind::UnsupportedCapability => "unsupported_capability",
             ErrorKind::UpstreamAuth => "upstream_auth",
             ErrorKind::RateLimited { .. } => "rate_limited",
             ErrorKind::UpstreamError { .. } => "upstream_error",
@@ -132,8 +128,8 @@ impl GatewayError {
     pub fn http_status(&self) -> u16 {
         match self.kind {
             ErrorKind::InvalidRequest => 400,
-            ErrorKind::ModelNotFound { .. } => 404,
-            ErrorKind::UnsupportedCapability { .. } => 422,
+            ErrorKind::ModelNotFound => 404,
+            ErrorKind::UnsupportedCapability => 422,
             ErrorKind::RateLimited { .. } => 429,
             ErrorKind::InternalError => 500,
             ErrorKind::UpstreamAuth
@@ -150,8 +146,8 @@ impl GatewayError {
                 RetryClass::BeforeFirstEvent
             }
             ErrorKind::InvalidRequest
-            | ErrorKind::ModelNotFound { .. }
-            | ErrorKind::UnsupportedCapability { .. }
+            | ErrorKind::ModelNotFound
+            | ErrorKind::UnsupportedCapability
             | ErrorKind::InternalError => RetryClass::Never,
         }
     }
@@ -159,8 +155,8 @@ impl GatewayError {
     pub fn public_message(&self) -> &'static str {
         match self.kind {
             ErrorKind::InvalidRequest => "The request is invalid.",
-            ErrorKind::ModelNotFound { .. } => "The requested model is not available.",
-            ErrorKind::UnsupportedCapability { .. } => "The requested capability is not supported.",
+            ErrorKind::ModelNotFound => "The requested model is not available.",
+            ErrorKind::UnsupportedCapability => "The requested capability is not supported.",
             ErrorKind::UpstreamAuth => "The upstream account needs to be authenticated again.",
             ErrorKind::RateLimited { .. } => "The request was rate limited.",
             ErrorKind::UpstreamError { .. } => "The upstream service failed.",

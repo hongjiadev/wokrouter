@@ -33,7 +33,7 @@ pub struct ToolDefinition {
     pub name: String,
     pub description: Option<String>,
     pub input_schema: Value,
-    #[serde(default, flatten)]
+    #[serde(default)]
     pub extensions: BTreeMap<String, Value>,
 }
 
@@ -47,7 +47,7 @@ impl ToolDefinition {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct ReasoningOptions {
     pub effort: Option<String>,
-    #[serde(default, flatten)]
+    #[serde(default)]
     pub extensions: BTreeMap<String, Value>,
 }
 
@@ -57,6 +57,6 @@ pub struct Usage {
     pub output_tokens: u64,
     pub cached_input_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
-    #[serde(default, flatten)]
+    #[serde(default)]
     pub extensions: BTreeMap<String, Value>,
 }
