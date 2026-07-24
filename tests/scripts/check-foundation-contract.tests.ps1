@@ -45,6 +45,9 @@ function Edit-Workflow {
 
     $path = Join-Path $Root ".github/workflows/ci.yml"
     $content = Get-Content -LiteralPath $path -Raw -Encoding UTF8
+    $content = $content.Replace("`r`n", "`n")
+    $OldText = $OldText.Replace("`r`n", "`n")
+    $NewText = $NewText.Replace("`r`n", "`n")
     if (-not $content.Contains($OldText)) {
         throw "Fixture mutation source was not found: $OldText"
     }
@@ -198,6 +201,14 @@ try {
 
     Invoke-Scenario -Name "jobs outside the jobs mapping are rejected" -Test {
         $root = New-ContractFixture
+        $workflowPath = Join-Path $root ".github/workflows/ci.yml"
+        $workflow = Get-Content -LiteralPath $workflowPath -Raw -Encoding UTF8
+        $workflow = $workflow.Replace("`r`n", "`n").Replace("`n", "`r`n")
+        [System.IO.File]::WriteAllText(
+            $workflowPath,
+            $workflow,
+            [System.Text.UTF8Encoding]::new($false)
+        )
         Edit-Workflow `
             -Root $root `
             -OldText "jobs:`n" `

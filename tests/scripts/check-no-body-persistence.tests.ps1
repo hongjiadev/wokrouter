@@ -102,6 +102,17 @@ function Set-FixtureFile {
     Set-Content -LiteralPath $path -Value $Content -Encoding UTF8
 }
 
+function Convert-ToPlatformRelativePath {
+    param(
+        [Parameter(Mandatory)]
+        [string]$RelativePath,
+
+        [char]$DirectorySeparator = [System.IO.Path]::DirectorySeparatorChar
+    )
+
+    return $RelativePath.Replace("/", [string]$DirectorySeparator)
+}
+
 function Invoke-PrivacyCheck {
     param(
         [Parameter(Mandatory)]
@@ -536,13 +547,30 @@ ALTER TABLE request_body ADD CONSTRAINT tool_arguments UNIQUE (safe_value);
         Assert-CheckPasses -Root $sqlRoot -Scenario "SQL comments, strings, table, index, constraint, and type names"
     }
 
+    Invoke-Scenario -Name "platform relative paths support both directory separators" -Test {
+        $relativePath = "crates/wokrouter-storage/src/config/model.rs"
+        $unixPath = Convert-ToPlatformRelativePath `
+            -RelativePath $relativePath `
+            -DirectorySeparator ([char]"/")
+        if ($unixPath -ne $relativePath) {
+            throw "Unix separator conversion returned '$unixPath'."
+        }
+        $windowsPath = Convert-ToPlatformRelativePath `
+            -RelativePath $relativePath `
+            -DirectorySeparator ([char]"\")
+        $expectedWindowsPath = $relativePath.Replace("/", "\")
+        if ($windowsPath -ne $expectedWindowsPath) {
+            throw "Windows separator conversion returned '$windowsPath'."
+        }
+    }
+
     Invoke-Scenario -Name "missing persistent model file fails closed" -Test {
         $rustRoot = New-PrivacyFixture
         $relativePath = "crates/wokrouter-storage/src/config/model.rs"
         Remove-Item -LiteralPath (Join-Path $rustRoot $relativePath) -Force
         Assert-InventoryFails `
             -Root $rustRoot `
-            -ExpectedText $relativePath.Replace("/", "\") `
+            -ExpectedText (Convert-ToPlatformRelativePath -RelativePath $relativePath) `
             -Scenario "missing persistent model file"
     }
 
