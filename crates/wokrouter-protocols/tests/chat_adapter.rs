@@ -323,6 +323,103 @@ fn all_official_finish_reasons_are_encoded_verbatim() {
 }
 
 #[test]
+fn outbound_function_names_use_the_canonical_ascii_contract() {
+    let invalid_names = [
+        ("empty", String::new()),
+        ("invalid character", "bad name".to_owned()),
+        ("non-ASCII", "工具".to_owned()),
+        ("overlong", "a".repeat(65)),
+    ];
+
+    for (case, name) in invalid_names {
+        let tool_delta = CanonicalEvent::ToolCallDelta {
+            item_id: "tool_1".to_owned(),
+            call_id: "call_1".to_owned(),
+            name,
+            delta: "{}".to_owned(),
+        };
+        let events = [
+            CanonicalEvent::Created {
+                response_id: "chatcmpl_invalid_name".to_owned(),
+            },
+            tool_delta.clone(),
+            CanonicalEvent::Usage(Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cached_input_tokens: None,
+                reasoning_tokens: None,
+                extensions: BTreeMap::new(),
+            }),
+            CanonicalEvent::Completed,
+        ];
+
+        assert_eq!(
+            ChatCodec::encode_response(encode_context(ChatFinishReason::ToolCalls), &events)
+                .unwrap_err(),
+            GatewayError::invalid_request(),
+            "non-stream accepted {case} function name"
+        );
+
+        let mut codec = ChatCodec::new(encode_context(ChatFinishReason::ToolCalls));
+        codec.encode_chunk(&events[0]).unwrap();
+        assert_eq!(
+            codec.encode_chunk(&tool_delta).unwrap_err(),
+            GatewayError::invalid_request(),
+            "stream accepted {case} function name"
+        );
+    }
+}
+
+#[test]
+fn usage_details_merge_unknown_siblings_without_overriding_canonical_counts() {
+    let response = ChatCodec::encode_response(
+        encode_context(ChatFinishReason::Stop),
+        &[
+            CanonicalEvent::Created {
+                response_id: "chatcmpl_usage_merge".to_owned(),
+            },
+            CanonicalEvent::Usage(Usage {
+                input_tokens: 11,
+                output_tokens: 7,
+                cached_input_tokens: Some(5),
+                reasoning_tokens: Some(3),
+                extensions: BTreeMap::from([
+                    ("prompt_tokens".to_owned(), json!(999)),
+                    (
+                        "prompt_tokens_details".to_owned(),
+                        json!({
+                            "cached_tokens": 998,
+                            "audio_tokens": 2
+                        }),
+                    ),
+                    (
+                        "completion_tokens_details".to_owned(),
+                        json!({
+                            "reasoning_tokens": 997,
+                            "accepted_prediction_tokens": 4
+                        }),
+                    ),
+                    ("vendor_usage".to_owned(), json!("preserved")),
+                ]),
+            }),
+            CanonicalEvent::Completed,
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(response["usage"]["prompt_tokens"], 11);
+    assert_eq!(
+        response["usage"]["prompt_tokens_details"],
+        json!({"cached_tokens": 5, "audio_tokens": 2})
+    );
+    assert_eq!(
+        response["usage"]["completion_tokens_details"],
+        json!({"reasoning_tokens": 3, "accepted_prediction_tokens": 4})
+    );
+    assert_eq!(response["usage"]["vendor_usage"], "preserved");
+}
+
+#[test]
 fn stream_keeps_parallel_tool_argument_deltas_as_unparsed_strings() {
     let expected = fixture_json("stream/ordered.json");
     let mut codec = ChatCodec::new(encode_context(ChatFinishReason::ToolCalls));

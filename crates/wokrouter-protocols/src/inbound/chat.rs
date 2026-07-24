@@ -11,6 +11,7 @@ use crate::{
         CanonicalRequest, GatewayError, ImageDetail, InputItem, PublicModelId, ReasoningOptions,
         RequestId, ToolDefinition,
     },
+    valid_chat_function_name,
 };
 
 const MESSAGES_EXTENSION_KEY: &str = "chat.messages";
@@ -506,7 +507,7 @@ fn decode_tool_calls(tool_calls: Vec<ChatToolCall>) -> Result<Value, GatewayErro
     for tool_call in tool_calls {
         if tool_call.kind != "function"
             || tool_call.id.is_empty()
-            || !valid_function_name(&tool_call.function.name)
+            || !valid_chat_function_name(&tool_call.function.name)
             || !ids.insert(tool_call.id.clone())
         {
             return Err(GatewayError::invalid_request());
@@ -544,7 +545,7 @@ fn decode_tools(tools: Vec<ChatTool>) -> Result<Vec<ToolDefinition>, GatewayErro
 fn decode_tool(wire: ChatTool) -> Result<ToolDefinition, GatewayError> {
     let parameters = wire.function.parameters.unwrap_or_else(|| json!({}));
     if wire.kind != "function"
-        || !valid_function_name(&wire.function.name)
+        || !valid_chat_function_name(&wire.function.name)
         || !parameters.is_object()
     {
         return Err(GatewayError::invalid_request());
@@ -618,14 +619,6 @@ fn validate_non_empty(value: &str) -> Result<(), GatewayError> {
     } else {
         Ok(())
     }
-}
-
-fn valid_function_name(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn insert_name(
