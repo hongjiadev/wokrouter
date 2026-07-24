@@ -1,11 +1,14 @@
 use std::{
     fs::{self, File},
-    io::BufReader,
     net::{IpAddr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
+use rustls::pki_types::{
+    CertificateDer, PrivateKeyDer,
+    pem::{Error as PemError, PemObject},
+};
 use wokrouter_core::secret::SecretRef;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,18 +42,17 @@ impl TlsConfig {
 
         let certificate_file = File::open(&certificate_path)
             .map_err(|_| TlsConfigError::Unreadable(TlsFileKind::Certificate))?;
-        let certificates = rustls_pemfile::certs(&mut BufReader::new(certificate_file))
+        let certificates = CertificateDer::pem_reader_iter(certificate_file)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| TlsConfigError::InvalidPem(TlsFileKind::Certificate))?;
+            .map_err(|error| classify_pem_error(error, TlsFileKind::Certificate))?;
         if certificates.is_empty() {
             return Err(TlsConfigError::MissingPemItem(TlsFileKind::Certificate));
         }
 
         let private_key_file = File::open(&private_key_path)
             .map_err(|_| TlsConfigError::Unreadable(TlsFileKind::PrivateKey))?;
-        let private_key = rustls_pemfile::private_key(&mut BufReader::new(private_key_file))
-            .map_err(|_| TlsConfigError::InvalidPem(TlsFileKind::PrivateKey))?
-            .ok_or(TlsConfigError::MissingPemItem(TlsFileKind::PrivateKey))?;
+        let private_key = PrivateKeyDer::from_pem_reader(private_key_file)
+            .map_err(|error| classify_pem_error(error, TlsFileKind::PrivateKey))?;
 
         let server_config = rustls::ServerConfig::builder()
             .with_no_client_auth()
@@ -62,6 +64,13 @@ impl TlsConfig {
             private_key_path,
             server_config: Arc::new(server_config),
         })
+    }
+}
+
+fn classify_pem_error(error: PemError, kind: TlsFileKind) -> TlsConfigError {
+    match error {
+        PemError::NoItemsFound => TlsConfigError::MissingPemItem(kind),
+        _ => TlsConfigError::InvalidPem(kind),
     }
 }
 
