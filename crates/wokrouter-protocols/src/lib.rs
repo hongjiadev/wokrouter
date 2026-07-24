@@ -4,4 +4,7 @@ pub mod stream;
 mod inbound;
 mod outbound;
 
-pub use outbound::{ResponsesCodec, ResponsesEncodeContext, ResponsesResponseTemplate};
+pub use outbound::{
+    ChatCodec, ChatEncodeContext, ChatFinishReason, ChatResponseTemplate, ResponsesCodec,
+    ResponsesEncodeContext, ResponsesResponseTemplate,
+};
