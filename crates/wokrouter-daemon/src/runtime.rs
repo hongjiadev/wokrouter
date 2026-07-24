@@ -16,10 +16,20 @@ use wokrouter_control::{
 use wokrouter_platform::AppPaths;
 use wokrouter_storage::{AppConfig, ConfigStore, StorageError};
 
+use crate::data_plane::{DataPlaneState, build_data_plane};
+
 const DEFAULT_DATA_PLANE_PORT: u16 = 10101;
 const PID_FILE_NAME: &str = "wokrouterd.pid";
 
 pub struct DaemonRuntime;
+
+pub struct DataPlaneRuntime;
+
+impl DataPlaneRuntime {
+    pub fn assemble(state: DataPlaneState) -> axum::Router {
+        build_data_plane(state)
+    }
+}
 
 impl DaemonRuntime {
     pub async fn start(paths: AppPaths) -> Result<RunningDaemon, DaemonError> {
