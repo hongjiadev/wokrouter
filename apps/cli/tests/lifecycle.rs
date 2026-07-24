@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     fs,
     io::{Read, Seek},
     net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream},
@@ -39,6 +40,35 @@ fn ordinary_lifecycle_fixture_defers_port_assignment_to_daemon() {
     let home = TestHome::with_daemon_assigned_port();
 
     assert_eq!(home.committed_config().config.server.port, 0);
+}
+
+#[test]
+fn lifecycle_commands_isolate_linux_xdg_directories() {
+    let home = TestHome::new();
+    let command = wokrouter_command(&home, &["status"]);
+    let expected_config = home.directory.path().join("config");
+    let expected_state = home.directory.path().join("state");
+
+    assert_eq!(
+        command
+            .get_envs()
+            .find(|(key, _)| *key == OsStr::new("XDG_CONFIG_HOME"))
+            .and_then(|(_, value)| value),
+        Some(expected_config.as_os_str())
+    );
+    assert_eq!(
+        command
+            .get_envs()
+            .find(|(key, _)| *key == OsStr::new("XDG_STATE_HOME"))
+            .and_then(|(_, value)| value),
+        Some(expected_state.as_os_str())
+    );
+    assert!(matches!(
+        command
+            .get_envs()
+            .find(|(key, _)| *key == OsStr::new("XDG_RUNTIME_DIR")),
+        Some((_, None))
+    ));
 }
 
 #[test]
@@ -336,6 +366,7 @@ impl UnresponsiveEndpoint {
     fn start() -> Self {
         let home = TestHome::with_daemon_assigned_port();
         let mut command = Command::new(std::env::current_exe().unwrap());
+        apply_test_home_environment(&mut command, &home);
         command
             .args([
                 "--exact",
@@ -343,10 +374,6 @@ impl UnresponsiveEndpoint {
                 "--nocapture",
                 "--test-threads=1",
             ])
-            .env("APPDATA", home.directory.path().join("config"))
-            .env("LOCALAPPDATA", home.directory.path().join("state"))
-            .env("USERPROFILE", home.directory.path())
-            .env("HOME", home.directory.path())
             .env("WOKROUTER_TEST_DAEMON", "1")
             .env("WOKROUTER_TEST_DAEMON_MODE", "unresponsive")
             .stdin(Stdio::null())
@@ -479,12 +506,9 @@ fn wokrouter_with_daemon_mode(home: &TestHome, arguments: &[&str], mode: &str) -
 
 fn wokrouter_command(home: &TestHome, arguments: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_wokrouter"));
+    apply_test_home_environment(&mut command, home);
     command
         .args(arguments)
-        .env("APPDATA", home.directory.path().join("config"))
-        .env("LOCALAPPDATA", home.directory.path().join("state"))
-        .env("USERPROFILE", home.directory.path())
-        .env("HOME", home.directory.path())
         .env("WOKROUTER_DAEMON_EXE", std::env::current_exe().unwrap())
         .env(
             "WOKROUTER_DAEMON_ARGS",
@@ -495,6 +519,17 @@ fn wokrouter_command(home: &TestHome, arguments: &[&str]) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command
+}
+
+fn apply_test_home_environment(command: &mut Command, home: &TestHome) {
+    command
+        .env("APPDATA", home.directory.path().join("config"))
+        .env("LOCALAPPDATA", home.directory.path().join("state"))
+        .env("USERPROFILE", home.directory.path())
+        .env("HOME", home.directory.path())
+        .env("XDG_CONFIG_HOME", home.directory.path().join("config"))
+        .env("XDG_STATE_HOME", home.directory.path().join("state"))
+        .env_remove("XDG_RUNTIME_DIR");
 }
 
 fn run_command(mut command: Command, timeout: Duration) -> Output {
