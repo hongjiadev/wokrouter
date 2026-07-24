@@ -5,6 +5,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use crate::{
+    ANTHROPIC_KNOWN_BLOCKS_EXTENSION_KEY,
     canonical::{CanonicalEvent, CanonicalRequest, GatewayError, PublicModelId, RequestId, Usage},
     inbound::anthropic::REQUEST_EXTENSION_KEY,
     stream::encode_sse,
@@ -12,6 +13,7 @@ use crate::{
 
 const MAX_OUTPUT_ITEMS: usize = 4_096;
 const MAX_IDENTIFIER_BYTES: usize = 512;
+const MAX_OPAQUE_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_RETAINED_VALUE_BYTES: usize = 1024 * 1024;
 const MAX_AGGREGATE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_MESSAGE_REQUEST_BYTES: usize = 16 * 1024 * 1024;
@@ -70,6 +72,7 @@ pub trait TokenCounter {
 struct AnthropicLimits {
     max_output_items: usize,
     max_identifier_bytes: usize,
+    max_opaque_payload_bytes: usize,
     max_value_bytes: usize,
     max_aggregate_bytes: usize,
 }
@@ -79,6 +82,7 @@ impl Default for AnthropicLimits {
         Self {
             max_output_items: MAX_OUTPUT_ITEMS,
             max_identifier_bytes: MAX_IDENTIFIER_BYTES,
+            max_opaque_payload_bytes: MAX_OPAQUE_PAYLOAD_BYTES,
             max_value_bytes: MAX_RETAINED_VALUE_BYTES,
             max_aggregate_bytes: MAX_AGGREGATE_BYTES,
         }
@@ -198,6 +202,10 @@ impl AnthropicCodec {
             || validated.tools != request.tools
             || validated.stream != request.stream
             || validated.reasoning != request.reasoning
+            || validated
+                .extensions
+                .get(ANTHROPIC_KNOWN_BLOCKS_EXTENSION_KEY)
+                != request.extensions.get(ANTHROPIC_KNOWN_BLOCKS_EXTENSION_KEY)
         {
             return Err(GatewayError::unsupported_capability());
         }
@@ -429,7 +437,7 @@ impl AnthropicCodec {
             .thinking_signatures
             .get(item_id)
             .ok_or_else(GatewayError::unsupported_capability)?;
-        self.limits.validate_identifier(signature)?;
+        self.limits.validate_opaque_payload(signature)?;
         let mut wires = self.close_active()?;
         let index = self.register_item(item_id)?;
         self.active = Some(ActiveBlock::Reasoning {
@@ -572,7 +580,7 @@ impl AnthropicCodec {
         }
         for (item_id, signature) in &self.context.response.thinking_signatures {
             self.limits.validate_identifier(item_id)?;
-            self.limits.validate_identifier(signature)?;
+            self.limits.validate_opaque_payload(signature)?;
         }
         self.context_validated = true;
         Ok(())
@@ -741,7 +749,7 @@ impl AnthropicResponseAggregator {
 
     fn completed(&mut self) -> Result<(), GatewayError> {
         self.require_created()?;
-        if self.usage.is_none() {
+        if self.usage.is_none() || self.outputs.is_empty() {
             return Err(GatewayError::invalid_request());
         }
         self.terminal = true;
@@ -877,7 +885,7 @@ impl AnthropicResponseAggregator {
         }
         for (item_id, signature) in &self.context.response.thinking_signatures {
             self.limits.validate_identifier(item_id)?;
-            self.limits.validate_identifier(signature)?;
+            self.limits.validate_opaque_payload(signature)?;
         }
         Ok(())
     }
@@ -897,6 +905,14 @@ impl AnthropicLimits {
             Ok(())
         } else {
             Err(GatewayError::invalid_request())
+        }
+    }
+
+    fn validate_opaque_payload(&self, value: &str) -> Result<(), GatewayError> {
+        if value.is_empty() || value.len() > self.max_opaque_payload_bytes {
+            Err(GatewayError::invalid_request())
+        } else {
+            Ok(())
         }
     }
 }
@@ -1021,6 +1037,7 @@ mod tests {
         AnthropicLimits {
             max_output_items: 2,
             max_identifier_bytes: 8,
+            max_opaque_payload_bytes: 16,
             max_value_bytes: 256,
             max_aggregate_bytes: 8,
         }
@@ -1143,6 +1160,30 @@ mod tests {
         assert_eq!(
             AnthropicCodec::encode_response_with_limits(context(), &events, tiny_limits())
                 .unwrap_err(),
+            GatewayError::invalid_request()
+        );
+    }
+
+    #[test]
+    fn private_limit_bounds_opaque_thinking_signatures() {
+        let mut context = context();
+        context
+            .response
+            .thinking_signatures
+            .insert("think".to_owned(), "x".repeat(17));
+        assert_eq!(
+            AnthropicCodec::encode_response_with_limits(
+                context,
+                &[
+                    created(),
+                    CanonicalEvent::ReasoningDelta {
+                        item_id: "think".to_owned(),
+                        delta: "safe".to_owned(),
+                    },
+                ],
+                tiny_limits(),
+            )
+            .unwrap_err(),
             GatewayError::invalid_request()
         );
     }

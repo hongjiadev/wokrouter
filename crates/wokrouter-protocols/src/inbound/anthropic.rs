@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::{
-    AnthropicCodec,
+    ANTHROPIC_KNOWN_BLOCKS_EXTENSION_KEY, AnthropicCodec,
     canonical::{
         CanonicalRequest, GatewayError, InputItem, PublicModelId, ReasoningOptions, RequestId,
         ToolDefinition,
@@ -19,6 +19,7 @@ const MAX_MESSAGES: usize = 4_096;
 const MAX_CONTENT_BLOCKS: usize = 16_384;
 const MAX_TOOLS: usize = 4_096;
 const MAX_IDENTIFIER_BYTES: usize = 512;
+const MAX_OPAQUE_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RETAINED_VALUE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
@@ -28,6 +29,7 @@ pub(super) struct AnthropicInboundLimits {
     max_content_blocks: usize,
     max_tools: usize,
     max_identifier_bytes: usize,
+    max_opaque_payload_bytes: usize,
     max_retained_value_bytes: usize,
 }
 
@@ -39,6 +41,7 @@ impl Default for AnthropicInboundLimits {
             max_content_blocks: MAX_CONTENT_BLOCKS,
             max_tools: MAX_TOOLS,
             max_identifier_bytes: MAX_IDENTIFIER_BYTES,
+            max_opaque_payload_bytes: MAX_OPAQUE_PAYLOAD_BYTES,
             max_retained_value_bytes: MAX_RETAINED_VALUE_BYTES,
         }
     }
@@ -54,6 +57,8 @@ struct AnthropicRequest {
     system: Option<AnthropicContent>,
     #[serde(default)]
     tools: Vec<AnthropicToolWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<AnthropicToolChoiceWire>,
     #[serde(default)]
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -204,6 +209,45 @@ struct AnthropicTool {
 }
 
 #[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum AnthropicToolChoiceWire {
+    Known(AnthropicToolChoice),
+    Unknown(Value),
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "type")]
+enum AnthropicToolChoice {
+    #[serde(rename = "auto")]
+    Auto {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disable_parallel_tool_use: Option<bool>,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    #[serde(rename = "any")]
+    Any {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disable_parallel_tool_use: Option<bool>,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    #[serde(rename = "tool")]
+    Tool {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disable_parallel_tool_use: Option<bool>,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    #[serde(rename = "none")]
+    None {
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+}
+
+#[derive(Deserialize, Serialize)]
 struct AnthropicThinkingConfig {
     #[serde(rename = "type")]
     kind: String,
@@ -248,11 +292,19 @@ impl AnthropicCodec {
         limits.validate_value(&retained)?;
 
         let mut input = Vec::new();
+        let mut known_blocks = Vec::new();
         if let Some(system) = &wire.system {
-            extract_content(system, &mut input, limits)?;
+            extract_content(system, None, None, &mut input, &mut known_blocks, limits)?;
         }
-        for message in &wire.messages {
-            extract_content(&message.content, &mut input, limits)?;
+        for (message_index, message) in wire.messages.iter().enumerate() {
+            extract_content(
+                &message.content,
+                Some(message_index),
+                Some(message.role),
+                &mut input,
+                &mut known_blocks,
+                limits,
+            )?;
         }
         let tools = wire
             .tools
@@ -275,6 +327,16 @@ impl AnthropicCodec {
                 .unwrap_or_default(),
         });
 
+        let mut extensions = BTreeMap::from([(REQUEST_EXTENSION_KEY.to_owned(), retained)]);
+        if !known_blocks.is_empty() {
+            let known_blocks = Value::Array(known_blocks);
+            limits.validate_value(&known_blocks)?;
+            extensions.insert(
+                ANTHROPIC_KNOWN_BLOCKS_EXTENSION_KEY.to_owned(),
+                known_blocks,
+            );
+        }
+
         Ok(CanonicalRequest {
             request_id,
             model: PublicModelId::new(wire.model),
@@ -283,7 +345,7 @@ impl AnthropicCodec {
             tools,
             stream: wire.stream,
             reasoning,
-            extensions: BTreeMap::from([(REQUEST_EXTENSION_KEY.to_owned(), retained)]),
+            extensions,
         })
     }
 }
@@ -326,10 +388,11 @@ fn validate_request(
                 }
                 limits.validate_value(&tool.input_schema)?;
             }
-            AnthropicToolWire::Unsupported(_) => {
-                return Err(GatewayError::unsupported_capability());
-            }
+            AnthropicToolWire::Unsupported(value) => return classify_unknown_tool(value),
         }
+    }
+    if let Some(tool_choice) = &wire.tool_choice {
+        validate_tool_choice(tool_choice, limits)?;
     }
     if let Some(thinking) = &wire.thinking {
         match thinking.kind.as_str() {
@@ -408,17 +471,15 @@ fn validate_content(
                         ..
                     }) if matches!(context, ContentContext::Assistant) => {
                         if let Some(signature) = signature {
-                            limits.validate_identifier(signature)?;
+                            limits.validate_opaque_payload(signature)?;
                         }
                     }
                     AnthropicContentBlock::Known(
                         AnthropicKnownContentBlock::RedactedThinking { data, .. },
                     ) if matches!(context, ContentContext::Assistant) => {
-                        limits.validate_identifier(data)?
+                        limits.validate_opaque_payload(data)?
                     }
-                    AnthropicContentBlock::Unknown(_) => {
-                        return Err(GatewayError::unsupported_capability());
-                    }
+                    AnthropicContentBlock::Unknown(value) => return classify_unknown_block(value),
                     _ => return Err(GatewayError::invalid_request()),
                 }
             }
@@ -455,7 +516,7 @@ fn validate_source(
                 return Err(GatewayError::invalid_request());
             }
         }
-        AnthropicSource::Unknown(_) => return Err(GatewayError::unsupported_capability()),
+        AnthropicSource::Unknown(value) => return classify_unknown_source(value),
     }
     limits
         .validate_value(&serde_json::to_value(source).map_err(|_| GatewayError::invalid_request())?)
@@ -463,13 +524,16 @@ fn validate_source(
 
 fn extract_content(
     content: &AnthropicContent,
+    message_index: Option<usize>,
+    role: Option<AnthropicRole>,
     input: &mut Vec<InputItem>,
+    known_blocks: &mut Vec<Value>,
     limits: AnthropicInboundLimits,
 ) -> Result<(), GatewayError> {
     match content {
         AnthropicContent::Text(text) => input.push(InputItem::Text { text: text.clone() }),
         AnthropicContent::Blocks(blocks) => {
-            for block in blocks {
+            for (block_index, block) in blocks.iter().enumerate() {
                 match block {
                     AnthropicContentBlock::Known(AnthropicKnownContentBlock::Text {
                         text, ..
@@ -489,7 +553,29 @@ fn extract_content(
                         call_id: tool_use_id.clone(),
                         output: content.clone().unwrap_or_else(|| json!("")),
                     }),
-                    _ => {}
+                    AnthropicContentBlock::Known(
+                        known @ (AnthropicKnownContentBlock::Document { .. }
+                        | AnthropicKnownContentBlock::ToolUse { .. }
+                        | AnthropicKnownContentBlock::Thinking { .. }
+                        | AnthropicKnownContentBlock::RedactedThinking { .. }),
+                    ) => {
+                        let message_index =
+                            message_index.ok_or_else(GatewayError::invalid_request)?;
+                        let role = role.ok_or_else(GatewayError::invalid_request)?;
+                        known_blocks.push(json!({
+                            "message_index": message_index,
+                            "block_index": block_index,
+                            "role": match role {
+                                AnthropicRole::User => "user",
+                                AnthropicRole::Assistant => "assistant",
+                            },
+                            "block": serde_json::to_value(known)
+                                .map_err(|_| GatewayError::invalid_request())?,
+                        }));
+                    }
+                    AnthropicContentBlock::Unknown(_) => {
+                        return Err(GatewayError::unsupported_capability());
+                    }
                 }
             }
         }
@@ -532,6 +618,73 @@ impl AnthropicInboundLimits {
             Err(GatewayError::invalid_request())
         }
     }
+
+    fn validate_opaque_payload(&self, value: &str) -> Result<(), GatewayError> {
+        if value.is_empty() || value.len() > self.max_opaque_payload_bytes {
+            Err(GatewayError::invalid_request())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn raw_type(value: &Value) -> Option<&str> {
+    value.as_object()?.get("type")?.as_str()
+}
+
+fn classify_unknown_block(value: &Value) -> Result<usize, GatewayError> {
+    match raw_type(value) {
+        Some(
+            "text" | "image" | "document" | "tool_use" | "tool_result" | "thinking"
+            | "redacted_thinking",
+        )
+        | None => Err(GatewayError::invalid_request()),
+        Some(_) => Err(GatewayError::unsupported_capability()),
+    }
+}
+
+fn classify_unknown_source(value: &Value) -> Result<(), GatewayError> {
+    match raw_type(value) {
+        Some("base64" | "url") | None => Err(GatewayError::invalid_request()),
+        Some(_) => Err(GatewayError::unsupported_capability()),
+    }
+}
+
+fn classify_unknown_tool(value: &Value) -> Result<(), GatewayError> {
+    match raw_type(value) {
+        None => Err(GatewayError::invalid_request()),
+        Some(_) => Err(GatewayError::unsupported_capability()),
+    }
+}
+
+fn validate_tool_choice(
+    choice: &AnthropicToolChoiceWire,
+    limits: AnthropicInboundLimits,
+) -> Result<(), GatewayError> {
+    match choice {
+        AnthropicToolChoiceWire::Known(AnthropicToolChoice::Tool { name, extra, .. }) => {
+            limits.validate_identifier(name)?;
+            if extra.contains_key("name") {
+                return Err(GatewayError::invalid_request());
+            }
+            Ok(())
+        }
+        AnthropicToolChoiceWire::Known(
+            AnthropicToolChoice::Auto { extra, .. }
+            | AnthropicToolChoice::Any { extra, .. }
+            | AnthropicToolChoice::None { extra, .. },
+        ) => {
+            if extra.contains_key("name") {
+                Err(GatewayError::invalid_request())
+            } else {
+                Ok(())
+            }
+        }
+        AnthropicToolChoiceWire::Unknown(value) => match raw_type(value) {
+            Some("auto" | "any" | "tool" | "none") | None => Err(GatewayError::invalid_request()),
+            Some(_) => Err(GatewayError::unsupported_capability()),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -545,6 +698,7 @@ mod tests {
             max_content_blocks: 2,
             max_tools: 1,
             max_identifier_bytes: 8,
+            max_opaque_payload_bytes: 16,
             max_retained_value_bytes: 512,
         }
     }
@@ -605,6 +759,24 @@ mod tests {
             decode(oversized).unwrap_err(),
             GatewayError::invalid_request()
         );
+    }
+
+    #[test]
+    fn private_limit_bounds_opaque_thinking_payloads() {
+        for block in [
+            json!({"type": "thinking", "thinking": "safe", "signature": "x".repeat(17)}),
+            json!({"type": "redacted_thinking", "data": "x".repeat(17)}),
+        ] {
+            assert_eq!(
+                decode(json!({
+                    "model": "model",
+                    "max_tokens": 32,
+                    "messages": [{"role": "assistant", "content": [block]}],
+                }))
+                .unwrap_err(),
+                GatewayError::invalid_request()
+            );
+        }
     }
 
     #[test]
