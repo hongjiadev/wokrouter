@@ -1,0 +1,122 @@
+[
+  {
+    "event": "response.created",
+    "data": {
+      "type": "response.created",
+      "response": {
+        "id": "resp_fixture",
+        "object": "response",
+        "status": "in_progress"
+      },
+      "sequence_number": 0
+    }
+  },
+  {
+    "event": "response.output_text.delta",
+    "data": {
+      "type": "response.output_text.delta",
+      "item_id": "msg_1",
+      "output_index": 0,
+      "content_index": 0,
+      "delta": "你好",
+      "sequence_number": 1
+    }
+  },
+  {
+    "event": "response.reasoning_text.delta",
+    "data": {
+      "type": "response.reasoning_text.delta",
+      "item_id": "reasoning_1",
+      "output_index": 0,
+      "content_index": 0,
+      "delta": "先检查",
+      "sequence_number": 2
+    }
+  },
+  {
+    "event": "response.function_call_arguments.delta",
+    "data": {
+      "type": "response.function_call_arguments.delta",
+      "item_id": "tool_1",
+      "call_id": "call_1",
+      "output_index": 0,
+      "delta": "{\"path\":\"配置.toml\"}",
+      "sequence_number": 3
+    }
+  },
+  {
+    "event": "response.usage",
+    "data": {
+      "type": "response.usage",
+      "usage": {
+        "input_tokens": 10,
+        "input_tokens_details": {
+          "cached_tokens": 3
+        },
+        "output_tokens": 5,
+        "output_tokens_details": {
+          "reasoning_tokens": 2
+        },
+        "total_tokens": 15,
+        "vendor_usage": "kept"
+      },
+      "sequence_number": 4
+    }
+  },
+  {
+    "event": "response.completed",
+    "data": {
+      "type": "response.completed",
+      "response": {
+        "id": "resp_fixture",
+        "object": "response",
+        "status": "completed",
+        "output": [
+          {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "你好",
+                "annotations": []
+              }
+            ]
+          },
+          {
+            "id": "reasoning_1",
+            "type": "reasoning",
+            "summary": [
+              {
+                "type": "summary_text",
+                "text": "先检查"
+              }
+            ]
+          },
+          {
+            "id": "tool_1",
+            "type": "function_call",
+            "call_id": "call_1",
+            "arguments": "{\"path\":\"配置.toml\"}",
+            "status": "completed"
+          }
+        ],
+        "usage": {
+          "input_tokens": 10,
+          "input_tokens_details": {
+            "cached_tokens": 3
+          },
+          "output_tokens": 5,
+          "output_tokens_details": {
+            "reasoning_tokens": 2
+          },
+          "total_tokens": 15,
+          "vendor_usage": "kept"
+        }
+      },
+      "sequence_number": 5
+    }
+  }
+]

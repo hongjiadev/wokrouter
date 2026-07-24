@@ -1,0 +1,49 @@
+{
+  "id": "resp_fixture",
+  "object": "response",
+  "status": "completed",
+  "output": [
+    {
+      "id": "msg_1",
+      "type": "message",
+      "role": "assistant",
+      "status": "completed",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "你好",
+          "annotations": []
+        }
+      ]
+    },
+    {
+      "id": "reasoning_1",
+      "type": "reasoning",
+      "summary": [
+        {
+          "type": "summary_text",
+          "text": "先检查"
+        }
+      ]
+    },
+    {
+      "id": "tool_1",
+      "type": "function_call",
+      "call_id": "call_1",
+      "arguments": "{\"path\":\"配置.toml\"}",
+      "status": "completed"
+    }
+  ],
+  "usage": {
+    "input_tokens": 10,
+    "input_tokens_details": {
+      "cached_tokens": 3
+    },
+    "output_tokens": 5,
+    "output_tokens_details": {
+      "reasoning_tokens": 2
+    },
+    "total_tokens": 15,
+    "vendor_usage": "kept"
+  }
+}
