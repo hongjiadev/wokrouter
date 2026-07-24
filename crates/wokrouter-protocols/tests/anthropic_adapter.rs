@@ -316,6 +316,29 @@ fn tool_choice_modes_are_explicit_and_malformed_known_modes_are_invalid() {
 }
 
 #[test]
+fn tool_choice_none_rejects_disable_parallel_tool_use() {
+    let body = serde_json::json!({
+        "model": "claude-test",
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": "safe"}],
+        "tool_choice": {
+            "type": "none",
+            "disable_parallel_tool_use": true
+        }
+    });
+
+    assert_eq!(
+        AnthropicCodec::decode_message(
+            RequestId::new("req_none_parallel"),
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap_err()
+        .code(),
+        "invalid_request"
+    );
+}
+
+#[test]
 fn malformed_known_variants_are_invalid_but_future_variants_are_unsupported() {
     for body in [
         serde_json::json!({

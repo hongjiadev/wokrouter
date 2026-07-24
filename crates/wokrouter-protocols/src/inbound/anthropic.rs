@@ -670,11 +670,16 @@ fn validate_tool_choice(
             Ok(())
         }
         AnthropicToolChoiceWire::Known(
-            AnthropicToolChoice::Auto { extra, .. }
-            | AnthropicToolChoice::Any { extra, .. }
-            | AnthropicToolChoice::None { extra, .. },
+            AnthropicToolChoice::Auto { extra, .. } | AnthropicToolChoice::Any { extra, .. },
         ) => {
             if extra.contains_key("name") {
+                Err(GatewayError::invalid_request())
+            } else {
+                Ok(())
+            }
+        }
+        AnthropicToolChoiceWire::Known(AnthropicToolChoice::None { extra }) => {
+            if extra.contains_key("name") || extra.contains_key("disable_parallel_tool_use") {
                 Err(GatewayError::invalid_request())
             } else {
                 Ok(())
