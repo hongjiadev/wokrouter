@@ -26,6 +26,16 @@ function renderHealth() {
   return render(<DaemonHealth />, { wrapper: Wrapper });
 }
 
+function deferred<T>() {
+  let reject!: (reason?: unknown) => void;
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    reject = rejectPromise;
+    resolve = resolvePromise;
+  });
+  return { promise, reject, resolve };
+}
+
 describe("DaemonHealth", () => {
   beforeEach(() => {
     vi.mocked(getDaemonStatus).mockReset();
@@ -146,5 +156,59 @@ describe("DaemonHealth", () => {
     expect(await screen.findByText("Daemon running")).toBeInTheDocument();
     expect(screen.getByText("0.1.1")).toBeInTheDocument();
     expect(getDaemonStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps one live region mounted from loading through start success", async () => {
+    const initialStatus = deferred<{
+      state: "stopped";
+      version: string;
+    }>();
+    const startResult = deferred<void>();
+    vi.mocked(getDaemonStatus)
+      .mockReturnValueOnce(initialStatus.promise)
+      .mockResolvedValueOnce({ state: "running", version: "0.1.1" });
+    vi.mocked(startDaemon).mockReturnValue(startResult.promise);
+    const user = userEvent.setup();
+
+    renderHealth();
+
+    const liveRegion = screen.getByRole("status");
+    expect(liveRegion).toHaveTextContent("Checking daemon status");
+    initialStatus.resolve({ state: "stopped", version: "0.1.0" });
+    expect(await screen.findByText("Daemon stopped")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toBe(liveRegion);
+    expect(liveRegion).toHaveTextContent("Daemon stopped. Version 0.1.0");
+
+    await user.click(screen.getByRole("button", { name: "Start WokRouter" }));
+    expect(screen.getByRole("status")).toBe(liveRegion);
+    expect(liveRegion).toHaveTextContent("Starting WokRouter");
+    startResult.resolve();
+
+    expect(await screen.findByText("Daemon running")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toBe(liveRegion);
+    expect(liveRegion).toHaveTextContent("Daemon running. Version 0.1.1");
+    expect(screen.getAllByRole("status")).toHaveLength(1);
+  });
+
+  it("keeps the same live region through status error recovery", async () => {
+    const initialStatus = deferred<never>();
+    vi.mocked(getDaemonStatus)
+      .mockReturnValueOnce(initialStatus.promise)
+      .mockResolvedValueOnce({ state: "running", version: "0.1.0" });
+    const user = userEvent.setup();
+
+    renderHealth();
+
+    const liveRegion = screen.getByRole("status");
+    initialStatus.reject(new Error("private IPC detail"));
+    expect(
+      await screen.findByText("Daemon status unavailable"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("status")).toBe(liveRegion);
+    expect(liveRegion).toHaveTextContent("Daemon status unavailable");
+
+    await user.click(screen.getByRole("button", { name: "Check again" }));
+    expect(await screen.findByText("Daemon running")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toBe(liveRegion);
   });
 });

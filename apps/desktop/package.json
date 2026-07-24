@@ -6,7 +6,9 @@
   "packageManager": "pnpm@11.17.0",
   "scripts": {
     "build": "tsc --noEmit && vite build",
+    "build:bundle": "pnpm build && pnpm stage:sidecars",
     "dev": "vite",
+    "stage:sidecars": "node scripts/stage-sidecars.mjs",
     "tauri": "tauri",
     "test:unit": "vitest run",
     "typecheck": "tsc --noEmit"

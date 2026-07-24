@@ -5,7 +5,8 @@
   "identifier": "dev.wokrouter.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build:bundle",
+    "beforeBundleCommand": "pnpm stage:sidecars",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },
@@ -25,7 +26,14 @@
     ]
   },
   "bundle": {
-    "active": false,
-    "icon": []
+    "active": true,
+    "externalBin": ["binaries/wokrouter", "binaries/wokrouterd"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
   }
 }

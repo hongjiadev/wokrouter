@@ -17,7 +17,7 @@ path = "src/main.rs"
 serde.workspace = true
 tauri.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process"] }
 wokrouter-control = { path = "../../../crates/wokrouter-control" }
 wokrouter-platform = { path = "../../../crates/wokrouter-platform" }
 
