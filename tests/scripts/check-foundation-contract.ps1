@@ -568,6 +568,10 @@ if ($jobs.ContainsKey("frontend")) {
 
 if ($jobs.ContainsKey("platform-check-matrix")) {
     $matrixJob = $jobs["platform-check-matrix"]
+    if ((Get-JobScalar -Job $matrixJob -Key "runs-on") -ne '${{ matrix.os }}') {
+        Add-ContractFailure `
+            -Message "Platform matrix job runs-on must be '`${{ matrix.os }}'."
+    }
     $matrixSteps = @(Get-JobSteps -Job $matrixJob)
     $actualRunners = @(Get-PlatformMatrixRunners -Job $matrixJob)
     $expectedRunners = @("windows-latest", "macos-15", "ubuntu-24.04")

@@ -184,6 +184,18 @@ try {
             -Scenario "broken platform matrix"
     }
 
+    Invoke-Scenario -Name "fixed platform matrix runner is rejected" -Test {
+        $root = New-ContractFixture
+        Edit-Workflow `
+            -Root $root `
+            -OldText '    runs-on: ${{ matrix.os }}' `
+            -NewText "    runs-on: ubuntu-24.04"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "runs-on" `
+            -Scenario "fixed platform matrix runner"
+    }
+
     Invoke-Scenario -Name "jobs outside the jobs mapping are rejected" -Test {
         $root = New-ContractFixture
         Edit-Workflow `
