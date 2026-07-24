@@ -53,6 +53,7 @@ pnpm --dir apps/desktop install --frozen-lockfile
 Run the same gates used by CI from the repository root:
 
 ```powershell
+pwsh tests/scripts/check-foundation-contract.tests.ps1
 pwsh tests/scripts/check-foundation-contract.ps1
 pwsh tests/scripts/check-no-body-persistence.tests.ps1
 pwsh tests/scripts/check-no-body-persistence.ps1
@@ -70,13 +71,21 @@ The privacy check uses an explicit persisted-model list:
 `crates/wokrouter-storage/src/config/model.rs`, plus `RequestMetric` in
 `crates/wokrouter-storage/src/state/store.rs`. Transient types such as
 `StateHealth` and `StateStore`, request/control DTOs, and documentation are not
-persistence and are not scanned. In crate `migrations` directories, only
-`CREATE TABLE` column definitions and `ALTER TABLE ... ADD [COLUMN]` column
-names are checked; comments, strings, table names, index names, constraint
-names, and type names are ignored. Persisted fields or columns named
-`request_body`, `response_body`, `prompt`, `tool_arguments`, or `authorization`
-fail the gate case-insensitively, including quoted SQL identifiers and Rust raw
-identifiers.
+persistence and are not scanned. Every listed model file and struct must exist;
+an incomplete model inventory fails closed with exit code 2. In crate
+`migrations` directories, `CREATE TABLE` column definitions, supported
+`CREATE TABLE ... AS SELECT` output names, `ALTER TABLE ... ADD [COLUMN]`
+column names, and `ALTER TABLE ... RENAME COLUMN ... TO` targets are checked.
+Comments, strings, table names, `FROM` table names, index names, old rename
+names, constraint names, and type names are ignored. A CTAS select-list shape
+whose output name cannot be determined reliably fails closed with exit code 2
+and a `CTAS PARSE ERROR`. Persisted fields or columns named `request_body`,
+`response_body`, `prompt`, `tool_arguments`, or `authorization` fail the gate
+case-insensitively, including quoted SQL identifiers and Rust raw identifiers.
+
+The foundation contract self-test mutates isolated workflow fixtures to prove
+that job relationships, matrix runners, and required commands cannot move to a
+different job without failing the gate.
 
 The stable branch-protection checks are `rust`, `frontend`, and
 `platform-check`. The last check aggregates the Windows, macOS, and Linux

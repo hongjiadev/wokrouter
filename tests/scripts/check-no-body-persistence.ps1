@@ -30,6 +30,8 @@ $persistentRustModels = @(
 $rustFileCount = 0
 $migrationFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
 $findings = [System.Collections.Generic.List[object]]::new()
+$inventoryErrors = [System.Collections.Generic.List[string]]::new()
+$sqlParseErrors = [System.Collections.Generic.List[object]]::new()
 
 function Test-IdentifierStart {
     param([char]$Character)
@@ -300,12 +302,18 @@ function Find-ForbiddenRustFields {
         [string[]]$Structs,
 
         [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.HashSet[string]]$FoundStructs,
+
+        [Parameter(Mandatory)]
         [string]$Path
     )
 
-    $persistentStructs = @{}
+    $persistentStructs = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
     foreach ($structName in $Structs) {
-        $persistentStructs[$structName.ToLowerInvariant()] = $true
+        $null = $persistentStructs.Add($structName)
     }
 
     for ($index = 0; $index + 1 -lt $Tokens.Count; $index += 1) {
@@ -319,7 +327,7 @@ function Find-ForbiddenRustFields {
         $nameToken = $Tokens[$index + 1]
         if (
             $nameToken.Kind -ne "Identifier" -or
-            -not $persistentStructs.ContainsKey($nameToken.Value.ToLowerInvariant())
+            -not $persistentStructs.Contains($nameToken.Value)
         ) {
             continue
         }
@@ -336,8 +344,11 @@ function Find-ForbiddenRustFields {
             continue
         }
 
+        $null = $FoundStructs.Add($nameToken.Value)
         $braceDepth = 1
         $bracketDepth = 0
+        $parenthesisDepth = 0
+        $angleDepth = 0
         for ($fieldIndex = $openBrace + 1; $fieldIndex -lt $Tokens.Count; $fieldIndex += 1) {
             $token = $Tokens[$fieldIndex]
             if ($token.Value -eq "{") {
@@ -357,12 +368,36 @@ function Find-ForbiddenRustFields {
                 continue
             }
             if ($token.Value -eq "]") {
-                $bracketDepth -= 1
+                if ($bracketDepth -gt 0) {
+                    $bracketDepth -= 1
+                }
+                continue
+            }
+            if ($token.Value -eq "(") {
+                $parenthesisDepth += 1
+                continue
+            }
+            if ($token.Value -eq ")") {
+                if ($parenthesisDepth -gt 0) {
+                    $parenthesisDepth -= 1
+                }
+                continue
+            }
+            if ($token.Value -eq "<") {
+                $angleDepth += 1
+                continue
+            }
+            if ($token.Value -eq ">") {
+                if ($angleDepth -gt 0) {
+                    $angleDepth -= 1
+                }
                 continue
             }
             if (
                 $braceDepth -eq 1 -and
                 $bracketDepth -eq 0 -and
+                $parenthesisDepth -eq 0 -and
+                $angleDepth -eq 0 -and
                 $token.Kind -eq "Identifier" -and
                 $fieldIndex + 1 -lt $Tokens.Count -and
                 $Tokens[$fieldIndex + 1].Value -eq ":" -and
@@ -580,6 +615,231 @@ function Test-CreateTableColumn {
     }
 }
 
+function Add-SqlParseError {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [int]$Line,
+
+        [Parameter(Mandatory)]
+        [string]$Message
+    )
+
+    $sqlParseErrors.Add([pscustomobject]@{
+            Path = $Path
+            Line = $Line
+            Message = $Message
+        })
+}
+
+function Get-SqlObjectNameEnd {
+    param(
+        [Parameter(Mandatory)]
+        [object[]]$Tokens,
+
+        [Parameter(Mandatory)]
+        [int]$Start
+    )
+
+    if ($Start -ge $Tokens.Count -or $Tokens[$Start].Kind -ne "Identifier") {
+        return $Start
+    }
+
+    $cursor = $Start + 1
+    while (
+        $cursor + 1 -lt $Tokens.Count -and
+        $Tokens[$cursor].Value -eq "." -and
+        $Tokens[$cursor + 1].Kind -eq "Identifier"
+    ) {
+        $cursor += 2
+    }
+    return $cursor
+}
+
+function Test-CtasSelectItem {
+    param(
+        [Parameter(Mandatory)]
+        [object[]]$Tokens,
+
+        [Parameter(Mandatory)]
+        [int]$Start,
+
+        [Parameter(Mandatory)]
+        [int]$End,
+
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [int]$FallbackLine
+    )
+
+    if ($Start -gt $End) {
+        Add-SqlParseError `
+            -Path $Path `
+            -Line $FallbackLine `
+            -Message "empty CTAS select-list item"
+        return
+    }
+
+    $parenthesisDepth = 0
+    $aliasIndex = -1
+    for ($index = $Start; $index -le $End; $index += 1) {
+        if ($Tokens[$index].Value -eq "(") {
+            $parenthesisDepth += 1
+            continue
+        }
+        if ($Tokens[$index].Value -eq ")") {
+            if ($parenthesisDepth -gt 0) {
+                $parenthesisDepth -= 1
+            }
+            continue
+        }
+        if (
+            $parenthesisDepth -eq 0 -and
+            (Test-SqlKeyword -Token $Tokens[$index] -Keyword "as")
+        ) {
+            $aliasIndex = $index
+        }
+    }
+
+    $outputToken = $null
+    if ($aliasIndex -ge 0) {
+        if (
+            $aliasIndex + 1 -gt $End -or
+            $Tokens[$aliasIndex + 1].Kind -ne "Identifier" -or
+            $aliasIndex + 1 -ne $End
+        ) {
+            Add-SqlParseError `
+                -Path $Path `
+                -Line $Tokens[$aliasIndex].Line `
+                -Message "unsupported CTAS alias shape"
+            return
+        }
+        $outputToken = $Tokens[$aliasIndex + 1]
+    }
+    elseif ($Start -eq $End -and $Tokens[$Start].Kind -eq "Identifier") {
+        $outputToken = $Tokens[$Start]
+    }
+    else {
+        $qualifiedName = $true
+        for ($index = $Start; $index -le $End; $index += 1) {
+            $expectedIdentifier = (($index - $Start) % 2) -eq 0
+            if (
+                ($expectedIdentifier -and $Tokens[$index].Kind -ne "Identifier") -or
+                (-not $expectedIdentifier -and $Tokens[$index].Value -ne ".")
+            ) {
+                $qualifiedName = $false
+                break
+            }
+        }
+        if (
+            $qualifiedName -and
+            (($End - $Start) % 2) -eq 0 -and
+            $Tokens[$End].Kind -eq "Identifier"
+        ) {
+            $outputToken = $Tokens[$End]
+        }
+    }
+
+    if ($null -eq $outputToken) {
+        Add-SqlParseError `
+            -Path $Path `
+            -Line $Tokens[$Start].Line `
+            -Message "unsupported CTAS select-list item"
+        return
+    }
+
+    if ($forbiddenFields.ContainsKey($outputToken.Value.ToLowerInvariant())) {
+        Add-Finding -Token $outputToken -Path $Path
+    }
+}
+
+function Find-CtasOutputColumns {
+    param(
+        [Parameter(Mandatory)]
+        [object[]]$Tokens,
+
+        [Parameter(Mandatory)]
+        [int]$SelectIndex,
+
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    if (
+        $SelectIndex -ge $Tokens.Count -or
+        -not (Test-SqlKeyword -Token $Tokens[$SelectIndex] -Keyword "select")
+    ) {
+        $line = 1
+        if ($SelectIndex -gt 0 -and $SelectIndex - 1 -lt $Tokens.Count) {
+            $line = $Tokens[$SelectIndex - 1].Line
+        }
+        Add-SqlParseError -Path $Path -Line $line -Message "CTAS must contain SELECT"
+        return
+    }
+
+    $cursor = $SelectIndex + 1
+    if (
+        $cursor -lt $Tokens.Count -and
+        (
+            (Test-SqlKeyword -Token $Tokens[$cursor] -Keyword "all") -or
+            (Test-SqlKeyword -Token $Tokens[$cursor] -Keyword "distinct")
+        )
+    ) {
+        $cursor += 1
+    }
+
+    $segmentStart = $cursor
+    $parenthesisDepth = 0
+    for ($index = $cursor; $index -lt $Tokens.Count; $index += 1) {
+        if ($Tokens[$index].Value -eq "(") {
+            $parenthesisDepth += 1
+            continue
+        }
+        if ($Tokens[$index].Value -eq ")") {
+            if ($parenthesisDepth -gt 0) {
+                $parenthesisDepth -= 1
+            }
+            continue
+        }
+        if ($parenthesisDepth -ne 0) {
+            continue
+        }
+        if ($Tokens[$index].Value -eq ",") {
+            Test-CtasSelectItem `
+                -Tokens $Tokens `
+                -Start $segmentStart `
+                -End ($index - 1) `
+                -Path $Path `
+                -FallbackLine $Tokens[$SelectIndex].Line
+            $segmentStart = $index + 1
+            continue
+        }
+        if (
+            $Tokens[$index].Value -eq ";" -or
+            (Test-SqlKeyword -Token $Tokens[$index] -Keyword "from")
+        ) {
+            Test-CtasSelectItem `
+                -Tokens $Tokens `
+                -Start $segmentStart `
+                -End ($index - 1) `
+                -Path $Path `
+                -FallbackLine $Tokens[$SelectIndex].Line
+            return
+        }
+    }
+
+    Test-CtasSelectItem `
+        -Tokens $Tokens `
+        -Start $segmentStart `
+        -End ($Tokens.Count - 1) `
+        -Path $Path `
+        -FallbackLine $Tokens[$SelectIndex].Line
+}
+
 function Find-ForbiddenSqlColumns {
     param(
         [Parameter(Mandatory)]
@@ -617,44 +877,56 @@ function Find-ForbiddenSqlColumns {
             ) {
                 $cursor += 3
             }
-            while ($cursor -lt $Tokens.Count -and $Tokens[$cursor].Value -ne "(") {
-                if ($Tokens[$cursor].Value -eq ";") {
-                    break
-                }
-                $cursor += 1
-            }
-            if ($cursor -ge $Tokens.Count -or $Tokens[$cursor].Value -ne "(") {
+            $nameEnd = Get-SqlObjectNameEnd -Tokens $Tokens -Start $cursor
+            if ($nameEnd -eq $cursor) {
                 continue
             }
+            $cursor = $nameEnd
 
-            $depth = 1
-            $segmentStart = $cursor + 1
-            for ($columnIndex = $cursor + 1; $columnIndex -lt $Tokens.Count; $columnIndex += 1) {
-                if ($Tokens[$columnIndex].Value -eq "(") {
-                    $depth += 1
-                    continue
-                }
-                if ($Tokens[$columnIndex].Value -eq ")") {
-                    $depth -= 1
-                    if ($depth -eq 0) {
+            if ($cursor -lt $Tokens.Count -and $Tokens[$cursor].Value -eq "(") {
+                $depth = 1
+                $segmentStart = $cursor + 1
+                for (
+                    $columnIndex = $cursor + 1;
+                    $columnIndex -lt $Tokens.Count;
+                    $columnIndex += 1
+                ) {
+                    if ($Tokens[$columnIndex].Value -eq "(") {
+                        $depth += 1
+                        continue
+                    }
+                    if ($Tokens[$columnIndex].Value -eq ")") {
+                        $depth -= 1
+                        if ($depth -eq 0) {
+                            Test-CreateTableColumn `
+                                -Tokens $Tokens `
+                                -Start $segmentStart `
+                                -End ($columnIndex - 1) `
+                                -Path $Path
+                            $index = $columnIndex
+                            break
+                        }
+                        continue
+                    }
+                    if ($depth -eq 1 -and $Tokens[$columnIndex].Value -eq ",") {
                         Test-CreateTableColumn `
                             -Tokens $Tokens `
                             -Start $segmentStart `
                             -End ($columnIndex - 1) `
                             -Path $Path
-                        $index = $columnIndex
-                        break
+                        $segmentStart = $columnIndex + 1
                     }
-                    continue
                 }
-                if ($depth -eq 1 -and $Tokens[$columnIndex].Value -eq ",") {
-                    Test-CreateTableColumn `
-                        -Tokens $Tokens `
-                        -Start $segmentStart `
-                        -End ($columnIndex - 1) `
-                        -Path $Path
-                    $segmentStart = $columnIndex + 1
-                }
+                continue
+            }
+            if (
+                $cursor -lt $Tokens.Count -and
+                (Test-SqlKeyword -Token $Tokens[$cursor] -Keyword "as")
+            ) {
+                Find-CtasOutputColumns `
+                    -Tokens $Tokens `
+                    -SelectIndex ($cursor + 1) `
+                    -Path $Path
             }
             continue
         }
@@ -665,41 +937,51 @@ function Find-ForbiddenSqlColumns {
             (Test-SqlKeyword -Token $Tokens[$index + 1] -Keyword "table")
         ) {
             $cursor = $index + 2
-            while (
-                $cursor -lt $Tokens.Count -and
-                -not (Test-SqlKeyword -Token $Tokens[$cursor] -Keyword "add") -and
-                $Tokens[$cursor].Value -ne ";"
-            ) {
-                $cursor += 1
-            }
-            if (
-                $cursor -ge $Tokens.Count -or
-                -not (Test-SqlKeyword -Token $Tokens[$cursor] -Keyword "add")
-            ) {
+            $nameEnd = Get-SqlObjectNameEnd -Tokens $Tokens -Start $cursor
+            if ($nameEnd -eq $cursor -or $nameEnd -ge $Tokens.Count) {
                 continue
             }
-            $cursor += 1
-            if (
-                $cursor -lt $Tokens.Count -and
-                (Test-SqlKeyword -Token $Tokens[$cursor] -Keyword "column")
-            ) {
+            $cursor = $nameEnd
+
+            if (Test-SqlKeyword -Token $Tokens[$cursor] -Keyword "add") {
                 $cursor += 1
+                if (
+                    $cursor -lt $Tokens.Count -and
+                    (Test-SqlKeyword -Token $Tokens[$cursor] -Keyword "column")
+                ) {
+                    $cursor += 1
+                }
+                if (
+                    $cursor + 2 -lt $Tokens.Count -and
+                    (Test-SqlKeyword -Token $Tokens[$cursor] -Keyword "if") -and
+                    (Test-SqlKeyword -Token $Tokens[$cursor + 1] -Keyword "not") -and
+                    (Test-SqlKeyword -Token $Tokens[$cursor + 2] -Keyword "exists")
+                ) {
+                    $cursor += 3
+                }
+                if (
+                    $cursor -lt $Tokens.Count -and
+                    $Tokens[$cursor].Kind -eq "Identifier" -and
+                    -not (Test-SqlConstraintKeyword $Tokens[$cursor]) -and
+                    $forbiddenFields.ContainsKey($Tokens[$cursor].Value.ToLowerInvariant())
+                ) {
+                    Add-Finding -Token $Tokens[$cursor] -Path $Path
+                }
+                continue
             }
+
             if (
-                $cursor + 2 -lt $Tokens.Count -and
-                (Test-SqlKeyword -Token $Tokens[$cursor] -Keyword "if") -and
-                (Test-SqlKeyword -Token $Tokens[$cursor + 1] -Keyword "not") -and
-                (Test-SqlKeyword -Token $Tokens[$cursor + 2] -Keyword "exists")
+                (Test-SqlKeyword -Token $Tokens[$cursor] -Keyword "rename") -and
+                $cursor + 4 -lt $Tokens.Count -and
+                (Test-SqlKeyword -Token $Tokens[$cursor + 1] -Keyword "column") -and
+                $Tokens[$cursor + 2].Kind -eq "Identifier" -and
+                (Test-SqlKeyword -Token $Tokens[$cursor + 3] -Keyword "to") -and
+                $Tokens[$cursor + 4].Kind -eq "Identifier" -and
+                $forbiddenFields.ContainsKey(
+                    $Tokens[$cursor + 4].Value.ToLowerInvariant()
+                )
             ) {
-                $cursor += 3
-            }
-            if (
-                $cursor -lt $Tokens.Count -and
-                $Tokens[$cursor].Kind -eq "Identifier" -and
-                -not (Test-SqlConstraintKeyword $Tokens[$cursor]) -and
-                $forbiddenFields.ContainsKey($Tokens[$cursor].Value.ToLowerInvariant())
-            ) {
-                Add-Finding -Token $Tokens[$cursor] -Path $Path
+                Add-Finding -Token $Tokens[$cursor + 4] -Path $Path
             }
         }
     }
@@ -708,13 +990,30 @@ function Find-ForbiddenSqlColumns {
 foreach ($modelSet in $persistentRustModels) {
     $path = Join-Path $rootPath $modelSet.RelativePath
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        $inventoryErrors.Add(
+            "Required persistence model file is missing: $path"
+        )
         continue
     }
 
     $rustFileCount += 1
     $content = Get-Content -LiteralPath $path -Raw -Encoding UTF8
     $tokens = @(Get-RustTokens -Content $content)
-    Find-ForbiddenRustFields -Tokens $tokens -Structs $modelSet.Structs -Path $path
+    $foundStructs = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    Find-ForbiddenRustFields `
+        -Tokens $tokens `
+        -Structs $modelSet.Structs `
+        -FoundStructs $foundStructs `
+        -Path $path
+    foreach ($structName in $modelSet.Structs) {
+        if (-not $foundStructs.Contains($structName)) {
+            $inventoryErrors.Add(
+                "Required persistent struct '$structName' was not found in '$path'."
+            )
+        }
+    }
 }
 
 $cratesRoot = Join-Path $rootPath "crates"
@@ -732,8 +1031,22 @@ foreach ($file in $migrationFiles) {
     Find-ForbiddenSqlColumns -Tokens $tokens -Path $file.FullName
 }
 
-if (($rustFileCount + $migrationFiles.Count) -eq 0) {
-    Write-Host "No persistence models or SQL migrations were found below '$rootPath'."
+if ($inventoryErrors.Count -gt 0) {
+    foreach ($inventoryError in $inventoryErrors) {
+        Write-Host "PERSISTENCE INVENTORY ERROR: $inventoryError"
+    }
+    exit 2
+}
+
+if ($sqlParseErrors.Count -gt 0) {
+    foreach ($parseError in $sqlParseErrors) {
+        Write-Host (
+            "CTAS PARSE ERROR at {0}:{1}: {2}" -f
+            $parseError.Path,
+            $parseError.Line,
+            $parseError.Message
+        )
+    }
     exit 2
 }
 

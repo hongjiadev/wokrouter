@@ -28,6 +28,33 @@ function New-PrivacyFixture {
     $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-control/src") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "docs") -Force
     $fixtureRoots.Add($root)
+
+    Set-Content `
+        -LiteralPath (Join-Path $root "crates/wokrouter-storage/src/config/model.rs") `
+        -Encoding UTF8 `
+        -Value @'
+pub struct AppConfig {
+    pub port: u16,
+}
+pub struct VersionedConfig {
+    pub revision: u64,
+}
+pub struct ServerConfig {
+    pub host: String,
+}
+pub struct UiConfig {
+    pub locale: String,
+}
+'@
+    Set-Content `
+        -LiteralPath (Join-Path $root "crates/wokrouter-storage/src/state/store.rs") `
+        -Encoding UTF8 `
+        -Value @'
+pub struct RequestMetric {
+    pub latency_ms: i64,
+}
+'@
+
     return $root
 }
 
@@ -40,8 +67,34 @@ function Set-FixtureFile {
         [string]$RelativePath,
 
         [Parameter(Mandatory)]
-        [string]$Content
+        [string]$Content,
+
+        [switch]$Exact
     )
+
+    $normalizedRelativePath = $RelativePath.Replace("\", "/")
+    if (
+        -not $Exact -and
+        $normalizedRelativePath -eq "crates/wokrouter-storage/src/config/model.rs"
+    ) {
+        foreach ($structDefinition in @(
+                "pub struct VersionedConfig { pub revision: u64, }",
+                "pub struct ServerConfig { pub host: String, }",
+                "pub struct UiConfig { pub locale: String, }"
+            )) {
+            $structName = ($structDefinition -split "\s+")[2]
+            if ($Content -notmatch "\bstruct\s+$([regex]::Escape($structName))\b") {
+                $Content += "`n$structDefinition`n"
+            }
+        }
+    }
+    if (
+        -not $Exact -and
+        $normalizedRelativePath -eq "crates/wokrouter-storage/src/state/store.rs" -and
+        $Content -notmatch "\bstruct\s+RequestMetric\b"
+    ) {
+        $Content += "`npub struct RequestMetric { pub latency_ms: i64, }`n"
+    }
 
     $path = Join-Path $Root $RelativePath
     $parent = Split-Path -Parent $path
@@ -121,6 +174,30 @@ function Assert-CheckRejects {
     $expectedLocation = (Join-Path $Root $RelativePath) + ":$Line"
     if ($result.Output -notmatch [regex]::Escape($expectedLocation)) {
         throw "$Scenario did not report exact location '$expectedLocation': $($result.Output)"
+    }
+}
+
+function Assert-InventoryFails {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Root,
+
+        [Parameter(Mandatory)]
+        [string]$ExpectedText,
+
+        [Parameter(Mandatory)]
+        [string]$Scenario
+    )
+
+    $result = Invoke-PrivacyCheck -Root $Root
+    if ($result.ExitCode -ne 2) {
+        throw "$Scenario should exit 2, but exited $($result.ExitCode): $($result.Output)"
+    }
+    if ($result.Output -notmatch "PERSISTENCE INVENTORY ERROR") {
+        throw "$Scenario did not use the dedicated inventory error: $($result.Output)"
+    }
+    if ($result.Output -notmatch [regex]::Escape($ExpectedText)) {
+        throw "$Scenario did not identify '$ExpectedText': $($result.Output)"
     }
 }
 
@@ -283,6 +360,16 @@ pub struct AppConfig {
             -Scenario "case-insensitive Rust field"
     }
 
+    Invoke-Scenario -Name "nested Rust callback parameter is not a field" -Test {
+        $rustRoot = New-PrivacyFixture
+        Set-FixtureFile -Root $rustRoot -RelativePath "crates/wokrouter-storage/src/config/model.rs" -Content @'
+pub struct AppConfig {
+    pub callback: fn(prompt: String),
+}
+'@
+        Assert-CheckPasses -Root $rustRoot -Scenario "nested Rust callback parameter"
+    }
+
     foreach ($field in $forbiddenFields) {
         Invoke-Scenario -Name "CREATE TABLE column $field" -Test {
             $sqlRoot = New-PrivacyFixture
@@ -359,6 +446,80 @@ ALTER TABLE persisted_requests ADD prompt TEXT;
             -Scenario "ALTER TABLE ADD column"
     }
 
+    Invoke-Scenario -Name "CREATE TABLE AS SELECT alias" -Test {
+        $sqlRoot = New-PrivacyFixture
+        $relativePath = "crates/wokrouter-storage/migrations/0001_initial.sql"
+        Set-FixtureFile -Root $sqlRoot -RelativePath $relativePath -Content @'
+CREATE TABLE persisted AS SELECT 1 AS prompt;
+'@
+        Assert-CheckRejects -Root $sqlRoot -Field "prompt" -RelativePath $relativePath -Line 1 `
+            -Scenario "CTAS alias"
+    }
+
+    Invoke-Scenario -Name "CREATE TABLE AS SELECT bare output column" -Test {
+        $sqlRoot = New-PrivacyFixture
+        $relativePath = "crates/wokrouter-storage/migrations/0001_initial.sql"
+        Set-FixtureFile -Root $sqlRoot -RelativePath $relativePath -Content @'
+CREATE TABLE persisted AS SELECT request_body FROM source;
+'@
+        Assert-CheckRejects -Root $sqlRoot -Field "request_body" -RelativePath $relativePath -Line 1 `
+            -Scenario "CTAS bare output column"
+    }
+
+    Invoke-Scenario -Name "CREATE TABLE AS SELECT qualified output column" -Test {
+        $sqlRoot = New-PrivacyFixture
+        $relativePath = "crates/wokrouter-storage/migrations/0001_initial.sql"
+        Set-FixtureFile -Root $sqlRoot -RelativePath $relativePath -Content @'
+CREATE TABLE persisted AS
+SELECT source.authorization
+FROM source;
+'@
+        Assert-CheckRejects -Root $sqlRoot -Field "authorization" -RelativePath $relativePath -Line 2 `
+            -Scenario "CTAS qualified output column"
+    }
+
+    Invoke-Scenario -Name "unreliable CREATE TABLE AS SELECT fails closed" -Test {
+        $sqlRoot = New-PrivacyFixture
+        $relativePath = "crates/wokrouter-storage/migrations/0001_initial.sql"
+        Set-FixtureFile -Root $sqlRoot -RelativePath $relativePath -Content @'
+CREATE TABLE persisted AS SELECT * FROM source;
+'@
+        $result = Invoke-PrivacyCheck -Root $sqlRoot
+        if ($result.ExitCode -ne 2) {
+            throw "CTAS wildcard should exit 2, but exited $($result.ExitCode): $($result.Output)"
+        }
+        if ($result.Output -notmatch "CTAS PARSE ERROR") {
+            throw "CTAS wildcard did not report a dedicated parse error: $($result.Output)"
+        }
+        $expectedLocation = (Join-Path $sqlRoot $relativePath) + ":1"
+        if ($result.Output -notmatch [regex]::Escape($expectedLocation)) {
+            throw "CTAS wildcard did not report '$expectedLocation': $($result.Output)"
+        }
+    }
+
+    Invoke-Scenario -Name "ALTER TABLE RENAME COLUMN target" -Test {
+        $sqlRoot = New-PrivacyFixture
+        $relativePath = "crates/wokrouter-storage/migrations/0001_initial.sql"
+        Set-FixtureFile -Root $sqlRoot -RelativePath $relativePath -Content @'
+ALTER TABLE persisted RENAME COLUMN safe TO authorization;
+'@
+        Assert-CheckRejects -Root $sqlRoot -Field "authorization" -RelativePath $relativePath -Line 1 `
+            -Scenario "ALTER TABLE RENAME COLUMN target"
+    }
+
+    Invoke-Scenario -Name "CTAS and RENAME non-output contexts are ignored" -Test {
+        $sqlRoot = New-PrivacyFixture
+        Set-FixtureFile -Root $sqlRoot -RelativePath "crates/wokrouter-storage/migrations/0001_initial.sql" -Content @'
+-- CREATE TABLE ignored AS SELECT 1 AS prompt;
+CREATE TABLE request_body AS
+SELECT 'authorization' AS safe_value
+FROM response_body;
+ALTER TABLE request_body RENAME COLUMN tool_arguments TO safe_name;
+'@
+        Assert-CheckPasses -Root $sqlRoot `
+            -Scenario "CTAS comments, strings, table names, FROM table names, and old rename names"
+    }
+
     Invoke-Scenario -Name "SQL non-column contexts are ignored" -Test {
         $sqlRoot = New-PrivacyFixture
         Set-FixtureFile -Root $sqlRoot -RelativePath "crates/wokrouter-storage/migrations/0001_initial.sql" -Content @'
@@ -373,6 +534,59 @@ CREATE INDEX response_body ON request_body(safe_value);
 ALTER TABLE request_body ADD CONSTRAINT tool_arguments UNIQUE (safe_value);
 '@
         Assert-CheckPasses -Root $sqlRoot -Scenario "SQL comments, strings, table, index, constraint, and type names"
+    }
+
+    Invoke-Scenario -Name "missing persistent model file fails closed" -Test {
+        $rustRoot = New-PrivacyFixture
+        $relativePath = "crates/wokrouter-storage/src/config/model.rs"
+        Remove-Item -LiteralPath (Join-Path $rustRoot $relativePath) -Force
+        Assert-InventoryFails `
+            -Root $rustRoot `
+            -ExpectedText $relativePath.Replace("/", "\") `
+            -Scenario "missing persistent model file"
+    }
+
+    Invoke-Scenario -Name "missing listed persistent struct fails closed" -Test {
+        $rustRoot = New-PrivacyFixture
+        $relativePath = "crates/wokrouter-storage/src/config/model.rs"
+        Set-FixtureFile -Root $rustRoot -RelativePath $relativePath -Exact -Content @'
+pub struct AppConfig {
+    pub port: u16,
+}
+pub struct VersionedConfig {
+    pub revision: u64,
+}
+pub struct ServerConfig {
+    pub host: String,
+}
+'@
+        Assert-InventoryFails `
+            -Root $rustRoot `
+            -ExpectedText "UiConfig" `
+            -Scenario "missing listed persistent struct"
+    }
+
+    Invoke-Scenario -Name "wrong-case persistent struct name fails closed" -Test {
+        $rustRoot = New-PrivacyFixture
+        $relativePath = "crates/wokrouter-storage/src/config/model.rs"
+        Set-FixtureFile -Root $rustRoot -RelativePath $relativePath -Exact -Content @'
+pub struct appconfig {
+    pub port: u16,
+}
+pub struct VersionedConfig {
+    pub revision: u64,
+}
+pub struct ServerConfig {
+    pub host: String,
+}
+pub struct UiConfig {
+    pub locale: String,
+}
+'@
+        Assert-InventoryFails `
+            -Root $rustRoot `
+            -ExpectedText "AppConfig" `
+            -Scenario "wrong-case persistent struct name"
     }
 
     if ($failures.Count -gt 0) {
