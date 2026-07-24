@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use url::Url;
 
@@ -353,7 +353,7 @@ impl AzureResponseDecoder {
             }
         }
         if let Some(usage) = root.get("usage") {
-            self.pending_usage = Some(openai_usage(usage)?);
+            self.pending_usage = Some(openai_usage(usage, self.limits)?);
         }
         Ok(events)
     }
@@ -382,7 +382,7 @@ impl AzureResponseDecoder {
             }
         }
         if let Some(usage) = root.get("usage") {
-            self.pending_usage = Some(openai_usage(usage)?);
+            self.pending_usage = Some(openai_usage(usage, self.limits)?);
         }
         Ok(events)
     }
@@ -596,9 +596,13 @@ fn bounded_array(value: &Value, limits: UpstreamLimits) -> Result<&[Value], Gate
 
 #[derive(Deserialize)]
 struct AzureUsageWire {
+    #[serde(default, deserialize_with = "deserialize_present")]
     prompt_tokens: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_present")]
     completion_tokens: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_present")]
     prompt_tokens_details: Option<AzurePromptTokensDetailsWire>,
+    #[serde(default, deserialize_with = "deserialize_present")]
     completion_tokens_details: Option<AzureCompletionTokensDetailsWire>,
     #[serde(flatten)]
     extensions: BTreeMap<String, Value>,
@@ -606,6 +610,7 @@ struct AzureUsageWire {
 
 #[derive(Deserialize)]
 struct AzurePromptTokensDetailsWire {
+    #[serde(default, deserialize_with = "deserialize_present")]
     cached_tokens: Option<u64>,
     #[serde(flatten)]
     extensions: BTreeMap<String, Value>,
@@ -613,14 +618,35 @@ struct AzurePromptTokensDetailsWire {
 
 #[derive(Deserialize)]
 struct AzureCompletionTokensDetailsWire {
+    #[serde(default, deserialize_with = "deserialize_present")]
     reasoning_tokens: Option<u64>,
     #[serde(flatten)]
     extensions: BTreeMap<String, Value>,
 }
 
-fn openai_usage(value: &Value) -> Result<Usage, GatewayError> {
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+fn openai_usage(value: &Value, limits: UpstreamLimits) -> Result<Usage, GatewayError> {
     let wire: AzureUsageWire =
         serde_json::from_value(value.clone()).map_err(|_| GatewayError::invalid_request())?;
+    if wire.extensions.len() > limits.max_collection_items
+        || wire
+            .prompt_tokens_details
+            .as_ref()
+            .is_some_and(|details| details.extensions.len() > limits.max_collection_items)
+        || wire
+            .completion_tokens_details
+            .as_ref()
+            .is_some_and(|details| details.extensions.len() > limits.max_collection_items)
+    {
+        return Err(GatewayError::invalid_request());
+    }
     let mut extensions = wire.extensions;
     if let Some(details) = wire.prompt_tokens_details.as_ref()
         && !details.extensions.is_empty()

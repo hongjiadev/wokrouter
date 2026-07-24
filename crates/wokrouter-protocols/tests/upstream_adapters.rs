@@ -190,6 +190,10 @@ fn gemini_usage_wire_preserves_extensions_and_rejects_malformed_known_fields() {
         serde_json::json!({"candidatesTokenCount": "7"}),
         serde_json::json!({"cachedContentTokenCount": "3"}),
         serde_json::json!({"thoughtsTokenCount": "2"}),
+        serde_json::json!({"promptTokenCount": null}),
+        serde_json::json!({"candidatesTokenCount": null}),
+        serde_json::json!({"cachedContentTokenCount": null}),
+        serde_json::json!({"thoughtsTokenCount": null}),
     ] {
         let body = serde_json::to_vec(&serde_json::json!({
             "candidates": [],
@@ -359,6 +363,12 @@ fn azure_usage_wire_preserves_extensions_and_rejects_malformed_known_fields() {
         serde_json::json!({"completion_tokens_details": []}),
         serde_json::json!({"prompt_tokens_details": {"cached_tokens": "5"}}),
         serde_json::json!({"completion_tokens_details": {"reasoning_tokens": "3"}}),
+        serde_json::json!({"prompt_tokens": null}),
+        serde_json::json!({"completion_tokens": null}),
+        serde_json::json!({"prompt_tokens_details": null}),
+        serde_json::json!({"completion_tokens_details": null}),
+        serde_json::json!({"prompt_tokens_details": {"cached_tokens": null}}),
+        serde_json::json!({"completion_tokens_details": {"reasoning_tokens": null}}),
     ] {
         let body = serde_json::to_vec(&serde_json::json!({
             "choices": [],
@@ -389,6 +399,79 @@ fn azure_usage_wire_preserves_extensions_and_rejects_malformed_known_fields() {
                 && usage.reasoning_tokens.is_none()
                 && usage.extensions.is_empty()
     )));
+}
+
+#[test]
+fn gemini_usage_top_level_extensions_have_an_independent_collection_limit() {
+    let limits = UpstreamLimits {
+        max_collection_items: 1,
+        ..UpstreamLimits::default()
+    };
+    let gemini = GeminiAdapter::new(
+        GeminiConfig::new(Url::parse("https://example.test/").unwrap(), "secret").unwrap(),
+        limits,
+    );
+    assert_eq!(
+        gemini
+            .decode_response(
+                RequestId::new("req_gemini_usage_limit"),
+                br#"{
+                    "candidates": [],
+                    "usageMetadata": {"vendorA": 1, "vendorB": 2}
+                }"#,
+            )
+            .unwrap_err()
+            .code(),
+        "invalid_request"
+    );
+}
+
+fn assert_azure_usage_collection_limit(usage: serde_json::Value) {
+    let limits = UpstreamLimits {
+        max_collection_items: 1,
+        ..UpstreamLimits::default()
+    };
+    let azure = AzureAdapter::new(
+        AzureConfig::new(
+            Url::parse("https://example.test/").unwrap(),
+            "deployment",
+            "2024-10-21",
+            "secret",
+        )
+        .unwrap(),
+        limits,
+    );
+    let body = serde_json::to_vec(&serde_json::json!({
+        "choices": [],
+        "usage": usage,
+    }))
+    .unwrap();
+    assert_eq!(
+        azure
+            .decode_response(RequestId::new("req_azure_usage_limit"), &body)
+            .unwrap_err()
+            .code(),
+        "invalid_request"
+    );
+}
+
+#[test]
+fn azure_usage_top_level_extensions_have_an_independent_collection_limit() {
+    assert_azure_usage_collection_limit(serde_json::json!({"vendor_a": 1, "vendor_b": 2}));
+}
+
+#[test]
+fn azure_prompt_token_detail_extensions_have_an_independent_collection_limit() {
+    assert_azure_usage_collection_limit(serde_json::json!({
+        "prompt_tokens_details": {"vendor_a": 1, "vendor_b": 2}
+    }));
+}
+
+#[test]
+fn azure_completion_token_detail_extensions_have_an_independent_collection_limit() {
+    assert_azure_usage_collection_limit(serde_json::json!({
+        "completion_tokens_details": {"vendor_a": 1, "vendor_b": 2}
+    }));
 }
 
 #[test]

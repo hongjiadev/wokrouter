@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value, json};
 use url::Url;
 
@@ -322,7 +322,7 @@ impl GeminiResponseDecoder {
         }
 
         if let Some(usage) = root.get("usageMetadata") {
-            self.pending_usage = Some(gemini_usage(usage)?);
+            self.pending_usage = Some(gemini_usage(usage, self.limits)?);
         }
         if let Some(candidates) = root.get("candidates") {
             let candidates = candidates
@@ -445,17 +445,32 @@ impl GeminiResponseDecoder {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiUsageWire {
+    #[serde(default, deserialize_with = "deserialize_present")]
     prompt_token_count: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_present")]
     candidates_token_count: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_present")]
     cached_content_token_count: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_present")]
     thoughts_token_count: Option<u64>,
     #[serde(flatten)]
     extensions: BTreeMap<String, Value>,
 }
 
-fn gemini_usage(value: &Value) -> Result<Usage, GatewayError> {
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+fn gemini_usage(value: &Value, limits: UpstreamLimits) -> Result<Usage, GatewayError> {
     let wire: GeminiUsageWire =
         serde_json::from_value(value.clone()).map_err(|_| GatewayError::invalid_request())?;
+    if wire.extensions.len() > limits.max_collection_items {
+        return Err(GatewayError::invalid_request());
+    }
     Ok(Usage {
         input_tokens: wire.prompt_token_count.unwrap_or(0),
         output_tokens: wire.candidates_token_count.unwrap_or(0),
