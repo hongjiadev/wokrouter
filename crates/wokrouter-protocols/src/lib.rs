@@ -6,8 +6,10 @@ mod outbound;
 
 pub use outbound::{
     AnthropicCodec, AnthropicEncodeContext, AnthropicResponseTemplate, AnthropicStopReason,
-    AnthropicTokenCount, ChatCodec, ChatEncodeContext, ChatFinishReason, ChatResponseTemplate,
-    ResponsesCodec, ResponsesEncodeContext, ResponsesResponseTemplate, TokenCounter,
+    AnthropicTokenCount, AzureAdapter, AzureConfig, AzureStreamDecoder, ChatCodec,
+    ChatEncodeContext, ChatFinishReason, ChatResponseTemplate, CursorAdapter, CursorConfig,
+    GeminiAdapter, GeminiConfig, GeminiStreamDecoder, ResponsesCodec, ResponsesEncodeContext,
+    ResponsesResponseTemplate, TokenCounter, UpstreamLimits, UpstreamRequest,
 };
 
 /// Canonical extension containing validated Anthropic blocks that have no

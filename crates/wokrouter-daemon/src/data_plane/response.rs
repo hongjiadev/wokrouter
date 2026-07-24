@@ -42,17 +42,6 @@ pub(crate) async fn health() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
-pub(crate) async fn unsupported(
-    Extension(request_id): Extension<RequestId>,
-    Extension(protocol): Extension<ClientProtocol>,
-) -> Response {
-    gateway_error_response(
-        GatewayError::unsupported_capability(),
-        &request_id,
-        protocol,
-    )
-}
-
 pub(crate) async fn unsupported_json(
     Extension(request_id): Extension<RequestId>,
     Extension(protocol): Extension<ClientProtocol>,

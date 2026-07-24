@@ -284,7 +284,7 @@ async fn registry_exposes_health_and_all_frozen_v1_paths() {
 
     for (method, path, body) in routes {
         let response = send(&test.app, request(method, path, body.unwrap_or_default())).await;
-        if path == "/healthz" {
+        if matches!(path, "/healthz" | "/v1/models") {
             assert_eq!(response.status(), StatusCode::OK, "{path}");
         } else {
             assert_eq!(

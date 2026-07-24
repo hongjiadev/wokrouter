@@ -9,7 +9,7 @@ use futures::Stream;
 use secrecy::SecretString;
 use wokrouter_protocols::canonical::{CanonicalEvent, CanonicalRequest, GatewayError, RequestId};
 
-use super::{extract::front_door, response};
+use super::{ModelCatalogSnapshot, extract::front_door, models, response};
 
 pub const DEFAULT_JSON_BODY_BYTES: usize = 16 * 1024 * 1024;
 
@@ -17,6 +17,10 @@ pub type CanonicalStream = Pin<Box<dyn Stream<Item = Result<CanonicalEvent, Gate
 
 pub trait ImmutableSnapshot: Send + Sync {
     fn revision(&self) -> u64;
+
+    fn model_catalog(&self) -> ModelCatalogSnapshot {
+        ModelCatalogSnapshot::default()
+    }
 }
 
 #[derive(Clone)]
@@ -129,7 +133,7 @@ pub fn build_data_plane(state: DataPlaneState) -> Router {
             "/v1/messages/count_tokens",
             post(response::unsupported_json),
         )
-        .route("/v1/models", get(response::unsupported))
+        .route("/v1/models", get(models::models))
         .route("/v1/images/generations", post(response::unsupported_json))
         .route("/v1/images/edits", post(response::unsupported_json))
         .with_state(state.clone())

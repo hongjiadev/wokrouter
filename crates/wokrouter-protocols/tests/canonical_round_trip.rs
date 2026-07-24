@@ -250,6 +250,13 @@ fn gateway_error_categories_have_stable_public_contracts() {
             "The requested capability is not supported.",
         ),
         (
+            GatewayError::no_executor(),
+            "no_executor",
+            501,
+            RetryClass::Never,
+            "No executor is configured for the requested operation.",
+        ),
+        (
             GatewayError::upstream_auth("Authorization: Bearer secret-token"),
             "upstream_auth",
             502,

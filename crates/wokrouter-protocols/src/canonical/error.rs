@@ -58,6 +58,7 @@ enum ErrorKind {
     InvalidRequest,
     ModelNotFound,
     UnsupportedCapability,
+    NoExecutor,
     UpstreamAuth,
     RateLimited { retry_after_seconds: Option<u64> },
     UpstreamError { status: u16 },
@@ -84,6 +85,10 @@ impl GatewayError {
 
     pub fn unsupported_capability() -> Self {
         Self::new(ErrorKind::UnsupportedCapability)
+    }
+
+    pub fn no_executor() -> Self {
+        Self::new(ErrorKind::NoExecutor)
     }
 
     pub fn upstream_auth(diagnostic: impl Into<String>) -> Self {
@@ -117,6 +122,7 @@ impl GatewayError {
             ErrorKind::InvalidRequest => "invalid_request",
             ErrorKind::ModelNotFound => "model_not_found",
             ErrorKind::UnsupportedCapability => "unsupported_capability",
+            ErrorKind::NoExecutor => "no_executor",
             ErrorKind::UpstreamAuth => "upstream_auth",
             ErrorKind::RateLimited { .. } => "rate_limited",
             ErrorKind::UpstreamError { .. } => "upstream_error",
@@ -130,6 +136,7 @@ impl GatewayError {
             ErrorKind::InvalidRequest => 400,
             ErrorKind::ModelNotFound => 404,
             ErrorKind::UnsupportedCapability => 422,
+            ErrorKind::NoExecutor => 501,
             ErrorKind::RateLimited { .. } => 429,
             ErrorKind::InternalError => 500,
             ErrorKind::UpstreamAuth
@@ -148,6 +155,7 @@ impl GatewayError {
             ErrorKind::InvalidRequest
             | ErrorKind::ModelNotFound
             | ErrorKind::UnsupportedCapability
+            | ErrorKind::NoExecutor
             | ErrorKind::InternalError => RetryClass::Never,
         }
     }
@@ -157,6 +165,7 @@ impl GatewayError {
             ErrorKind::InvalidRequest => "The request is invalid.",
             ErrorKind::ModelNotFound => "The requested model is not available.",
             ErrorKind::UnsupportedCapability => "The requested capability is not supported.",
+            ErrorKind::NoExecutor => "No executor is configured for the requested operation.",
             ErrorKind::UpstreamAuth => "The upstream account needs to be authenticated again.",
             ErrorKind::RateLimited { .. } => "The request was rate limited.",
             ErrorKind::UpstreamError { .. } => "The upstream service failed.",
