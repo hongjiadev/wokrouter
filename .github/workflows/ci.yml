@@ -16,6 +16,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+      - name: Self-test public repository hygiene checker
+        shell: pwsh
+        run: pwsh tests/scripts/check-public-repo-hygiene.tests.ps1
+      - name: Check public repository hygiene
+        shell: pwsh
+        run: pwsh tests/scripts/check-public-repo-hygiene.ps1
       - name: Install Tauri system dependencies
         run: |
           sudo apt-get update
@@ -78,6 +84,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+      - name: Self-test public repository hygiene checker
+        shell: pwsh
+        run: pwsh tests/scripts/check-public-repo-hygiene.tests.ps1
+      - name: Check public repository hygiene
+        shell: pwsh
+        run: pwsh tests/scripts/check-public-repo-hygiene.ps1
       - name: Install Tauri system dependencies
         if: runner.os == 'Linux'
         run: |
