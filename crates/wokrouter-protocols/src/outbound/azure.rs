@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 use url::Url;
 
@@ -198,6 +199,7 @@ impl AzureAdapter {
             received_bytes: 0,
             limits: self.limits,
             failed: false,
+            finished: false,
             saw_done: false,
             emitted_events: 0,
         }
@@ -210,13 +212,14 @@ pub struct AzureStreamDecoder {
     received_bytes: usize,
     limits: UpstreamLimits,
     failed: bool,
+    finished: bool,
     saw_done: bool,
     emitted_events: usize,
 }
 
 impl AzureStreamDecoder {
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<CanonicalEvent>, GatewayError> {
-        if self.failed || self.saw_done {
+        if self.failed || self.finished || self.saw_done {
             return Err(GatewayError::invalid_request());
         }
         self.received_bytes = self.received_bytes.saturating_add(chunk.len());
@@ -230,6 +233,10 @@ impl AzureStreamDecoder {
         })?;
         let mut events = Vec::new();
         for frame in frames {
+            if self.saw_done {
+                self.failed = true;
+                return Err(GatewayError::invalid_request());
+            }
             if frame.data.trim() == "[DONE]" {
                 self.saw_done = true;
                 continue;
@@ -251,7 +258,15 @@ impl AzureStreamDecoder {
     }
 
     pub fn finish(&mut self) -> Result<Vec<CanonicalEvent>, GatewayError> {
-        if self.failed {
+        if self.failed || self.finished {
+            return Err(GatewayError::invalid_request());
+        }
+        self.sse.finish().map_err(|_| {
+            self.failed = true;
+            GatewayError::invalid_request()
+        })?;
+        if !self.saw_done {
+            self.failed = true;
             return Err(GatewayError::invalid_request());
         }
         let events = self.response.finish().inspect_err(|_| {
@@ -262,6 +277,7 @@ impl AzureStreamDecoder {
                 self.failed = true;
             },
         )?;
+        self.finished = true;
         Ok(events)
     }
 }
@@ -578,31 +594,59 @@ fn bounded_array(value: &Value, limits: UpstreamLimits) -> Result<&[Value], Gate
     Ok(values)
 }
 
+#[derive(Deserialize)]
+struct AzureUsageWire {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    prompt_tokens_details: Option<AzurePromptTokensDetailsWire>,
+    completion_tokens_details: Option<AzureCompletionTokensDetailsWire>,
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct AzurePromptTokensDetailsWire {
+    cached_tokens: Option<u64>,
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct AzureCompletionTokensDetailsWire {
+    reasoning_tokens: Option<u64>,
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
+}
+
 fn openai_usage(value: &Value) -> Result<Usage, GatewayError> {
-    let object = value
-        .as_object()
-        .ok_or_else(GatewayError::invalid_request)?;
-    let cached_input_tokens = object
-        .get("prompt_tokens_details")
-        .and_then(|details| details.get("cached_tokens"))
-        .map(|value| value.as_u64().ok_or_else(GatewayError::invalid_request))
-        .transpose()?;
-    let reasoning_tokens = object
-        .get("completion_tokens_details")
-        .and_then(|details| details.get("reasoning_tokens"))
-        .map(|value| value.as_u64().ok_or_else(GatewayError::invalid_request))
-        .transpose()?;
+    let wire: AzureUsageWire =
+        serde_json::from_value(value.clone()).map_err(|_| GatewayError::invalid_request())?;
+    let mut extensions = wire.extensions;
+    if let Some(details) = wire.prompt_tokens_details.as_ref()
+        && !details.extensions.is_empty()
+    {
+        extensions.insert(
+            "prompt_tokens_details".to_owned(),
+            Value::Object(details.extensions.clone().into_iter().collect()),
+        );
+    }
+    if let Some(details) = wire.completion_tokens_details.as_ref()
+        && !details.extensions.is_empty()
+    {
+        extensions.insert(
+            "completion_tokens_details".to_owned(),
+            Value::Object(details.extensions.clone().into_iter().collect()),
+        );
+    }
     Ok(Usage {
-        input_tokens: object
-            .get("prompt_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        output_tokens: object
-            .get("completion_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        cached_input_tokens,
-        reasoning_tokens,
-        extensions: BTreeMap::new(),
+        input_tokens: wire.prompt_tokens.unwrap_or(0),
+        output_tokens: wire.completion_tokens.unwrap_or(0),
+        cached_input_tokens: wire
+            .prompt_tokens_details
+            .and_then(|details| details.cached_tokens),
+        reasoning_tokens: wire
+            .completion_tokens_details
+            .and_then(|details| details.reasoning_tokens),
+        extensions,
     })
 }

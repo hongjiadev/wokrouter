@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use url::Url;
 
@@ -195,6 +196,7 @@ impl GeminiAdapter {
             received_bytes: 0,
             limits: self.limits,
             failed: false,
+            finished: false,
             emitted_events: 0,
         }
     }
@@ -206,12 +208,13 @@ pub struct GeminiStreamDecoder {
     received_bytes: usize,
     limits: UpstreamLimits,
     failed: bool,
+    finished: bool,
     emitted_events: usize,
 }
 
 impl GeminiStreamDecoder {
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<CanonicalEvent>, GatewayError> {
-        if self.failed {
+        if self.failed || self.finished || self.response.saw_terminal {
             return Err(GatewayError::invalid_request());
         }
         self.received_bytes = self.received_bytes.saturating_add(chunk.len());
@@ -242,7 +245,15 @@ impl GeminiStreamDecoder {
     }
 
     pub fn finish(&mut self) -> Result<Vec<CanonicalEvent>, GatewayError> {
-        if self.failed {
+        if self.failed || self.finished {
+            return Err(GatewayError::invalid_request());
+        }
+        self.sse.finish().map_err(|_| {
+            self.failed = true;
+            GatewayError::invalid_request()
+        })?;
+        if !self.response.saw_terminal {
+            self.failed = true;
             return Err(GatewayError::invalid_request());
         }
         let events = self.response.finish().inspect_err(|_| {
@@ -253,6 +264,7 @@ impl GeminiStreamDecoder {
                 self.failed = true;
             },
         )?;
+        self.finished = true;
         Ok(events)
     }
 }
@@ -264,6 +276,7 @@ struct GeminiResponseDecoder {
     completed: bool,
     next_item: usize,
     pending_usage: Option<Usage>,
+    saw_terminal: bool,
 }
 
 impl GeminiResponseDecoder {
@@ -275,10 +288,14 @@ impl GeminiResponseDecoder {
             completed: false,
             next_item: 0,
             pending_usage: None,
+            saw_terminal: false,
         }
     }
 
     fn decode_value(&mut self, value: &Value) -> Result<Vec<CanonicalEvent>, GatewayError> {
+        if self.saw_terminal {
+            return Err(GatewayError::invalid_request());
+        }
         let root = value
             .as_object()
             .ok_or_else(GatewayError::invalid_request)?;
@@ -314,7 +331,16 @@ impl GeminiResponseDecoder {
             if candidates.len() > self.limits.max_collection_items {
                 return Err(GatewayError::invalid_request());
             }
+            let mut saw_terminal = false;
             for candidate in candidates {
+                if let Some(finish_reason) = candidate.get("finishReason") {
+                    let finish_reason = finish_reason
+                        .as_str()
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(GatewayError::invalid_request)?;
+                    let _ = finish_reason;
+                    saw_terminal = true;
+                }
                 let Some(parts) = candidate
                     .get("content")
                     .and_then(|content| content.get("parts"))
@@ -329,6 +355,7 @@ impl GeminiResponseDecoder {
                     self.decode_part(part, &mut events)?;
                 }
             }
+            self.saw_terminal = saw_terminal;
         }
         Ok(events)
     }
@@ -415,27 +442,25 @@ impl GeminiResponseDecoder {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiUsageWire {
+    prompt_token_count: Option<u64>,
+    candidates_token_count: Option<u64>,
+    cached_content_token_count: Option<u64>,
+    thoughts_token_count: Option<u64>,
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
+}
+
 fn gemini_usage(value: &Value) -> Result<Usage, GatewayError> {
-    let object = value
-        .as_object()
-        .ok_or_else(GatewayError::invalid_request)?;
+    let wire: GeminiUsageWire =
+        serde_json::from_value(value.clone()).map_err(|_| GatewayError::invalid_request())?;
     Ok(Usage {
-        input_tokens: object
-            .get("promptTokenCount")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        output_tokens: object
-            .get("candidatesTokenCount")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        cached_input_tokens: object
-            .get("cachedContentTokenCount")
-            .map(|value| value.as_u64().ok_or_else(GatewayError::invalid_request))
-            .transpose()?,
-        reasoning_tokens: object
-            .get("thoughtsTokenCount")
-            .map(|value| value.as_u64().ok_or_else(GatewayError::invalid_request))
-            .transpose()?,
-        extensions: BTreeMap::new(),
+        input_tokens: wire.prompt_token_count.unwrap_or(0),
+        output_tokens: wire.candidates_token_count.unwrap_or(0),
+        cached_input_tokens: wire.cached_content_token_count,
+        reasoning_tokens: wire.thoughts_token_count,
+        extensions: wire.extensions,
     })
 }

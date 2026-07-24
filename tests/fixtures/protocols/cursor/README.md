@@ -18,25 +18,28 @@ tool arguments, and usage counts are fixed synthetic values. No token, account
 identifier, internal endpoint, command output, captured traffic, or production
 body is present.
 
-Independent verification was run with Python `google.protobuf` 6.33.5, not the
-Rust production codec. The temporary probe defined the pinned message subset in
-a dynamic `FileDescriptorProto`, parsed every response payload, and asserted
-`SerializeToString(deterministic=True) == payload`; it independently encoded the
-normalized request fixture. Exact invocation:
+Independent verification uses Python `google.protobuf==6.33.5`, not the Rust
+production codec. The committed probe defines the pinned message subset in a
+dynamic `FileDescriptorProto`, verifies the SHA-256 of every fixture, parses
+every response payload, and asserts
+`SerializeToString(deterministic=True) == payload`; it also independently
+encodes the normalized request fixture. Exact invocation:
 
 ```text
-python tests/fixtures/protocols/cursor/verify_fixture.py
-python tests/fixtures/protocols/cursor/verify_again.py
+python tests/fixtures/protocols/cursor/verify_fixtures.py
 ```
 
-The probe output identified, in order, `text_delta("Hello")`,
+The expected summary identifies, in order, `text_delta("Hello")`,
 `thinking_delta("Checking.")`, MCP `weather/call_cursor`,
 two cumulative `partial_tool_call` values ending in `{"city":"Paris"}`,
 `token_delta(3)`, `turn_ended`, Connect end-stream `{}`, and the separate
 `exec_server_message`. The request output was a 97-byte protobuf
-payload inside a flags-zero Connect frame. The temporary probe was removed
-after verification so these static fixtures do not add a generation dependency.
-The second probe revalidated every protobuf payload byte-for-byte after the
-two cumulative partial frames and success trailer were added; it reported
-`partials=['{"city":', '{"city":"Paris"}']`, `connect_end_stream=True`, and
-`bytes=239`.
+payload inside a flags-zero Connect frame.
+
+Fixture file SHA-256:
+
+```text
+request/run.connect.hex  602e78062b9e339314ecc5ba8ec38695f82fa6e3311a9fd378e64f453dc6d42e
+stream/tool.connect.hex  b9fc35502595b7caa4343d4ddfba05684b89ba3473a4475f26f0a1eca302f592
+stream/exec.connect.hex  68a9bb76c85d22d98ff0f36af18b6c619cb179badcd42623a122ec9e621e03e5
+```

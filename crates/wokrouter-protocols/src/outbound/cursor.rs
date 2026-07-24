@@ -58,6 +58,9 @@ impl CursorAdapter {
         if !self.config.enabled {
             return Err(GatewayError::unsupported_capability());
         }
+        if request.reasoning.is_some() {
+            return Err(GatewayError::unsupported_capability());
+        }
         if request.input.len() > self.limits.max_collection_items
             || request.tools.len() > self.limits.max_collection_items
         {
@@ -386,7 +389,7 @@ impl CursorStreamDecoder {
             Some(agent_server_message::Message::InteractionUpdate(update)) => {
                 self.decode_interaction(update, events)
             }
-            None => Ok(()),
+            None => Err(GatewayError::unsupported_capability()),
         }
     }
 
@@ -417,10 +420,14 @@ impl CursorStreamDecoder {
                     return Err(GatewayError::invalid_request());
                 }
                 // The pinned schema defines this as aggregate argument text so far.
-                if value.args_text_delta.len() >= state.arguments.len() {
+                if value.args_text_delta == state.arguments {
+                    Ok(())
+                } else if value.args_text_delta.starts_with(&state.arguments) {
                     state.arguments = value.args_text_delta;
+                    Ok(())
+                } else {
+                    Err(GatewayError::invalid_request())
                 }
-                Ok(())
             }
             Some(interaction_update::Message::ToolCallCompleted(value)) => {
                 if !self.active_tools.contains_key(&value.call_id) {
@@ -458,7 +465,7 @@ impl CursorStreamDecoder {
                 self.turn_ended = true;
                 Ok(())
             }
-            None => Ok(()),
+            None => Err(GatewayError::unsupported_capability()),
         }
     }
 

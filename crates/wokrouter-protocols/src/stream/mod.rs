@@ -12,6 +12,8 @@ pub enum ProtocolError {
     InvalidUtf8,
     #[error("SSE decoder cannot be reused after an error")]
     DecoderFailed,
+    #[error("SSE stream ended with an unterminated frame")]
+    UnexpectedEof,
     #[error("event channel capacity must be greater than zero")]
     InvalidChannelCapacity,
 }

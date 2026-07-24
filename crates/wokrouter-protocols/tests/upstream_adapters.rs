@@ -5,7 +5,8 @@ use wokrouter_protocols::{
     AzureAdapter, AzureConfig, CursorAdapter, CursorConfig, GeminiAdapter, GeminiConfig,
     UpstreamLimits,
     canonical::{
-        CanonicalEvent, CanonicalRequest, InputItem, PublicModelId, RequestId, ToolDefinition,
+        CanonicalEvent, CanonicalRequest, InputItem, PublicModelId, ReasoningOptions, RequestId,
+        ToolDefinition,
     },
 };
 
@@ -24,6 +25,27 @@ fn fixture_hex(relative: &str) -> Vec<u8> {
         .flat_map(str::split_whitespace)
         .map(|byte| u8::from_str_radix(byte, 16).unwrap())
         .collect()
+}
+
+fn connect_frame(payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(payload.len() + 5);
+    frame.push(0);
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(payload);
+    frame
+}
+
+fn split_connect_frames(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let payload_len =
+            u32::from_be_bytes(bytes[offset + 1..offset + 5].try_into().unwrap()) as usize;
+        let frame_end = offset + 5 + payload_len;
+        frames.push(bytes[offset..frame_end].to_vec());
+        offset = frame_end;
+    }
+    frames
 }
 
 fn request(model: &str, stream: bool) -> CanonicalRequest {
@@ -120,6 +142,87 @@ fn gemini_rejects_endpoint_escape_and_bounds_stream_frames() {
 }
 
 #[test]
+fn gemini_usage_wire_preserves_extensions_and_rejects_malformed_known_fields() {
+    let adapter = GeminiAdapter::new(
+        GeminiConfig::new(Url::parse("https://example.test/").unwrap(), "secret").unwrap(),
+        UpstreamLimits::default(),
+    );
+    let events = adapter
+        .decode_response(
+            RequestId::new("req_gemini_usage"),
+            br#"{
+                "candidates": [],
+                "usageMetadata": {
+                    "promptTokenCount": 11,
+                    "candidatesTokenCount": 7,
+                    "cachedContentTokenCount": 3,
+                    "thoughtsTokenCount": 2,
+                    "vendorMetric": {"tier": "warm"},
+                    "input_tokens": 999
+                }
+            }"#,
+        )
+        .unwrap();
+    let usage = events
+        .iter()
+        .find_map(|event| match event {
+            CanonicalEvent::Usage(usage) => Some(usage),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(usage.input_tokens, 11);
+    assert_eq!(usage.output_tokens, 7);
+    assert_eq!(usage.cached_input_tokens, Some(3));
+    assert_eq!(usage.reasoning_tokens, Some(2));
+    assert_eq!(
+        usage.extensions,
+        BTreeMap::from([
+            ("input_tokens".to_owned(), serde_json::json!(999)),
+            (
+                "vendorMetric".to_owned(),
+                serde_json::json!({"tier": "warm"})
+            ),
+        ])
+    );
+
+    for usage in [
+        serde_json::json!({"promptTokenCount": "11"}),
+        serde_json::json!({"candidatesTokenCount": "7"}),
+        serde_json::json!({"cachedContentTokenCount": "3"}),
+        serde_json::json!({"thoughtsTokenCount": "2"}),
+    ] {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "candidates": [],
+            "usageMetadata": usage,
+        }))
+        .unwrap();
+        assert_eq!(
+            adapter
+                .decode_response(RequestId::new("req_gemini_bad_usage"), &body)
+                .unwrap_err()
+                .code(),
+            "invalid_request"
+        );
+    }
+
+    let absent = adapter
+        .decode_response(
+            RequestId::new("req_gemini_absent_usage"),
+            br#"{"candidates":[],"usageMetadata":{}}"#,
+        )
+        .unwrap();
+    assert!(absent.iter().any(|event| matches!(
+        event,
+        CanonicalEvent::Usage(usage)
+            if usage.input_tokens == 0
+                && usage.output_tokens == 0
+                && usage.cached_input_tokens.is_none()
+                && usage.reasoning_tokens.is_none()
+                && usage.extensions.is_empty()
+    )));
+}
+
+#[test]
 fn azure_request_response_and_url_validation_are_canonical() {
     let adapter = AzureAdapter::new(
         AzureConfig::new(
@@ -200,6 +303,92 @@ fn azure_request_response_and_url_validation_are_canonical() {
             "invalid_request"
         );
     }
+}
+
+#[test]
+fn azure_usage_wire_preserves_extensions_and_rejects_malformed_known_fields() {
+    let adapter = AzureAdapter::new(
+        AzureConfig::new(
+            Url::parse("https://fixture.openai.azure.com/").unwrap(),
+            "deployment-a",
+            "2024-10-21",
+            "secret",
+        )
+        .unwrap(),
+        UpstreamLimits::default(),
+    );
+    let events = adapter
+        .decode_response(
+            RequestId::new("req_azure_usage"),
+            br#"{
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 13,
+                    "completion_tokens": 8,
+                    "prompt_tokens_details": {"cached_tokens": 5},
+                    "completion_tokens_details": {"reasoning_tokens": 3},
+                    "vendor_metric": ["warm"],
+                    "input_tokens": 999
+                }
+            }"#,
+        )
+        .unwrap();
+    let usage = events
+        .iter()
+        .find_map(|event| match event {
+            CanonicalEvent::Usage(usage) => Some(usage),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(usage.input_tokens, 13);
+    assert_eq!(usage.output_tokens, 8);
+    assert_eq!(usage.cached_input_tokens, Some(5));
+    assert_eq!(usage.reasoning_tokens, Some(3));
+    assert_eq!(
+        usage.extensions,
+        BTreeMap::from([
+            ("input_tokens".to_owned(), serde_json::json!(999)),
+            ("vendor_metric".to_owned(), serde_json::json!(["warm"])),
+        ])
+    );
+
+    for usage in [
+        serde_json::json!({"prompt_tokens": "13"}),
+        serde_json::json!({"completion_tokens": "8"}),
+        serde_json::json!({"prompt_tokens_details": []}),
+        serde_json::json!({"completion_tokens_details": []}),
+        serde_json::json!({"prompt_tokens_details": {"cached_tokens": "5"}}),
+        serde_json::json!({"completion_tokens_details": {"reasoning_tokens": "3"}}),
+    ] {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "choices": [],
+            "usage": usage,
+        }))
+        .unwrap();
+        assert_eq!(
+            adapter
+                .decode_response(RequestId::new("req_azure_bad_usage"), &body)
+                .unwrap_err()
+                .code(),
+            "invalid_request"
+        );
+    }
+
+    let absent = adapter
+        .decode_response(
+            RequestId::new("req_azure_absent_usage"),
+            br#"{"choices":[],"usage":{}}"#,
+        )
+        .unwrap();
+    assert!(absent.iter().any(|event| matches!(
+        event,
+        CanonicalEvent::Usage(usage)
+            if usage.input_tokens == 0
+                && usage.output_tokens == 0
+                && usage.cached_input_tokens.is_none()
+                && usage.reasoning_tokens.is_none()
+                && usage.extensions.is_empty()
+    )));
 }
 
 #[test]
@@ -319,6 +508,97 @@ fn cursor_request_matches_independently_encoded_protobuf_fixture() {
 }
 
 #[test]
+fn cursor_rejects_unmapped_reasoning_options() {
+    let adapter = CursorAdapter::new(
+        CursorConfig::new(Url::parse("https://api2.cursor.sh/").unwrap(), true).unwrap(),
+        UpstreamLimits::default(),
+    );
+    let mut request = request("cursor/composer-2.5", true);
+    request.reasoning = Some(ReasoningOptions {
+        effort: Some("high".to_owned()),
+        extensions: BTreeMap::new(),
+    });
+
+    assert_eq!(
+        adapter.build_request(&request).unwrap_err().code(),
+        "unsupported_capability"
+    );
+}
+
+#[test]
+fn cursor_rejects_missing_and_unknown_required_oneofs() {
+    let adapter = CursorAdapter::new(
+        CursorConfig::new(Url::parse("https://api2.cursor.sh/").unwrap(), true).unwrap(),
+        UpstreamLimits::default(),
+    );
+    for payload in [
+        Vec::new(),
+        vec![0x32, 0x00],
+        vec![0x0a, 0x00],
+        vec![0x0a, 0x03, 0x92, 0x01, 0x00],
+    ] {
+        let mut decoder = adapter.stream_decoder(RequestId::new("req_unknown_oneof"));
+        assert_eq!(
+            decoder.push(&connect_frame(&payload)).unwrap_err().code(),
+            "unsupported_capability"
+        );
+        assert_eq!(
+            decoder.push(&connect_frame(&[])).unwrap_err().code(),
+            "invalid_request"
+        );
+    }
+}
+
+#[test]
+fn cursor_cumulative_tool_arguments_must_equal_or_prefix_extend() {
+    let adapter = CursorAdapter::new(
+        CursorConfig::new(Url::parse("https://api2.cursor.sh/").unwrap(), true).unwrap(),
+        UpstreamLimits::default(),
+    );
+    let frames = split_connect_frames(&fixture_hex("cursor/stream/tool.connect.hex"));
+
+    let mut equal = adapter.stream_decoder(RequestId::new("req_equal"));
+    for frame in &frames[..4] {
+        equal.push(frame).unwrap();
+    }
+    equal.push(&frames[3]).unwrap();
+    for frame in &frames[4..] {
+        equal.push(frame).unwrap();
+    }
+    equal.finish().unwrap();
+
+    let mut valid_extension = adapter.stream_decoder(RequestId::new("req_extension"));
+    for frame in &frames {
+        valid_extension.push(frame).unwrap();
+    }
+    valid_extension.finish().unwrap();
+
+    let mut shorter = adapter.stream_decoder(RequestId::new("req_shorter"));
+    for frame in &frames[..5] {
+        shorter.push(frame).unwrap();
+    }
+    assert_eq!(
+        shorter.push(&frames[3]).unwrap_err().code(),
+        "invalid_request"
+    );
+
+    let mut divergent_frame = frames[3].clone();
+    let city = divergent_frame
+        .windows(4)
+        .position(|window| window == b"city")
+        .unwrap();
+    divergent_frame[city..city + 4].copy_from_slice(b"town");
+    let mut divergent = adapter.stream_decoder(RequestId::new("req_divergent"));
+    for frame in &frames[..4] {
+        divergent.push(frame).unwrap();
+    }
+    assert_eq!(
+        divergent.push(&divergent_frame).unwrap_err().code(),
+        "invalid_request"
+    );
+}
+
+#[test]
 fn cursor_executor_hook_without_executor_is_typed_and_redacted() {
     let adapter = CursorAdapter::new(
         CursorConfig::new(
@@ -424,7 +704,7 @@ fn stream_event_limits_are_aggregate_across_push_and_finish_calls() {
     );
     assert_eq!(
         gemini_decoder
-            .push(b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"x\"}]}}]}\n\n")
+            .push(b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"x\"}]},\"finishReason\":\"STOP\"}]}\n\n")
             .unwrap()
             .len(),
         1
@@ -459,6 +739,7 @@ fn stream_event_limits_are_aggregate_across_push_and_finish_calls() {
             .len(),
         1
     );
+    assert!(azure_decoder.push(b"data: [DONE]\n\n").unwrap().is_empty());
     assert_eq!(
         azure_decoder.finish().unwrap_err().code(),
         "invalid_request"
@@ -484,6 +765,107 @@ fn stream_event_limits_are_aggregate_across_push_and_finish_calls() {
             .push(&fixture[first_frame_end..second_frame_end])
             .unwrap_err()
             .code(),
+        "invalid_request"
+    );
+}
+
+#[test]
+fn gemini_and_azure_streams_require_clean_eof_and_formal_terminals() {
+    let gemini = GeminiAdapter::new(
+        GeminiConfig::new(Url::parse("https://example.test/").unwrap(), "secret").unwrap(),
+        UpstreamLimits::default(),
+    );
+    let mut gemini_missing_terminal = gemini.stream_decoder(RequestId::new("req_gemini_missing"));
+    gemini_missing_terminal
+        .push(b"data: {\"candidates\":[]}\n\n")
+        .unwrap();
+    assert_eq!(
+        gemini_missing_terminal.finish().unwrap_err().code(),
+        "invalid_request"
+    );
+    assert_eq!(
+        gemini_missing_terminal
+            .push(b"data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n")
+            .unwrap_err()
+            .code(),
+        "invalid_request"
+    );
+
+    let mut gemini_truncated = gemini.stream_decoder(RequestId::new("req_gemini_truncated"));
+    gemini_truncated
+        .push(b"data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\ndata: {")
+        .unwrap();
+    assert_eq!(
+        gemini_truncated.finish().unwrap_err().code(),
+        "invalid_request"
+    );
+
+    let mut gemini_complete = gemini.stream_decoder(RequestId::new("req_gemini_complete"));
+    gemini_complete
+        .push(b"data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n")
+        .unwrap();
+    assert_eq!(
+        gemini_complete.finish().unwrap().last(),
+        Some(&CanonicalEvent::Completed)
+    );
+    assert_eq!(
+        gemini_complete.finish().unwrap_err().code(),
+        "invalid_request"
+    );
+    assert_eq!(
+        gemini_complete.push(b"data: {}\n\n").unwrap_err().code(),
+        "invalid_request"
+    );
+
+    let azure = AzureAdapter::new(
+        AzureConfig::new(
+            Url::parse("https://example.test/").unwrap(),
+            "deployment",
+            "2024-10-21",
+            "secret",
+        )
+        .unwrap(),
+        UpstreamLimits::default(),
+    );
+    let mut azure_missing_done = azure.stream_decoder(RequestId::new("req_azure_missing"));
+    azure_missing_done
+        .push(b"data: {\"id\":\"az\",\"choices\":[]}\n\n")
+        .unwrap();
+    assert_eq!(
+        azure_missing_done.finish().unwrap_err().code(),
+        "invalid_request"
+    );
+    assert_eq!(
+        azure_missing_done
+            .push(b"data: [DONE]\n\n")
+            .unwrap_err()
+            .code(),
+        "invalid_request"
+    );
+
+    let mut azure_truncated = azure.stream_decoder(RequestId::new("req_azure_truncated"));
+    azure_truncated
+        .push(b"data: {\"id\":\"az\",\"choices\":[]}\n\ndata: [DONE]")
+        .unwrap();
+    assert_eq!(
+        azure_truncated.finish().unwrap_err().code(),
+        "invalid_request"
+    );
+
+    let mut azure_complete = azure.stream_decoder(RequestId::new("req_azure_complete"));
+    azure_complete
+        .push(b"data: {\"id\":\"az\",\"choices\":[]}\n\ndata: [DONE]\n\n")
+        .unwrap();
+    assert_eq!(
+        azure_complete.finish().unwrap().last(),
+        Some(&CanonicalEvent::Completed)
+    );
+    assert_eq!(
+        azure_complete.finish().unwrap_err().code(),
+        "invalid_request"
+    );
+    assert_eq!(
+        azure_complete.push(b"data: {}\n\n").unwrap_err().code(),
         "invalid_request"
     );
 }

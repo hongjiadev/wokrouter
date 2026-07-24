@@ -185,6 +185,39 @@ fn decoder_rejects_invalid_utf8_and_fails_closed() {
 }
 
 #[test]
+fn decoder_finish_rejects_an_unterminated_tail_and_is_permanent() {
+    let mut truncated = SseDecoder::new(1024);
+    assert!(truncated.push(b"data: {\"partial\":").unwrap().is_empty());
+    assert_eq!(
+        truncated.finish().unwrap_err(),
+        ProtocolError::UnexpectedEof
+    );
+    assert_eq!(
+        truncated.push(b"true}\n\n").unwrap_err(),
+        ProtocolError::DecoderFailed
+    );
+    assert_eq!(
+        truncated.finish().unwrap_err(),
+        ProtocolError::DecoderFailed
+    );
+
+    let mut complete = SseDecoder::new(1024);
+    assert_eq!(
+        complete.push(b"data: {}\n\n").unwrap(),
+        [SseFrame {
+            event: None,
+            data: "{}".to_owned(),
+        }]
+    );
+    assert!(complete.finish().unwrap().is_empty());
+    assert_eq!(complete.finish().unwrap_err(), ProtocolError::DecoderFailed);
+    assert_eq!(
+        complete.push(b"data: {}\n\n").unwrap_err(),
+        ProtocolError::DecoderFailed
+    );
+}
+
+#[test]
 fn encoder_writes_compact_json_and_a_standard_frame_terminator() {
     let encoded = encode_sse(
         Some("response.output_text.delta"),

@@ -56,6 +56,22 @@ impl SseDecoder {
         }
     }
 
+    pub fn finish(&mut self) -> Result<Vec<SseFrame>, ProtocolError> {
+        if self.failed {
+            return Err(ProtocolError::DecoderFailed);
+        }
+        self.failed = true;
+        if !self.line.is_empty()
+            || self.event.is_some()
+            || !self.data.is_empty()
+            || self.saw_data
+            || self.frame_bytes != 0
+        {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        Ok(Vec::new())
+    }
+
     fn push_inner(&mut self, chunk: &[u8]) -> Result<Vec<SseFrame>, ProtocolError> {
         let mut frames = Vec::new();
 

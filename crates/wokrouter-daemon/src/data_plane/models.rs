@@ -69,10 +69,21 @@ impl ModelCatalogSnapshot {
             model.validate()?;
         }
         models.sort_by(|left, right| left.id.cmp(&right.id));
-        if models.windows(2).any(|models| models[0].id == models[1].id) {
-            return Err(GatewayError::invalid_request());
+        let mut deduplicated: Vec<PublicModelMetadata> = Vec::with_capacity(models.len());
+        for model in models {
+            if let Some(previous) = deduplicated.last()
+                && previous.id == model.id
+            {
+                if previous == &model {
+                    continue;
+                }
+                return Err(GatewayError::invalid_request());
+            }
+            deduplicated.push(model);
         }
-        Ok(Self { models })
+        Ok(Self {
+            models: deduplicated,
+        })
     }
 
     pub fn models(&self) -> &[PublicModelMetadata] {
