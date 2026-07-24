@@ -5,6 +5,7 @@ import * as sidecars from "./stage-sidecars.mjs";
 const {
   cargoBuildArguments,
   resolveTargetTriple,
+  resolveTargetTripleFromEnvironment,
   sidecarFileName,
   sidecarPaths,
   stageBuiltSidecars,
@@ -13,11 +14,12 @@ const {
 
 const supportedTauriTargets = [
   ["windows", "x86_64", "x86_64-pc-windows-msvc"],
-  ["macos", "x86_64", "x86_64-apple-darwin"],
-  ["macos", "aarch64", "aarch64-apple-darwin"],
+  ["darwin", "x86_64", "x86_64-apple-darwin"],
+  ["darwin", "aarch64", "aarch64-apple-darwin"],
   ["linux", "x86_64", "x86_64-unknown-linux-gnu"],
   ["linux", "aarch64", "aarch64-unknown-linux-gnu"],
 ];
+const supportedTargetTriples = supportedTauriTargets.map(([, , triple]) => triple);
 
 describe("target resolution", () => {
   it.each(supportedTauriTargets)(
@@ -33,11 +35,12 @@ describe("target resolution", () => {
     ).toThrow("Unsupported Tauri target: windows/aarch64");
   });
 
-  it("prefers explicit, Cargo, and Tauri targets before the native fallback", () => {
+  it("prefers explicit, Cargo, direct Tauri, and platform targets before the native fallback", () => {
     expect(
       resolveTargetTriple({
         explicitTarget: "aarch64-apple-darwin",
         cargoBuildTarget: "x86_64-unknown-linux-gnu",
+        tauriTargetTriple: "x86_64-apple-darwin",
         tauriPlatform: "windows",
         tauriArch: "x86_64",
         hostTargetTriple: "x86_64-pc-windows-msvc",
@@ -46,6 +49,7 @@ describe("target resolution", () => {
     expect(
       resolveTargetTriple({
         cargoBuildTarget: "x86_64-unknown-linux-gnu",
+        tauriTargetTriple: "x86_64-apple-darwin",
         tauriPlatform: "windows",
         tauriArch: "x86_64",
         hostTargetTriple: "x86_64-pc-windows-msvc",
@@ -53,7 +57,15 @@ describe("target resolution", () => {
     ).toBe("x86_64-unknown-linux-gnu");
     expect(
       resolveTargetTriple({
-        tauriPlatform: "macos",
+        tauriTargetTriple: "aarch64-apple-darwin",
+        tauriPlatform: "windows",
+        tauriArch: "x86_64",
+        hostTargetTriple: "x86_64-pc-windows-msvc",
+      }),
+    ).toBe("aarch64-apple-darwin");
+    expect(
+      resolveTargetTriple({
+        tauriPlatform: "darwin",
         tauriArch: "aarch64",
         hostTargetTriple: "x86_64-pc-windows-msvc",
       }),
@@ -65,7 +77,19 @@ describe("target resolution", () => {
     ).toBe("x86_64-pc-windows-msvc");
   });
 
-  it("rejects unsupported explicit, Cargo, and native target triples", () => {
+  it.each(supportedTargetTriples)(
+    "accepts direct Tauri target triple %s",
+    (tauriTargetTriple) => {
+      expect(
+        resolveTargetTriple({
+          tauriTargetTriple,
+          hostTargetTriple: "i686-pc-windows-msvc",
+        }),
+      ).toBe(tauriTargetTriple);
+    },
+  );
+
+  it("rejects unsupported explicit, Cargo, direct Tauri, and native target triples", () => {
     expect(() =>
       resolveTargetTriple({
         explicitTarget: "aarch64-pc-windows-msvc",
@@ -79,8 +103,73 @@ describe("target resolution", () => {
       }),
     ).toThrow("Unsupported target triple: wasm32-unknown-unknown");
     expect(() =>
+      resolveTargetTriple({
+        tauriTargetTriple: "universal-apple-darwin",
+        hostTargetTriple: "x86_64-pc-windows-msvc",
+      }),
+    ).toThrow("Unsupported target triple: universal-apple-darwin");
+    expect(() =>
       resolveTargetTriple({ hostTargetTriple: "i686-pc-windows-msvc" }),
     ).toThrow("Unsupported target triple: i686-pc-windows-msvc");
+  });
+});
+
+describe("target environment resolution", () => {
+  it.each([
+    [
+      "WOKROUTER_TARGET_TRIPLE",
+      { WOKROUTER_TARGET_TRIPLE: "aarch64-apple-darwin" },
+      "aarch64-apple-darwin",
+    ],
+    [
+      "CARGO_BUILD_TARGET",
+      { CARGO_BUILD_TARGET: "x86_64-unknown-linux-gnu" },
+      "x86_64-unknown-linux-gnu",
+    ],
+    [
+      "TAURI_ENV_TARGET_TRIPLE",
+      { TAURI_ENV_TARGET_TRIPLE: "x86_64-apple-darwin" },
+      "x86_64-apple-darwin",
+    ],
+    [
+      "TAURI_ENV_PLATFORM and TAURI_ENV_ARCH",
+      { TAURI_ENV_PLATFORM: "darwin", TAURI_ENV_ARCH: "aarch64" },
+      "aarch64-apple-darwin",
+    ],
+  ])("does not read the rustc host when %s is configured", (_, environment, expected) => {
+    const readHostTargetTriple = vi.fn(() => "x86_64-pc-windows-msvc");
+
+    expect(
+      resolveTargetTripleFromEnvironment({
+        environment,
+        readHostTargetTriple,
+      }),
+    ).toBe(expected);
+    expect(readHostTargetTriple).not.toHaveBeenCalled();
+  });
+
+  it("fails fast for an unsupported direct Tauri triple without reading the rustc host", () => {
+    const readHostTargetTriple = vi.fn(() => "x86_64-pc-windows-msvc");
+
+    expect(() =>
+      resolveTargetTripleFromEnvironment({
+        environment: { TAURI_ENV_TARGET_TRIPLE: "universal-apple-darwin" },
+        readHostTargetTriple,
+      }),
+    ).toThrow("Unsupported target triple: universal-apple-darwin");
+    expect(readHostTargetTriple).not.toHaveBeenCalled();
+  });
+
+  it("reads the rustc host only when no target source is configured", () => {
+    const readHostTargetTriple = vi.fn(() => "x86_64-pc-windows-msvc");
+
+    expect(
+      resolveTargetTripleFromEnvironment({
+        environment: {},
+        readHostTargetTriple,
+      }),
+    ).toBe("x86_64-pc-windows-msvc");
+    expect(readHostTargetTriple).toHaveBeenCalledOnce();
   });
 });
 

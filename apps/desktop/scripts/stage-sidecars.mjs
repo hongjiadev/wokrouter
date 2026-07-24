@@ -23,8 +23,8 @@ const supportedTargetTriples = new Set([
 ]);
 const tauriTargets = new Map([
   ["windows/x86_64", "x86_64-pc-windows-msvc"],
-  ["macos/x86_64", "x86_64-apple-darwin"],
-  ["macos/aarch64", "aarch64-apple-darwin"],
+  ["darwin/x86_64", "x86_64-apple-darwin"],
+  ["darwin/aarch64", "aarch64-apple-darwin"],
   ["linux/x86_64", "x86_64-unknown-linux-gnu"],
   ["linux/aarch64", "aarch64-unknown-linux-gnu"],
 ]);
@@ -52,11 +52,15 @@ export function tauriTargetTriple({ platform, arch }) {
 export function resolveTargetTriple({
   explicitTarget,
   cargoBuildTarget,
+  tauriTargetTriple: directTauriTarget,
   tauriPlatform,
   tauriArch,
   hostTargetTriple,
 }) {
-  const configuredTarget = normalized(explicitTarget) ?? normalized(cargoBuildTarget);
+  const configuredTarget =
+    normalized(explicitTarget) ??
+    normalized(cargoBuildTarget) ??
+    normalized(directTauriTarget);
   if (configuredTarget) {
     return supportedTargetTriple(configuredTarget);
   }
@@ -68,6 +72,30 @@ export function resolveTargetTriple({
     throw new Error("Unable to resolve a sidecar target triple");
   }
   return supportedTargetTriple(nativeTarget);
+}
+
+export function resolveTargetTripleFromEnvironment({
+  environment,
+  readHostTargetTriple,
+}) {
+  const targetSources = [
+    environment.WOKROUTER_TARGET_TRIPLE,
+    environment.CARGO_BUILD_TARGET,
+    environment.TAURI_ENV_TARGET_TRIPLE,
+    environment.TAURI_ENV_PLATFORM,
+    environment.TAURI_ENV_ARCH,
+  ];
+  const hostTargetTriple = targetSources.some((source) => normalized(source))
+    ? undefined
+    : readHostTargetTriple();
+  return resolveTargetTriple({
+    explicitTarget: environment.WOKROUTER_TARGET_TRIPLE,
+    cargoBuildTarget: environment.CARGO_BUILD_TARGET,
+    tauriTargetTriple: environment.TAURI_ENV_TARGET_TRIPLE,
+    tauriPlatform: environment.TAURI_ENV_PLATFORM,
+    tauriArch: environment.TAURI_ENV_ARCH,
+    hostTargetTriple,
+  });
 }
 
 export function cargoBuildArguments(targetTriple) {
@@ -170,20 +198,10 @@ function main() {
   if (!rustVersion.startsWith("rustc 1.97.1 ")) {
     throw new Error(`Rust 1.97.1 is required; found ${rustVersion}`);
   }
-  const configuredTarget =
-    normalized(process.env.WOKROUTER_TARGET_TRIPLE) ||
-    normalized(process.env.CARGO_BUILD_TARGET) ||
-    normalized(process.env.TAURI_ENV_PLATFORM) ||
-    normalized(process.env.TAURI_ENV_ARCH);
-  const hostTargetTriple = configuredTarget
-    ? undefined
-    : commandOutput(rustc, ["--print", "host-tuple"]);
-  const targetTriple = resolveTargetTriple({
-    explicitTarget: process.env.WOKROUTER_TARGET_TRIPLE,
-    cargoBuildTarget: process.env.CARGO_BUILD_TARGET,
-    tauriPlatform: process.env.TAURI_ENV_PLATFORM,
-    tauriArch: process.env.TAURI_ENV_ARCH,
-    hostTargetTriple,
+  const targetTriple = resolveTargetTripleFromEnvironment({
+    environment: process.env,
+    readHostTargetTriple: () =>
+      commandOutput(rustc, ["--print", "host-tuple"]),
   });
 
   process.stdout.write(`Building sidecars for ${targetTriple}\n`);
