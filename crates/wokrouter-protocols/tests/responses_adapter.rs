@@ -2,8 +2,10 @@ use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use serde_json::{Value, json};
 use wokrouter_protocols::{
-    ResponsesCodec, UNASSIGNED_REQUEST_ID,
-    canonical::{CanonicalEvent, GatewayError, ImageDetail, InputItem, RequestId, Usage},
+    ResponsesCodec, ResponsesEncodeContext,
+    canonical::{
+        CanonicalEvent, GatewayError, ImageDetail, InputItem, PublicModelId, RequestId, Usage,
+    },
     stream::SseDecoder,
 };
 
@@ -17,6 +19,13 @@ fn fixture_bytes(path: &str) -> Vec<u8> {
 
 fn fixture_json(path: &str) -> Value {
     serde_json::from_slice(&fixture_bytes(path)).unwrap()
+}
+
+fn encode_context() -> ResponsesEncodeContext {
+    ResponsesEncodeContext {
+        model: PublicModelId::new("gpt-test"),
+        created_at: 1_723_456_789,
+    }
 }
 
 fn canonical_events() -> Vec<CanonicalEvent> {
@@ -35,6 +44,7 @@ fn canonical_events() -> Vec<CanonicalEvent> {
         CanonicalEvent::ToolCallDelta {
             item_id: "tool_1".to_owned(),
             call_id: "call_1".to_owned(),
+            name: "read_file".to_owned(),
             delta: "{\"path\":\"配置.toml\"}".to_owned(),
         },
         CanonicalEvent::Usage(Usage {
@@ -51,9 +61,10 @@ fn canonical_events() -> Vec<CanonicalEvent> {
 #[test]
 fn decodes_tool_reasoning_multimodal_and_result_fixture() {
     let request = fixture_bytes("request/tool_reasoning.json");
-    let canonical = ResponsesCodec::decode_request(&request).unwrap();
+    let canonical =
+        ResponsesCodec::decode_request(RequestId::new("request-fixture"), &request).unwrap();
 
-    assert_eq!(canonical.request_id.as_str(), UNASSIGNED_REQUEST_ID);
+    assert_eq!(canonical.request_id.as_str(), "request-fixture");
     assert_eq!(canonical.model.as_str(), "gpt-test");
     assert_eq!(
         canonical.thread_key.as_ref().unwrap().as_str(),
@@ -122,12 +133,9 @@ fn decodes_tool_reasoning_multimodal_and_result_fixture() {
 #[test]
 fn decodes_string_input_and_allows_front_door_request_id_injection() {
     let request = fixture_bytes("request/string_input.json");
-    let unassigned = ResponsesCodec::decode_request(&request).unwrap();
     let assigned =
-        ResponsesCodec::decode_request_with_id(&request, RequestId::new("request-front-door"))
-            .unwrap();
+        ResponsesCodec::decode_request(RequestId::new("request-front-door"), &request).unwrap();
 
-    assert_eq!(unassigned.request_id.as_str(), UNASSIGNED_REQUEST_ID);
     assert_eq!(assigned.request_id.as_str(), "request-front-door");
     assert_eq!(
         assigned.input,
@@ -142,7 +150,10 @@ fn accepts_only_explicitly_allowed_image_url_schemes() {
     for url in [
         "http://example.test/image.png",
         "https://example.test/image.png",
-        "data:image/png;base64,iVBORw0KGgo=",
+        "data:image/png;base64,AA==",
+        "data:image/jpeg;base64,AA==",
+        "data:image/webp;base64,AA==",
+        "data:image/gif;base64,AA==",
     ] {
         let request = json!({
             "model": "gpt-test",
@@ -153,7 +164,7 @@ fn accepts_only_explicitly_allowed_image_url_schemes() {
         });
         let encoded = serde_json::to_vec(&request).unwrap();
         assert!(
-            ResponsesCodec::decode_request(&encoded).is_ok(),
+            ResponsesCodec::decode_request(RequestId::new("request-image"), &encoded).is_ok(),
             "{url} should be accepted"
         );
     }
@@ -163,6 +174,10 @@ fn accepts_only_explicitly_allowed_image_url_schemes() {
         "javascript:alert(1)",
         "ftp://example.test/image.png",
         "data:text/html,<script>alert(1)</script>",
+        "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=",
+        "data:image/png,AA==",
+        "data:image/png;base64,not-base64",
+        "data:image/png;base64,",
     ] {
         let request = json!({
             "model": "gpt-test",
@@ -173,9 +188,45 @@ fn accepts_only_explicitly_allowed_image_url_schemes() {
         });
         let encoded = serde_json::to_vec(&request).unwrap();
         assert_eq!(
-            ResponsesCodec::decode_request(&encoded).unwrap_err(),
+            ResponsesCodec::decode_request(RequestId::new("request-image"), &encoded).unwrap_err(),
             GatewayError::invalid_request(),
             "{url} should be rejected"
+        );
+    }
+}
+
+#[test]
+fn message_role_uses_the_official_allow_list() {
+    for role in ["user", "assistant", "system", "developer"] {
+        let request = json!({
+            "model": "gpt-test",
+            "input": [{
+                "type": "message",
+                "role": role,
+                "content": "hello"
+            }]
+        });
+        let encoded = serde_json::to_vec(&request).unwrap();
+        assert!(
+            ResponsesCodec::decode_request(RequestId::new("request-role"), &encoded).is_ok(),
+            "{role} should be accepted"
+        );
+    }
+
+    for role in ["tool", "future_role"] {
+        let request = json!({
+            "model": "gpt-test",
+            "input": [{
+                "type": "message",
+                "role": role,
+                "content": "hello"
+            }]
+        });
+        let encoded = serde_json::to_vec(&request).unwrap();
+        assert_eq!(
+            ResponsesCodec::decode_request(RequestId::new("request-role"), &encoded).unwrap_err(),
+            GatewayError::invalid_request(),
+            "{role} should be rejected"
         );
     }
 }
@@ -192,7 +243,8 @@ fn reserved_nested_extension_key_does_not_overwrite_top_level_extension() {
         "responses.input_extensions": "client-value"
     });
     let encoded = serde_json::to_vec(&request).unwrap();
-    let canonical = ResponsesCodec::decode_request(&encoded).unwrap();
+    let canonical =
+        ResponsesCodec::decode_request(RequestId::new("request-extensions"), &encoded).unwrap();
 
     assert_eq!(
         canonical.extensions["responses.input_extensions"],
@@ -251,7 +303,8 @@ fn rejects_missing_or_mistyped_required_fields_and_tools() {
     for request in cases {
         let encoded = serde_json::to_vec(&request).unwrap();
         assert_eq!(
-            ResponsesCodec::decode_request(&encoded).unwrap_err(),
+            ResponsesCodec::decode_request(RequestId::new("request-invalid"), &encoded)
+                .unwrap_err(),
             GatewayError::invalid_request(),
             "unexpected result for {request}"
         );
@@ -261,9 +314,10 @@ fn rejects_missing_or_mistyped_required_fields_and_tools() {
 #[test]
 fn non_stream_failure_uses_redacted_openai_error_envelope() {
     let secret = "Authorization: Bearer non-stream-secret";
-    let encoded = ResponsesCodec::encode_response(&[CanonicalEvent::Failed(
-        GatewayError::upstream_auth(secret),
-    )])
+    let encoded = ResponsesCodec::encode_response(
+        encode_context(),
+        &[CanonicalEvent::Failed(GatewayError::upstream_auth(secret))],
+    )
     .unwrap();
     let serialized = serde_json::to_string(&encoded).unwrap();
 
@@ -276,7 +330,7 @@ fn non_stream_failure_uses_redacted_openai_error_envelope() {
 #[test]
 fn non_stream_response_matches_golden_and_preserves_safe_usage_extensions() {
     assert_eq!(
-        ResponsesCodec::encode_response(&canonical_events()).unwrap(),
+        ResponsesCodec::encode_response(encode_context(), &canonical_events()).unwrap(),
         fixture_json("response/complete.json")
     );
 }
@@ -301,7 +355,7 @@ fn response_extensions_cannot_override_standard_usage_fields() {
         CanonicalEvent::Completed,
     ];
 
-    let encoded = ResponsesCodec::encode_response(&events).unwrap();
+    let encoded = ResponsesCodec::encode_response(encode_context(), &events).unwrap();
     assert_eq!(encoded["usage"]["input_tokens"], 1);
     assert_eq!(encoded["usage"]["total_tokens"], 3);
     assert_eq!(encoded["usage"]["vendor"], true);
@@ -310,17 +364,18 @@ fn response_extensions_cannot_override_standard_usage_fields() {
 #[test]
 fn stream_events_cover_every_variant_and_match_golden_order() {
     let expected = fixture_json("stream/ordered.json");
-    let mut codec = ResponsesCodec::default();
+    let mut codec = ResponsesCodec::new(encode_context());
     let mut actual = Vec::new();
 
     for event in canonical_events() {
         let encoded = codec.encode_event(&event).unwrap();
         let mut decoder = SseDecoder::default();
         let frames = decoder.push(&encoded).unwrap();
-        assert_eq!(frames.len(), 1);
-        actual.push(json!({
-            "event": frames[0].event,
-            "data": serde_json::from_str::<Value>(&frames[0].data).unwrap()
+        actual.extend(frames.into_iter().map(|frame| {
+            json!({
+                "event": frame.event,
+                "data": serde_json::from_str::<Value>(&frame.data).unwrap()
+            })
         }));
     }
 
@@ -329,11 +384,20 @@ fn stream_events_cover_every_variant_and_match_golden_order() {
 
 #[test]
 fn stream_encoder_rejects_events_after_completion() {
-    let mut codec = ResponsesCodec::default();
+    let mut codec = ResponsesCodec::new(encode_context());
     codec
         .encode_event(&CanonicalEvent::Created {
             response_id: "resp_1".to_owned(),
         })
+        .unwrap();
+    codec
+        .encode_event(&CanonicalEvent::Usage(Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_input_tokens: None,
+            reasoning_tokens: None,
+            extensions: BTreeMap::new(),
+        }))
         .unwrap();
     codec.encode_event(&CanonicalEvent::Completed).unwrap();
 
@@ -349,9 +413,218 @@ fn stream_encoder_rejects_events_after_completion() {
 }
 
 #[test]
+fn usage_is_cached_without_a_wire_event_and_is_required_for_completion() {
+    let mut codec = ResponsesCodec::new(encode_context());
+    codec
+        .encode_event(&CanonicalEvent::Created {
+            response_id: "resp_1".to_owned(),
+        })
+        .unwrap();
+    let usage = Usage {
+        input_tokens: 1,
+        output_tokens: 2,
+        cached_input_tokens: None,
+        reasoning_tokens: None,
+        extensions: BTreeMap::new(),
+    };
+
+    assert!(
+        codec
+            .encode_event(&CanonicalEvent::Usage(usage))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !codec
+            .encode_event(&CanonicalEvent::Completed)
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut missing_usage = ResponsesCodec::new(encode_context());
+    missing_usage
+        .encode_event(&CanonicalEvent::Created {
+            response_id: "resp_2".to_owned(),
+        })
+        .unwrap();
+    assert_eq!(
+        missing_usage
+            .encode_event(&CanonicalEvent::Completed)
+            .unwrap_err(),
+        GatewayError::invalid_request()
+    );
+}
+
+#[test]
+fn stream_state_machine_rejects_missing_repeated_and_late_events() {
+    let usage = CanonicalEvent::Usage(Usage {
+        input_tokens: 1,
+        output_tokens: 1,
+        cached_input_tokens: None,
+        reasoning_tokens: None,
+        extensions: BTreeMap::new(),
+    });
+    for event in [
+        CanonicalEvent::OutputTextDelta {
+            item_id: "msg_1".to_owned(),
+            delta: "x".to_owned(),
+        },
+        usage.clone(),
+        CanonicalEvent::Completed,
+    ] {
+        let mut codec = ResponsesCodec::new(encode_context());
+        assert_eq!(
+            codec.encode_event(&event).unwrap_err(),
+            GatewayError::invalid_request()
+        );
+    }
+
+    let mut repeated_created = ResponsesCodec::new(encode_context());
+    let created = CanonicalEvent::Created {
+        response_id: "resp_1".to_owned(),
+    };
+    repeated_created.encode_event(&created).unwrap();
+    assert_eq!(
+        repeated_created.encode_event(&created).unwrap_err(),
+        GatewayError::invalid_request()
+    );
+
+    let mut repeated_usage = ResponsesCodec::new(encode_context());
+    repeated_usage.encode_event(&created).unwrap();
+    repeated_usage.encode_event(&usage).unwrap();
+    assert_eq!(
+        repeated_usage.encode_event(&usage).unwrap_err(),
+        GatewayError::invalid_request()
+    );
+    assert_eq!(
+        repeated_usage
+            .encode_event(&CanonicalEvent::ReasoningDelta {
+                item_id: "reasoning_1".to_owned(),
+                delta: "late".to_owned(),
+            })
+            .unwrap_err(),
+        GatewayError::invalid_request()
+    );
+
+    let mut failed = ResponsesCodec::new(encode_context());
+    failed
+        .encode_event(&CanonicalEvent::Failed(GatewayError::internal("private")))
+        .unwrap();
+    assert_eq!(
+        failed.encode_event(&created).unwrap_err(),
+        GatewayError::invalid_request()
+    );
+}
+
+#[test]
+fn item_registry_rejects_empty_and_conflicting_identities() {
+    let invalid_first_events = [
+        CanonicalEvent::OutputTextDelta {
+            item_id: String::new(),
+            delta: "x".to_owned(),
+        },
+        CanonicalEvent::ReasoningDelta {
+            item_id: String::new(),
+            delta: "x".to_owned(),
+        },
+        CanonicalEvent::ToolCallDelta {
+            item_id: String::new(),
+            call_id: "call_1".to_owned(),
+            name: "read_file".to_owned(),
+            delta: "{}".to_owned(),
+        },
+        CanonicalEvent::ToolCallDelta {
+            item_id: "tool_1".to_owned(),
+            call_id: String::new(),
+            name: "read_file".to_owned(),
+            delta: "{}".to_owned(),
+        },
+        CanonicalEvent::ToolCallDelta {
+            item_id: "tool_1".to_owned(),
+            call_id: "call_1".to_owned(),
+            name: String::new(),
+            delta: "{}".to_owned(),
+        },
+    ];
+    for event in invalid_first_events {
+        let mut codec = ResponsesCodec::new(encode_context());
+        codec
+            .encode_event(&CanonicalEvent::Created {
+                response_id: "resp_1".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(
+            codec.encode_event(&event).unwrap_err(),
+            GatewayError::invalid_request()
+        );
+    }
+
+    let mut kind_conflict = ResponsesCodec::new(encode_context());
+    kind_conflict
+        .encode_event(&CanonicalEvent::Created {
+            response_id: "resp_1".to_owned(),
+        })
+        .unwrap();
+    kind_conflict
+        .encode_event(&CanonicalEvent::OutputTextDelta {
+            item_id: "shared".to_owned(),
+            delta: "x".to_owned(),
+        })
+        .unwrap();
+    assert_eq!(
+        kind_conflict
+            .encode_event(&CanonicalEvent::ReasoningDelta {
+                item_id: "shared".to_owned(),
+                delta: "x".to_owned(),
+            })
+            .unwrap_err(),
+        GatewayError::invalid_request()
+    );
+
+    let mut tool_conflict = ResponsesCodec::new(encode_context());
+    tool_conflict
+        .encode_event(&CanonicalEvent::Created {
+            response_id: "resp_1".to_owned(),
+        })
+        .unwrap();
+    let first = CanonicalEvent::ToolCallDelta {
+        item_id: "tool_1".to_owned(),
+        call_id: "call_1".to_owned(),
+        name: "read_file".to_owned(),
+        delta: "{".to_owned(),
+    };
+    tool_conflict.encode_event(&first).unwrap();
+    for event in [
+        CanonicalEvent::ToolCallDelta {
+            item_id: "tool_1".to_owned(),
+            call_id: "call_2".to_owned(),
+            name: "read_file".to_owned(),
+            delta: "}".to_owned(),
+        },
+        CanonicalEvent::ToolCallDelta {
+            item_id: "tool_1".to_owned(),
+            call_id: "call_1".to_owned(),
+            name: "write_file".to_owned(),
+            delta: "}".to_owned(),
+        },
+        CanonicalEvent::ToolCallDelta {
+            item_id: "tool_2".to_owned(),
+            call_id: "call_1".to_owned(),
+            name: "read_file".to_owned(),
+            delta: "}".to_owned(),
+        },
+    ] {
+        assert_eq!(
+            tool_conflict.encode_event(&event).unwrap_err(),
+            GatewayError::invalid_request()
+        );
+    }
+}
+
+#[test]
 fn failed_event_is_redacted_and_matches_golden() {
     let secret = "Authorization: Bearer fixture-secret";
-    let mut codec = ResponsesCodec::default();
+    let mut codec = ResponsesCodec::new(encode_context());
     let encoded = codec
         .encode_event(&CanonicalEvent::Failed(GatewayError::upstream_auth(secret)))
         .unwrap();
@@ -397,7 +670,7 @@ fn non_stream_encoder_rejects_invalid_event_order() {
 
     for events in invalid_sequences {
         assert_eq!(
-            ResponsesCodec::encode_response(&events).unwrap_err(),
+            ResponsesCodec::encode_response(encode_context(), &events).unwrap_err(),
             GatewayError::invalid_request()
         );
     }

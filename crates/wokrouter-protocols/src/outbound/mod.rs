@@ -1,3 +1,3 @@
 mod openai_responses;
 
-pub use openai_responses::ResponsesCodec;
+pub use openai_responses::{ResponsesCodec, ResponsesEncodeContext};

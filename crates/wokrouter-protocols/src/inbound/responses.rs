@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use url::Url;
@@ -11,8 +12,6 @@ use crate::{
         RequestId, ThreadKey, ToolDefinition,
     },
 };
-
-pub const UNASSIGNED_REQUEST_ID: &str = "__wokrouter_unassigned__";
 
 const INPUT_EXTENSIONS_KEY: &str = "responses.input_extensions";
 
@@ -50,10 +49,30 @@ enum ResponsesInputItem {
 struct ResponsesMessage {
     #[serde(rename = "type")]
     kind: Option<String>,
-    role: String,
+    role: ResponsesRole,
     content: ResponsesMessageContent,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ResponsesRole {
+    User,
+    Assistant,
+    System,
+    Developer,
+}
+
+impl ResponsesRole {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::System => "system",
+            Self::Developer => "developer",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -129,13 +148,9 @@ struct ResponsesReasoning {
 }
 
 impl ResponsesCodec {
-    pub fn decode_request(json: &[u8]) -> Result<CanonicalRequest, GatewayError> {
-        Self::decode_request_with_id(json, RequestId::new(UNASSIGNED_REQUEST_ID))
-    }
-
-    pub fn decode_request_with_id(
-        json: &[u8],
+    pub fn decode_request(
         request_id: RequestId,
+        json: &[u8],
     ) -> Result<CanonicalRequest, GatewayError> {
         let wire: ResponsesRequest =
             serde_json::from_slice(json).map_err(|_| GatewayError::invalid_request())?;
@@ -206,12 +221,11 @@ fn decode_input_item(
                 .kind
                 .as_deref()
                 .is_some_and(|kind| kind != "message")
-                || message.role.is_empty()
             {
                 return Err(GatewayError::invalid_request());
             }
             let mut message_extension = Map::new();
-            message_extension.insert("role".to_owned(), json!(message.role));
+            message_extension.insert("role".to_owned(), json!(message.role.as_str()));
             if !message.extra.is_empty() {
                 message_extension.insert("message".to_owned(), map_value(message.extra));
             }
@@ -310,15 +324,41 @@ fn decode_tool(wire: ResponsesTool) -> Result<ToolDefinition, GatewayError> {
 
 fn decode_image_url(value: &str) -> Result<Url, GatewayError> {
     let url = Url::parse(value).map_err(|_| GatewayError::invalid_request())?;
-    let allowed = matches!(url.scheme(), "http" | "https")
-        || (url.scheme() == "data"
-            && url.path().to_ascii_lowercase().starts_with("image/")
-            && url.path().contains(','));
+    let allowed = match url.scheme() {
+        "http" | "https" => true,
+        "data" => validate_data_image_url(value),
+        _ => false,
+    };
     if allowed {
         Ok(url)
     } else {
         Err(GatewayError::invalid_request())
     }
+}
+
+fn validate_data_image_url(value: &str) -> bool {
+    let Some((metadata, payload)) = value.split_once(',') else {
+        return false;
+    };
+    let Some(metadata) = metadata.get("data:".len()..) else {
+        return false;
+    };
+    let mut fields = metadata.split(';');
+    let mime = fields.next().unwrap_or_default();
+    let encoding = fields.next();
+    if fields.next().is_some()
+        || !matches!(
+            mime.to_ascii_lowercase().as_str(),
+            "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+        )
+        || !encoding.is_some_and(|value| value.eq_ignore_ascii_case("base64"))
+        || payload.is_empty()
+    {
+        return false;
+    }
+    STANDARD
+        .decode(payload.as_bytes())
+        .is_ok_and(|decoded| !decoded.is_empty())
 }
 
 fn validate_non_empty(value: &str) -> Result<(), GatewayError> {

@@ -5346,6 +5346,7 @@ dependencies = [
 name = "wokrouter-protocols"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "serde",
  "serde_json",

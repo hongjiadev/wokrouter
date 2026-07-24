@@ -3,12 +3,18 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use crate::{
-    canonical::{CanonicalEvent, GatewayError, Usage},
+    canonical::{CanonicalEvent, GatewayError, PublicModelId, Usage},
     stream::encode_sse,
 };
 
-#[derive(Default)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResponsesEncodeContext {
+    pub model: PublicModelId,
+    pub created_at: u64,
+}
+
 pub struct ResponsesCodec {
+    context: ResponsesEncodeContext,
     terminal: bool,
     sequence_number: u64,
     response_id: Option<String>,
@@ -16,6 +22,7 @@ pub struct ResponsesCodec {
     usage: Option<Value>,
 }
 
+#[derive(Clone)]
 enum ResponsesOutput {
     Text {
         item_id: String,
@@ -28,6 +35,7 @@ enum ResponsesOutput {
     Tool {
         item_id: String,
         call_id: String,
+        name: String,
         arguments: String,
     },
 }
@@ -40,19 +48,38 @@ struct ResponsesEvent {
     fields: Map<String, Value>,
 }
 
+type WireEvent = (&'static str, Value);
+
 impl ResponsesCodec {
-    pub fn encode_response(events: &[CanonicalEvent]) -> Result<Value, GatewayError> {
-        let mut codec = Self::default();
-        let mut completed = None;
+    pub fn new(context: ResponsesEncodeContext) -> Self {
+        Self {
+            context,
+            terminal: false,
+            sequence_number: 1,
+            response_id: None,
+            output: Vec::new(),
+            usage: None,
+        }
+    }
+
+    pub fn encode_response(
+        context: ResponsesEncodeContext,
+        events: &[CanonicalEvent],
+    ) -> Result<Value, GatewayError> {
+        let mut codec = Self::new(context);
+        let mut response = None;
 
         for event in events {
-            let (_, encoded) = codec.encode_event_value(event)?;
+            let wire_events = codec.encode_event_values(event)?;
             match event {
                 CanonicalEvent::Completed => {
-                    completed = encoded.get("response").cloned();
+                    response = wire_events
+                        .last()
+                        .and_then(|(_, value)| value.get("response"))
+                        .cloned();
                 }
                 CanonicalEvent::Failed(error) => {
-                    completed = Some(json!({
+                    response = Some(json!({
                         "error": {
                             "type": "gateway_error",
                             "code": error.code(),
@@ -67,152 +94,393 @@ impl ResponsesCodec {
         if !codec.terminal {
             return Err(GatewayError::invalid_request());
         }
-        completed.ok_or_else(GatewayError::invalid_request)
+        response.ok_or_else(GatewayError::invalid_request)
     }
 
     pub fn encode_event(&mut self, event: &CanonicalEvent) -> Result<Bytes, GatewayError> {
-        let (event_name, value) = self.encode_event_value(event)?;
-        Ok(encode_sse(Some(event_name), &value))
+        let wire_events = self.encode_event_values(event)?;
+        let mut encoded = Vec::new();
+        for (event_name, value) in wire_events {
+            encoded.extend_from_slice(&encode_sse(Some(event_name), &value));
+        }
+        Ok(Bytes::from(encoded))
     }
 
-    fn encode_event_value(
+    fn encode_event_values(
         &mut self,
         event: &CanonicalEvent,
-    ) -> Result<(&'static str, Value), GatewayError> {
+    ) -> Result<Vec<WireEvent>, GatewayError> {
         if self.terminal {
             return Err(GatewayError::invalid_request());
         }
 
-        let sequence_number = self.sequence_number;
-        let (event_name, wire) = match event {
-            CanonicalEvent::Created { response_id } => {
-                if self.response_id.is_some() || response_id.is_empty() {
-                    return Err(GatewayError::invalid_request());
-                }
-                self.response_id = Some(response_id.clone());
-                (
-                    "response.created",
-                    wire_event(
-                        "response.created",
-                        [
-                            (
-                                "response",
-                                json!({
-                                    "id": response_id,
-                                    "object": "response",
-                                    "status": "in_progress",
-                                }),
-                            ),
-                            ("sequence_number", json!(sequence_number)),
-                        ],
-                    ),
-                )
-            }
+        match event {
+            CanonicalEvent::Created { response_id } => self.encode_created(response_id),
             CanonicalEvent::OutputTextDelta { item_id, delta } => {
-                self.require_created()?;
-                self.append_text(item_id, delta);
-                (
-                    "response.output_text.delta",
-                    wire_event(
-                        "response.output_text.delta",
-                        [
-                            ("item_id", json!(item_id)),
-                            ("output_index", json!(0)),
-                            ("content_index", json!(0)),
-                            ("delta", json!(delta)),
-                            ("sequence_number", json!(sequence_number)),
-                        ],
-                    ),
-                )
+                self.encode_text_delta(item_id, delta)
             }
             CanonicalEvent::ReasoningDelta { item_id, delta } => {
-                self.require_created()?;
-                self.append_reasoning(item_id, delta);
-                (
-                    "response.reasoning_text.delta",
-                    wire_event(
-                        "response.reasoning_text.delta",
-                        [
-                            ("item_id", json!(item_id)),
-                            ("output_index", json!(0)),
-                            ("content_index", json!(0)),
-                            ("delta", json!(delta)),
-                            ("sequence_number", json!(sequence_number)),
-                        ],
-                    ),
-                )
+                self.encode_reasoning_delta(item_id, delta)
             }
             CanonicalEvent::ToolCallDelta {
                 item_id,
                 call_id,
+                name,
                 delta,
-            } => {
-                self.require_created()?;
-                self.append_tool(item_id, call_id, delta)?;
-                (
-                    "response.function_call_arguments.delta",
-                    wire_event(
-                        "response.function_call_arguments.delta",
-                        [
-                            ("item_id", json!(item_id)),
-                            ("call_id", json!(call_id)),
-                            ("output_index", json!(0)),
-                            ("delta", json!(delta)),
-                            ("sequence_number", json!(sequence_number)),
-                        ],
-                    ),
-                )
-            }
-            CanonicalEvent::Usage(usage) => {
-                self.require_created()?;
-                if self.usage.is_some() {
-                    return Err(GatewayError::invalid_request());
+            } => self.encode_tool_delta(item_id, call_id, name, delta),
+            CanonicalEvent::Usage(usage) => self.encode_usage(usage),
+            CanonicalEvent::Completed => self.encode_completed(),
+            CanonicalEvent::Failed(error) => Ok(self.encode_failed(error)),
+        }
+    }
+
+    fn encode_created(&mut self, response_id: &str) -> Result<Vec<WireEvent>, GatewayError> {
+        if self.response_id.is_some() || response_id.is_empty() {
+            return Err(GatewayError::invalid_request());
+        }
+        self.response_id = Some(response_id.to_owned());
+        let response = self.response_value("in_progress", Vec::new(), Value::Null);
+        Ok(vec![self.wire(
+            "response.created",
+            [("response", response)].into_iter(),
+        )])
+    }
+
+    fn encode_text_delta(
+        &mut self,
+        item_id: &str,
+        delta: &str,
+    ) -> Result<Vec<WireEvent>, GatewayError> {
+        self.require_delta_allowed()?;
+        let (output_index, is_new) = self.append_text(item_id, delta)?;
+        let mut events = Vec::new();
+
+        if is_new {
+            events.push(
+                self.wire(
+                    "response.output_item.added",
+                    [
+                        ("output_index", json!(output_index)),
+                        (
+                            "item",
+                            json!({
+                                "id": item_id,
+                                "type": "message",
+                                "role": "assistant",
+                                "status": "in_progress",
+                                "content": [],
+                            }),
+                        ),
+                    ]
+                    .into_iter(),
+                ),
+            );
+            events.push(
+                self.wire(
+                    "response.content_part.added",
+                    [
+                        ("item_id", json!(item_id)),
+                        ("output_index", json!(output_index)),
+                        ("content_index", json!(0)),
+                        (
+                            "part",
+                            json!({
+                                "type": "output_text",
+                                "text": "",
+                                "annotations": [],
+                            }),
+                        ),
+                    ]
+                    .into_iter(),
+                ),
+            );
+        }
+
+        events.push(
+            self.wire(
+                "response.output_text.delta",
+                [
+                    ("item_id", json!(item_id)),
+                    ("output_index", json!(output_index)),
+                    ("content_index", json!(0)),
+                    ("delta", json!(delta)),
+                ]
+                .into_iter(),
+            ),
+        );
+        Ok(events)
+    }
+
+    fn encode_reasoning_delta(
+        &mut self,
+        item_id: &str,
+        delta: &str,
+    ) -> Result<Vec<WireEvent>, GatewayError> {
+        self.require_delta_allowed()?;
+        let (output_index, is_new) = self.append_reasoning(item_id, delta)?;
+        let mut events = Vec::new();
+
+        if is_new {
+            events.push(
+                self.wire(
+                    "response.output_item.added",
+                    [
+                        ("output_index", json!(output_index)),
+                        (
+                            "item",
+                            json!({
+                                "id": item_id,
+                                "type": "reasoning",
+                                "summary": [],
+                            }),
+                        ),
+                    ]
+                    .into_iter(),
+                ),
+            );
+            events.push(
+                self.wire(
+                    "response.reasoning_summary_part.added",
+                    [
+                        ("item_id", json!(item_id)),
+                        ("output_index", json!(output_index)),
+                        ("summary_index", json!(0)),
+                        (
+                            "part",
+                            json!({
+                                "type": "summary_text",
+                                "text": "",
+                            }),
+                        ),
+                    ]
+                    .into_iter(),
+                ),
+            );
+        }
+
+        events.push(
+            self.wire(
+                "response.reasoning_summary_text.delta",
+                [
+                    ("item_id", json!(item_id)),
+                    ("output_index", json!(output_index)),
+                    ("summary_index", json!(0)),
+                    ("delta", json!(delta)),
+                ]
+                .into_iter(),
+            ),
+        );
+        Ok(events)
+    }
+
+    fn encode_tool_delta(
+        &mut self,
+        item_id: &str,
+        call_id: &str,
+        name: &str,
+        delta: &str,
+    ) -> Result<Vec<WireEvent>, GatewayError> {
+        self.require_delta_allowed()?;
+        let (output_index, is_new) = self.append_tool(item_id, call_id, name, delta)?;
+        let mut events = Vec::new();
+
+        if is_new {
+            events.push(
+                self.wire(
+                    "response.output_item.added",
+                    [
+                        ("output_index", json!(output_index)),
+                        (
+                            "item",
+                            json!({
+                                "id": item_id,
+                                "type": "function_call",
+                                "call_id": call_id,
+                                "name": name,
+                                "arguments": "",
+                                "status": "in_progress",
+                            }),
+                        ),
+                    ]
+                    .into_iter(),
+                ),
+            );
+        }
+
+        events.push(
+            self.wire(
+                "response.function_call_arguments.delta",
+                [
+                    ("item_id", json!(item_id)),
+                    ("output_index", json!(output_index)),
+                    ("delta", json!(delta)),
+                ]
+                .into_iter(),
+            ),
+        );
+        Ok(events)
+    }
+
+    fn encode_usage(&mut self, usage: &Usage) -> Result<Vec<WireEvent>, GatewayError> {
+        self.require_created()?;
+        if self.usage.is_some() {
+            return Err(GatewayError::invalid_request());
+        }
+        self.usage = Some(usage_value(usage));
+        Ok(Vec::new())
+    }
+
+    fn encode_completed(&mut self) -> Result<Vec<WireEvent>, GatewayError> {
+        self.require_created()?;
+        let usage = self
+            .usage
+            .clone()
+            .ok_or_else(GatewayError::invalid_request)?;
+        let output = self.output.clone();
+        let mut events = Vec::new();
+
+        for (output_index, item) in output.iter().enumerate() {
+            match item {
+                ResponsesOutput::Text { item_id, text } => {
+                    events.push(
+                        self.wire(
+                            "response.output_text.done",
+                            [
+                                ("item_id", json!(item_id)),
+                                ("output_index", json!(output_index)),
+                                ("content_index", json!(0)),
+                                ("text", json!(text)),
+                            ]
+                            .into_iter(),
+                        ),
+                    );
+                    events.push(
+                        self.wire(
+                            "response.content_part.done",
+                            [
+                                ("item_id", json!(item_id)),
+                                ("output_index", json!(output_index)),
+                                ("content_index", json!(0)),
+                                (
+                                    "part",
+                                    json!({
+                                        "type": "output_text",
+                                        "text": text,
+                                        "annotations": [],
+                                    }),
+                                ),
+                            ]
+                            .into_iter(),
+                        ),
+                    );
+                    events.push(
+                        self.wire(
+                            "response.output_item.done",
+                            [
+                                ("output_index", json!(output_index)),
+                                ("item", item.value()),
+                            ]
+                            .into_iter(),
+                        ),
+                    );
                 }
-                let usage = usage_value(usage);
-                self.usage = Some(usage.clone());
-                (
-                    "response.usage",
-                    wire_event(
-                        "response.usage",
-                        [
-                            ("usage", usage),
-                            ("sequence_number", json!(sequence_number)),
-                        ],
-                    ),
-                )
+                ResponsesOutput::Reasoning { item_id, text } => {
+                    events.push(
+                        self.wire(
+                            "response.reasoning_summary_text.done",
+                            [
+                                ("item_id", json!(item_id)),
+                                ("output_index", json!(output_index)),
+                                ("summary_index", json!(0)),
+                                ("text", json!(text)),
+                            ]
+                            .into_iter(),
+                        ),
+                    );
+                    events.push(
+                        self.wire(
+                            "response.reasoning_summary_part.done",
+                            [
+                                ("item_id", json!(item_id)),
+                                ("output_index", json!(output_index)),
+                                ("summary_index", json!(0)),
+                                (
+                                    "part",
+                                    json!({
+                                        "type": "summary_text",
+                                        "text": text,
+                                    }),
+                                ),
+                            ]
+                            .into_iter(),
+                        ),
+                    );
+                    events.push(
+                        self.wire(
+                            "response.output_item.done",
+                            [
+                                ("output_index", json!(output_index)),
+                                ("item", item.value()),
+                            ]
+                            .into_iter(),
+                        ),
+                    );
+                }
+                ResponsesOutput::Tool {
+                    item_id,
+                    name,
+                    arguments,
+                    ..
+                } => {
+                    events.push(
+                        self.wire(
+                            "response.function_call_arguments.done",
+                            [
+                                ("item_id", json!(item_id)),
+                                ("name", json!(name)),
+                                ("output_index", json!(output_index)),
+                                ("arguments", json!(arguments)),
+                            ]
+                            .into_iter(),
+                        ),
+                    );
+                    events.push(
+                        self.wire(
+                            "response.output_item.done",
+                            [
+                                ("output_index", json!(output_index)),
+                                ("item", item.value()),
+                            ]
+                            .into_iter(),
+                        ),
+                    );
+                }
             }
-            CanonicalEvent::Completed => {
-                self.require_created()?;
-                self.terminal = true;
-                (
-                    "response.completed",
-                    wire_event(
-                        "response.completed",
-                        [
-                            ("response", self.completed_response()),
-                            ("sequence_number", json!(sequence_number)),
-                        ],
-                    ),
-                )
-            }
-            CanonicalEvent::Failed(error) => {
-                self.terminal = true;
-                (
-                    "error",
-                    wire_event(
-                        "error",
-                        [
-                            ("code", json!(error.code())),
-                            ("message", json!(error.public_message())),
-                            ("param", Value::Null),
-                            ("sequence_number", json!(sequence_number)),
-                        ],
-                    ),
-                )
-            }
-        };
-        self.sequence_number += 1;
-        Ok((event_name, wire))
+        }
+
+        let response = self.response_value(
+            "completed",
+            output.iter().map(ResponsesOutput::value).collect(),
+            usage,
+        );
+        events.push(self.wire("response.completed", [("response", response)].into_iter()));
+        self.terminal = true;
+        Ok(events)
+    }
+
+    fn encode_failed(&mut self, error: &GatewayError) -> Vec<WireEvent> {
+        self.terminal = true;
+        vec![
+            self.wire(
+                "error",
+                [
+                    ("code", json!(error.code())),
+                    ("message", json!(error.public_message())),
+                    ("param", Value::Null),
+                ]
+                .into_iter(),
+            ),
+        ]
     }
 
     fn require_created(&self) -> Result<(), GatewayError> {
@@ -223,82 +491,134 @@ impl ResponsesCodec {
         }
     }
 
-    fn append_text(&mut self, item_id: &str, delta: &str) {
-        if let Some(ResponsesOutput::Text { text, .. }) = self
-            .output
-            .iter_mut()
-            .find(|output| output.item_id() == item_id)
-        {
-            text.push_str(delta);
-            return;
+    fn require_delta_allowed(&self) -> Result<(), GatewayError> {
+        self.require_created()?;
+        if self.usage.is_none() {
+            Ok(())
+        } else {
+            Err(GatewayError::invalid_request())
         }
+    }
+
+    fn append_text(&mut self, item_id: &str, delta: &str) -> Result<(usize, bool), GatewayError> {
+        if item_id.is_empty() {
+            return Err(GatewayError::invalid_request());
+        }
+        if let Some(output_index) = self.find_output(item_id) {
+            match &mut self.output[output_index] {
+                ResponsesOutput::Text { text, .. } => {
+                    text.push_str(delta);
+                    return Ok((output_index, false));
+                }
+                _ => return Err(GatewayError::invalid_request()),
+            }
+        }
+        let output_index = self.output.len();
         self.output.push(ResponsesOutput::Text {
             item_id: item_id.to_owned(),
             text: delta.to_owned(),
         });
+        Ok((output_index, true))
     }
 
-    fn append_reasoning(&mut self, item_id: &str, delta: &str) {
-        if let Some(ResponsesOutput::Reasoning { text, .. }) = self
-            .output
-            .iter_mut()
-            .find(|output| output.item_id() == item_id)
-        {
-            text.push_str(delta);
-            return;
+    fn append_reasoning(
+        &mut self,
+        item_id: &str,
+        delta: &str,
+    ) -> Result<(usize, bool), GatewayError> {
+        if item_id.is_empty() {
+            return Err(GatewayError::invalid_request());
         }
+        if let Some(output_index) = self.find_output(item_id) {
+            match &mut self.output[output_index] {
+                ResponsesOutput::Reasoning { text, .. } => {
+                    text.push_str(delta);
+                    return Ok((output_index, false));
+                }
+                _ => return Err(GatewayError::invalid_request()),
+            }
+        }
+        let output_index = self.output.len();
         self.output.push(ResponsesOutput::Reasoning {
             item_id: item_id.to_owned(),
             text: delta.to_owned(),
         });
+        Ok((output_index, true))
     }
 
     fn append_tool(
         &mut self,
         item_id: &str,
         call_id: &str,
+        name: &str,
         delta: &str,
-    ) -> Result<(), GatewayError> {
-        if let Some(ResponsesOutput::Tool {
-            call_id: existing_call_id,
-            arguments,
-            ..
-        }) = self
-            .output
-            .iter_mut()
-            .find(|output| output.item_id() == item_id)
-        {
-            if existing_call_id != call_id {
-                return Err(GatewayError::invalid_request());
-            }
-            arguments.push_str(delta);
-            return Ok(());
+    ) -> Result<(usize, bool), GatewayError> {
+        if item_id.is_empty() || call_id.is_empty() || name.is_empty() {
+            return Err(GatewayError::invalid_request());
         }
+        if let Some(output_index) = self.find_output(item_id) {
+            match &mut self.output[output_index] {
+                ResponsesOutput::Tool {
+                    call_id: existing_call_id,
+                    name: existing_name,
+                    arguments,
+                    ..
+                } if existing_call_id == call_id && existing_name == name => {
+                    arguments.push_str(delta);
+                    return Ok((output_index, false));
+                }
+                _ => return Err(GatewayError::invalid_request()),
+            }
+        }
+        if self.output.iter().any(
+            |output| matches!(output, ResponsesOutput::Tool { call_id: existing, .. } if existing == call_id),
+        ) {
+            return Err(GatewayError::invalid_request());
+        }
+        let output_index = self.output.len();
         self.output.push(ResponsesOutput::Tool {
             item_id: item_id.to_owned(),
             call_id: call_id.to_owned(),
+            name: name.to_owned(),
             arguments: delta.to_owned(),
         });
-        Ok(())
+        Ok((output_index, true))
     }
 
-    fn completed_response(&self) -> Value {
-        let mut response = Map::from_iter([
-            (
-                "id".to_owned(),
-                json!(self.response_id.as_deref().unwrap_or_default()),
+    fn find_output(&self, item_id: &str) -> Option<usize> {
+        self.output
+            .iter()
+            .position(|output| output.item_id() == item_id)
+    }
+
+    fn response_value(&self, status: &str, output: Vec<Value>, usage: Value) -> Value {
+        json!({
+            "id": self.response_id.as_deref().unwrap_or_default(),
+            "object": "response",
+            "created_at": self.context.created_at,
+            "status": status,
+            "model": self.context.model.as_str(),
+            "output": output,
+            "usage": usage,
+        })
+    }
+
+    fn wire(
+        &mut self,
+        kind: &'static str,
+        fields: impl Iterator<Item = (&'static str, Value)>,
+    ) -> WireEvent {
+        let sequence_number = self.sequence_number;
+        self.sequence_number += 1;
+        (
+            kind,
+            wire_event(
+                kind,
+                fields
+                    .into_iter()
+                    .chain([("sequence_number", json!(sequence_number))]),
             ),
-            ("object".to_owned(), json!("response")),
-            ("status".to_owned(), json!("completed")),
-            (
-                "output".to_owned(),
-                Value::Array(self.output.iter().map(ResponsesOutput::value).collect()),
-            ),
-        ]);
-        if let Some(usage) = &self.usage {
-            response.insert("usage".to_owned(), usage.clone());
-        }
-        Value::Object(response)
+        )
     }
 }
 
@@ -335,11 +655,13 @@ impl ResponsesOutput {
             Self::Tool {
                 item_id,
                 call_id,
+                name,
                 arguments,
             } => json!({
                 "id": item_id,
                 "type": "function_call",
                 "call_id": call_id,
+                "name": name,
                 "arguments": arguments,
                 "status": "completed",
             }),
@@ -347,7 +669,10 @@ impl ResponsesOutput {
     }
 }
 
-fn wire_event<const N: usize>(kind: &'static str, fields: [(&str, Value); N]) -> Value {
+fn wire_event(
+    kind: &'static str,
+    fields: impl IntoIterator<Item = (&'static str, Value)>,
+) -> Value {
     serde_json::to_value(ResponsesEvent {
         kind,
         fields: fields

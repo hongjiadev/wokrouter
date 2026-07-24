@@ -202,6 +202,7 @@ fn canonical_events_have_stable_tags_and_round_trip() {
             CanonicalEvent::ToolCallDelta {
                 item_id: "item_3".to_owned(),
                 call_id: "call_1".to_owned(),
+                name: "lookup_weather".to_owned(),
                 delta: "{\"path\":".to_owned(),
             },
             "tool_call_delta",

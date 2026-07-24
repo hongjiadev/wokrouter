@@ -19,6 +19,7 @@ pub enum CanonicalEvent {
     ToolCallDelta {
         item_id: String,
         call_id: String,
+        name: String,
         delta: String,
     },
     Usage(Usage),

@@ -22,6 +22,7 @@ anyhow = "1"
 arc-swap = "1.7"
 async-trait = "0.1.91"
 axum = "0.8.9"
+base64 = "0.22.1"
 bytes = "1.12.1"
 clap = { version = "4.6.4", features = ["derive"] }
 eventsource-stream = "0.2"
