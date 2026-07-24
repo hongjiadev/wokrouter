@@ -1,0 +1,112 @@
+name: Foundation CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            build-essential \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.97.1
+          components: clippy, rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Test workspace
+        run: cargo test --workspace --all-features
+      - name: Check dependency policy
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: 1.97.1
+          command: check
+          arguments: --all-features
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.17.0
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm --dir apps/desktop install --frozen-lockfile
+      - name: Typecheck frontend
+        run: pnpm --dir apps/desktop typecheck
+      - name: Test frontend
+        run: pnpm --dir apps/desktop test:unit
+      - name: Build frontend
+        run: pnpm --dir apps/desktop build
+
+  platform-check-matrix:
+    name: platform-check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - macos-15
+          - ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            build-essential \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.97.1
+      - name: Check persistence privacy boundary
+        shell: pwsh
+        run: |
+          pwsh tests/scripts/check-no-body-persistence.tests.ps1
+          pwsh tests/scripts/check-no-body-persistence.ps1
+      - name: Validate platform Rust and desktop configuration
+        run: cargo check -p wokrouter-platform -p wokrouter-desktop --all-features
+
+  platform-check:
+    name: platform-check
+    if: always()
+    needs: platform-check-matrix
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every platform check
+        env:
+          PLATFORM_RESULT: ${{ needs.platform-check-matrix.result }}
+        run: test "$PLATFORM_RESULT" = "success"
