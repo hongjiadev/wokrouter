@@ -3,6 +3,7 @@
 use std::{fs, path::Path};
 
 use semver::Version;
+use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 use url::Url;
 use wiremock::{
@@ -17,8 +18,7 @@ use wokrouter_platform::{
 const PUBLIC_KEY: &str = include_str!("fixtures/wokcore-install/minisign.pub");
 const MANIFEST: &[u8] = include_bytes!("fixtures/wokcore-install/wokcore-update-v1.json");
 const SIGNATURE: &[u8] = include_bytes!("fixtures/wokcore-install/wokcore-update-v1.json.minisig");
-#[cfg(windows)]
-const ARCHIVE: &[u8] = &[
+const WINDOWS_ARCHIVE: &[u8] = &[
     80, 75, 3, 4, 20, 0, 0, 0, 0, 0, 0, 0, 33, 0, 248, 159, 107, 102, 14, 0, 0, 0, 14, 0, 0, 0, 11,
     0, 0, 0, 119, 111, 107, 99, 111, 114, 101, 46, 101, 120, 101, 110, 101, 119, 32, 101, 120, 101,
     99, 117, 116, 97, 98, 108, 101, 80, 75, 1, 2, 20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 33, 0, 248, 159,
@@ -26,15 +26,33 @@ const ARCHIVE: &[u8] = &[
     119, 111, 107, 99, 111, 114, 101, 46, 101, 120, 101, 80, 75, 5, 6, 0, 0, 0, 0, 1, 0, 1, 0, 57,
     0, 0, 0, 55, 0, 0, 0, 0, 0,
 ];
-#[cfg(not(windows))]
-const ARCHIVE: &[u8] = &[
+const UNIX_ARCHIVE: &[u8] = &[
     31, 139, 8, 0, 0, 0, 0, 0, 2, 255, 237, 205, 65, 10, 130, 80, 20, 5, 208, 183, 20, 151, 240,
     165, 204, 245, 152, 188, 81, 145, 96, 138, 45, 191, 143, 147, 160, 121, 65, 116, 206, 228, 94,
-    238, 228, 110, 211, 101, 230, 140, 79, 42, 85, 223, 117, 123, 86, 239, 89, 74, 123, 122, 245,
-    125, 239, 15, 199, 54, 154, 18, 95, 176, 222, 151, 97, 174, 151, 241, 159, 110, 185, 53, 249,
-    200, 113, 93, 134, 243, 53, 3, 0, 0, 0, 0, 0, 0, 0, 0, 128, 31, 241, 4, 159, 198, 218, 25, 0,
-    40, 0, 0,
+    238, 228, 110, 211, 101, 156, 230, 140, 79, 42, 85, 223, 117, 123, 86, 239, 89, 74, 123, 122,
+    245, 125, 239, 15, 199, 54, 154, 18, 95, 176, 222, 151, 97, 174, 151, 241, 159, 110, 185, 53,
+    249, 200, 113, 93, 134, 243, 53, 3, 0, 0, 0, 0, 0, 0, 0, 0, 128, 31, 241, 4, 159, 198, 218, 25,
+    0, 40, 0, 0,
 ];
+
+#[cfg(windows)]
+const ARCHIVE: &[u8] = WINDOWS_ARCHIVE;
+#[cfg(not(windows))]
+const ARCHIVE: &[u8] = UNIX_ARCHIVE;
+
+#[test]
+fn archive_fixtures_do_not_drift_from_signed_manifest() {
+    assert_eq!(WINDOWS_ARCHIVE.len(), 134);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(WINDOWS_ARCHIVE)),
+        "8af7e44ead86be8d0f7db9e445384231287891e1eee2873e538519ee0af2d06b"
+    );
+    assert_eq!(UNIX_ARCHIVE.len(), 111);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(UNIX_ARCHIVE)),
+        "ea04aa3f9d33dcdafbc06322ef82d35a385e263174443a3d00603318be1e4db4"
+    );
+}
 
 #[test]
 fn production_source_is_pinned_and_test_sources_are_ipv4_loopback_only() {
