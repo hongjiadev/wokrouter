@@ -46,6 +46,10 @@ select {
 
 button:focus-visible,
 a:focus-visible,
+[role="tab"]:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
 [tabindex]:focus-visible {
   outline: 3px solid var(--accent-focus);
   outline-offset: 3px;
@@ -115,13 +119,14 @@ a:focus-visible,
 }
 
 .app-main {
-  display: flex;
+  display: grid;
   width: 100%;
   max-width: 72rem;
   flex: 1;
-  align-items: center;
+  align-content: start;
+  gap: 1.5rem;
   margin-inline: auto;
-  padding: clamp(1.5rem, 7vh, 4.5rem) clamp(1rem, 6vw, 5rem);
+  padding: clamp(1.5rem, 5vh, 3.5rem) clamp(1rem, 5vw, 4rem);
 }
 
 .health-panel {
@@ -132,6 +137,394 @@ a:focus-visible,
   border: 1px solid var(--border);
   border-radius: 0.75rem;
   background: var(--surface);
+}
+
+.management-panel {
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--surface);
+}
+
+.management-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.5rem clamp(1rem, 3vw, 2rem) 1.25rem;
+}
+
+.management-header .section-label {
+  margin-block-end: 0.45rem;
+}
+
+.management-header h2 {
+  margin: 0;
+  font-size: clamp(1.25rem, 2vw, 1.55rem);
+  letter-spacing: -0.02em;
+}
+
+.management-connection {
+  color: var(--success);
+  font-size: 0.8rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.management-tabs {
+  display: flex;
+  gap: 0.25rem;
+  padding-inline: clamp(0.75rem, 3vw, 1.75rem);
+  overflow-x: auto;
+  border-block: 1px solid var(--border);
+  background: var(--surface-subtle);
+}
+
+.management-tab {
+  min-height: 3rem;
+  padding: 0.75rem 0.8rem;
+  border: 0;
+  border-block-end: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.management-tab[aria-selected="true"] {
+  border-block-end-color: var(--accent);
+  color: var(--ink);
+}
+
+.management-tab:hover {
+  color: var(--ink);
+}
+
+.management-content {
+  min-width: 0;
+  padding: clamp(1rem, 3vw, 2rem);
+}
+
+.management-stack {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.management-summary,
+.usage-totals {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+  border-block: 1px solid var(--border);
+}
+
+.management-summary > div,
+.usage-totals > div {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.9rem;
+}
+
+.management-summary span,
+.usage-totals span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.management-summary strong,
+.usage-totals strong {
+  font-size: 1.2rem;
+}
+
+.revision-label {
+  align-self: center;
+  margin: 0;
+  padding: 0.9rem;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.78rem;
+}
+
+.provider-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  gap: 1rem;
+}
+
+.provider-card {
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+}
+
+.provider-card-heading,
+.subsection-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.provider-card h3,
+.management-form h3,
+.accounts-editor h3,
+.subsection-heading h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.provider-card-heading p,
+.management-form p,
+.accounts-editor p,
+.subsection-heading p {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.provider-card-heading > span {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.75rem;
+}
+
+.provider-capabilities,
+.empty-inline {
+  margin: 0.85rem 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.provider-instances,
+.account-list,
+.message-list,
+.diagnostic-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.provider-instances li,
+.account-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-block: 0.6rem;
+  border-block-start: 1px solid var(--border);
+  font-size: 0.82rem;
+}
+
+.provider-instances label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.management-form,
+.credential-form {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) repeat(2, minmax(9rem, 0.65fr)) auto;
+  align-items: end;
+  gap: 0.85rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: var(--surface-subtle);
+}
+
+.management-form label,
+.credential-form label,
+.inline-select {
+  display: grid;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 620;
+}
+
+input,
+select,
+textarea {
+  min-width: 0;
+  min-height: 2.5rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.accounts-editor {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.account-list li {
+  display: grid;
+  grid-template-columns: minmax(8rem, 1fr) minmax(10rem, 1fr) auto auto;
+}
+
+.account-list li > div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.account-list li span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.management-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.button--compact {
+  min-height: 2.25rem;
+  padding: 0.45rem 0.7rem;
+  font-size: 0.78rem;
+}
+
+.button--quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.button--quiet:hover:not(:disabled) {
+  background: var(--surface-subtle);
+  color: var(--ink);
+}
+
+.inline-error,
+.success-note {
+  margin: 0;
+  color: var(--error);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.success-note {
+  color: var(--success);
+}
+
+.session-layout {
+  display: grid;
+  grid-template-columns: minmax(15rem, 0.75fr) minmax(0, 1.25fr);
+  gap: 1.25rem;
+}
+
+.session-list,
+.message-view {
+  min-width: 0;
+}
+
+.session-list {
+  border-inline-end: 1px solid var(--border);
+  padding-inline-end: 1.25rem;
+}
+
+.session-row {
+  display: grid;
+  width: 100%;
+  gap: 0.25rem;
+  padding: 0.8rem 0;
+  border: 0;
+  border-block-end: 1px solid var(--border);
+  background: transparent;
+  color: var(--ink);
+  text-align: start;
+  cursor: pointer;
+}
+
+.session-row:hover {
+  color: var(--accent);
+}
+
+.session-row span,
+.session-row time {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.message-list,
+.diagnostic-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.message-list li,
+.diagnostic-list li {
+  padding: 0.85rem;
+  overflow-wrap: anywhere;
+  border-inline-start: 2px solid var(--border);
+  background: var(--surface-subtle);
+  font-size: 0.83rem;
+  line-height: 1.55;
+}
+
+.message-list pre,
+.diagnostic-list pre {
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+
+.inline-select {
+  grid-template-columns: auto minmax(8rem, 1fr);
+  align-items: center;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.data-table th,
+.data-table td {
+  padding: 0.7rem;
+  border-block-end: 1px solid var(--border);
+  text-align: start;
+  white-space: nowrap;
+}
+
+.data-table th {
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.panel-state,
+.empty-state {
+  display: grid;
+  min-height: 11rem;
+  align-content: center;
+  justify-items: start;
+  gap: 0.8rem;
+}
+
+.panel-state h3,
+.empty-state h3 {
+  margin: 0;
+}
+
+.panel-state p,
+.empty-state p {
+  max-width: 60ch;
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
 }
 
 .section-label {
@@ -378,7 +771,7 @@ a:focus-visible,
   }
 
   .app-main {
-    align-items: flex-start;
+    align-content: start;
   }
 
   .health-meta > div {
@@ -393,6 +786,33 @@ a:focus-visible,
 
   .button--primary,
   .button--secondary {
+    width: 100%;
+  }
+
+  .management-header,
+  .subsection-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .management-connection {
+    white-space: normal;
+  }
+
+  .management-form,
+  .credential-form,
+  .account-list li,
+  .session-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .session-list {
+    padding: 0 0 1rem;
+    border-inline-end: 0;
+    border-block-end: 1px solid var(--border);
+  }
+
+  .management-actions > * {
     width: 100%;
   }
 }

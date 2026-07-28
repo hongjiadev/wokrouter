@@ -13,6 +13,7 @@ import {
 import { CoreHealth } from "./CoreHealth";
 
 vi.mock("../control", () => ({
+  coreStatusQueryKey: ["core-status"],
   getCoreStatus: vi.fn(),
   startCore: vi.fn(),
   stopCore: vi.fn(),

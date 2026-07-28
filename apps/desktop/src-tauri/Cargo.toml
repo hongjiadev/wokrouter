@@ -15,12 +15,21 @@ name = "wokrouter-desktop"
 path = "src/main.rs"
 
 [dependencies]
+secrecy.workspace = true
 serde.workspace = true
 tauri.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["process"] }
+uuid.workspace = true
+zeroize.workspace = true
 wokrouter-cli = { path = "../../cli" }
 wokrouter-platform = { path = "../../../crates/wokrouter-platform" }
+wokrouter-storage = { path = "../../../crates/wokrouter-storage" }
+wokrouter-wokcore-client = { path = "../../../crates/wokrouter-wokcore-client" }
 
 [build-dependencies]
 tauri-build.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true

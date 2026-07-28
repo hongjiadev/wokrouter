@@ -1,36 +1,35 @@
-use std::{
-    collections::BTreeSet,
-    process::{Command, Output, Stdio},
-};
+use std::collections::BTreeSet;
 
-use wokrouter_cli::commands::{CoreStatus, CoreUiState};
+use wokrouter_cli::commands::{CommandError, CoreStatus, CoreUiState};
+use wokrouter_platform::AppPaths;
 use wokrouter_wokcore_client::ServicePhase;
 
-#[test]
-fn missing_wokcore_has_stable_status_start_and_stop_contracts() {
+#[tokio::test]
+async fn missing_wokcore_has_stable_status_start_and_stop_contracts() {
     let home = tempfile::tempdir().unwrap();
-    let empty_path = home.path().join("empty-path");
-    std::fs::create_dir(&empty_path).unwrap();
+    let paths = isolated_paths(&home);
+    let (status, exit_code) = wokrouter_cli::commands::status::snapshot(&paths)
+        .await
+        .unwrap();
 
-    let status = run(&home, &empty_path, &["status", "--json"]);
-    assert_eq!(status.status.code(), Some(3));
+    assert_eq!(exit_code, 3);
+    assert_eq!(status.state, CoreUiState::Missing);
     assert_eq!(
-        String::from_utf8(status.stdout).unwrap(),
-        "{\"state\":\"missing\",\"capabilities\":[],\"error_code\":\"missing\"}\n"
+        serde_json::to_string(&status).unwrap(),
+        "{\"state\":\"missing\",\"capabilities\":[],\"error_code\":\"missing\"}"
     );
 
-    let start = run(&home, &empty_path, &["start"]);
-    assert!(!start.status.success());
     assert_eq!(
-        String::from_utf8(start.stderr).unwrap(),
-        "wokrouter: WokCore is not installed or is not available on PATH\n"
+        wokrouter_cli::commands::start::execute(&paths)
+            .await
+            .unwrap_err(),
+        CommandError::WokCoreMissing
     );
-
-    let stop = run(&home, &empty_path, &["stop"]);
-    assert!(stop.status.success());
     assert_eq!(
-        String::from_utf8(stop.stdout).unwrap(),
-        "WokCore is already stopped.\n"
+        wokrouter_cli::commands::stop::execute(&paths)
+            .await
+            .unwrap(),
+        0
     );
 }
 
@@ -52,21 +51,13 @@ fn running_status_dto_contains_no_token_or_executable_path() {
     );
 }
 
-fn run(home: &tempfile::TempDir, search_path: &std::path::Path, arguments: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_wokrouter"));
-    command
-        .args(arguments)
-        .env("PATH", search_path)
-        .env("APPDATA", home.path().join("config"))
-        .env("LOCALAPPDATA", home.path().join("state"))
-        .env("USERPROFILE", home.path())
-        .env("HOME", home.path())
-        .env("XDG_CONFIG_HOME", home.path().join("config"))
-        .env("XDG_STATE_HOME", home.path().join("state"))
-        .env_remove("XDG_RUNTIME_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap()
+fn isolated_paths(home: &tempfile::TempDir) -> AppPaths {
+    AppPaths {
+        config_file: home.path().join("config").join("config.toml"),
+        wokcore_install_record: home.path().join("config").join("wokcore-install.json"),
+        state_db: home.path().join("state").join("state.sqlite3"),
+        runtime_dir: home.path().join("runtime"),
+        log_dir: home.path().join("logs"),
+        wokcore_discovery_file: home.path().join("runtime").join("discovery.json"),
+    }
 }

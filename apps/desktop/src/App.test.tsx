@@ -5,7 +5,11 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { getCoreStatus } from "./control";
 import { App } from "./App";
 
+vi.mock("./components/ManagementPanel", () => ({
+  ManagementPanel: () => <section>WokCore workspace</section>,
+}));
 vi.mock("./control", () => ({
+  coreStatusQueryKey: ["core-status"],
   getCoreStatus: vi.fn(),
   startCore: vi.fn(),
   stopCore: vi.fn(),
@@ -21,7 +25,7 @@ beforeEach(() => {
   });
 });
 
-it("keeps WokCore health as the desktop shell's primary surface", async () => {
+it("keeps health first and mounts the WokCore management workspace", async () => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -34,5 +38,5 @@ it("keeps WokCore health as the desktop shell's primary surface", async () => {
 
   expect(screen.getByText("WokRouter")).toBeInTheDocument();
   expect(await screen.findByText("WokCore running")).toBeInTheDocument();
-  expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+  expect(screen.getByText("WokCore workspace")).toBeInTheDocument();
 });

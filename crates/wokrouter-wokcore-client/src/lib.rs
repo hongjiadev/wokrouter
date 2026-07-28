@@ -1,9 +1,14 @@
 mod authorize;
+mod diagnostics;
 mod discovery;
 mod error;
 mod http;
+mod management;
 mod model;
+mod providers;
 mod service;
+mod sessions;
+mod usage;
 
 use std::{fmt, path::PathBuf};
 
@@ -13,9 +18,27 @@ use semver::Version;
 use uuid::Uuid;
 
 pub use authorize::{AuthorizationError, AuthorizationState, WokCoreAuthorizer};
+pub use diagnostics::{
+    DiagnosticExportQuery, DiagnosticLogLevel, DiagnosticLogQuery, DiagnosticLogs, DiagnosticOrder,
+};
 pub use error::ClientError;
+pub use management::ManagementError;
 pub use model::{Compatibility, CoreConnection, CoreHandshake};
+pub use providers::{
+    EndpointPolicy, ModelAlias, ModelSource, ProviderAccount, ProviderAccountAuth, ProviderAdapter,
+    ProviderAuthKind, ProviderCandidate, ProviderCapabilities, ProviderCatalogResponse,
+    ProviderCommitRequest, ProviderCommitResponse, ProviderConfig, ProviderDefinition,
+    ProviderInstance, ProviderModelsResponse, ProviderReloadStatus, ProviderRuntimeResponse,
+    ProviderSecretCreate, ProviderSecretOperation, ProviderSecretPurpose, ProviderSecretResponse,
+    ProviderValidationResponse, PublicModel, RouteRule, RouteTarget, RoutingConfig,
+};
 pub use service::{ServiceError, ServicePhase, ServiceStatus};
+pub use sessions::{
+    IndexPhase, IndexStatus, MessageRole, SessionAvailability, SessionList, SessionListItem,
+    SessionMessage, SessionMessageQuery, SessionMessages, SessionQuery, SessionSource,
+    SourceAvailability, SourceIndexStatus,
+};
+pub use usage::{UsageBucket, UsageGroup, UsageQuery, UsageResponse, UsageTotals};
 
 const SUPPORTED_API_MAJOR: u32 = 1;
 

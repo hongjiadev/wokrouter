@@ -31,6 +31,7 @@ const coreStatusSchema = z
   .strict();
 
 export type CoreStatus = z.infer<typeof coreStatusSchema>;
+export const coreStatusQueryKey = ["core-status"] as const;
 
 export async function getCoreStatus(): Promise<CoreStatus> {
   const status = await invoke<unknown>("core_status");

@@ -2,13 +2,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
 import {
+  coreStatusQueryKey,
   getCoreStatus,
   startCore,
   stopCore,
   type CoreStatus,
 } from "../control";
-
-const coreStatusQueryKey = ["core-status"] as const;
 
 const stateCopy: Record<
   CoreStatus["state"],

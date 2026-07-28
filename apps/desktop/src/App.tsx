@@ -1,4 +1,5 @@
 import { CoreHealth } from "./components/CoreHealth";
+import { ManagementPanel } from "./components/ManagementPanel";
 
 export function App() {
   return (
@@ -14,6 +15,7 @@ export function App() {
       </header>
       <main className="app-main">
         <CoreHealth />
+        <ManagementPanel />
       </main>
       <footer className="app-footer">
         Desktop controls communicate with WokCore over loopback HTTP.

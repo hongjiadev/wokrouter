@@ -5726,13 +5726,20 @@ dependencies = [
 name = "wokrouter-desktop"
 version = "0.1.0"
 dependencies = [
+ "secrecy",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "uuid",
  "wokrouter-cli",
  "wokrouter-platform",
+ "wokrouter-storage",
+ "wokrouter-wokcore-client",
+ "zeroize",
 ]
 
 [[package]]
@@ -5791,6 +5798,7 @@ name = "wokrouter-wokcore-client"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "futures",
  "libc",
  "reqwest",

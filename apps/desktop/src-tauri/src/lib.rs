@@ -1,8 +1,10 @@
 //! WokRouter desktop shell.
 
 mod control;
+mod wokcore;
 
 use control::{DesktopControl, DesktopControlError};
+use wokcore::ManagementState;
 use wokrouter_cli::commands::CoreStatus;
 
 struct DesktopState {
@@ -49,7 +51,26 @@ pub fn run() -> tauri::Result<()> {
     let state = DesktopState::new(DesktopControl::discover());
     tauri::Builder::default()
         .manage(state)
-        .invoke_handler(tauri::generate_handler![core_status, start_core, stop_core])
+        .manage(ManagementState::discover())
+        .invoke_handler(tauri::generate_handler![
+            core_status,
+            start_core,
+            stop_core,
+            wokcore::provider_catalog,
+            wokcore::provider_runtime,
+            wokcore::provider_models,
+            wokcore::validate_provider_config,
+            wokcore::commit_provider_config,
+            wokcore::reload_providers,
+            wokcore::create_provider_secret,
+            wokcore::replace_provider_secret,
+            wokcore::delete_provider_secret,
+            wokcore::list_sessions,
+            wokcore::session_messages,
+            wokcore::usage,
+            wokcore::diagnostic_logs,
+            wokcore::export_diagnostics,
+        ])
         .run(tauri::generate_context!())
 }
 

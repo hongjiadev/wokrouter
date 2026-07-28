@@ -123,7 +123,9 @@ fn map_http_error(error: ProtectedHttpError) -> ServiceError {
         ProtectedHttpError::Transport => ServiceError::Stopped,
         ProtectedHttpError::Unauthorized => ServiceError::Unauthorized,
         ProtectedHttpError::Forbidden => ServiceError::Forbidden,
-        ProtectedHttpError::InvalidResponse => ServiceError::InvalidResponse,
+        ProtectedHttpError::Conflict
+        | ProtectedHttpError::InvalidRequest
+        | ProtectedHttpError::InvalidResponse => ServiceError::InvalidResponse,
     }
 }
 
