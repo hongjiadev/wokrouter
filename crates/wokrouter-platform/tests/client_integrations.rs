@@ -19,7 +19,7 @@ const RESTARTED_INSTANCE_ID: &str = "11234567-89ab-4cde-8fab-0123456789ab";
 const MANAGEMENT_TOKEN: &str = "wok_proxy_v1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const CLIENT_TOKEN: &str = "wok_proxy_v1_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "test-support"))]
 #[test]
 fn windows_discovery_fixture_is_private_for_current_user() {
     let fixture = tempdir().unwrap();
@@ -1013,10 +1013,13 @@ fn secure_test_file(path: &std::path::Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "test-support"))]
 fn secure_test_file(path: &std::path::Path) {
     wokrouter_platform::test_support::secure_private_file(path).unwrap();
 }
+
+#[cfg(all(windows, not(feature = "test-support")))]
+fn secure_test_file(_path: &std::path::Path) {}
 
 #[cfg(not(any(unix, windows)))]
 fn secure_test_file(_path: &std::path::Path) {}
