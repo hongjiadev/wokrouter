@@ -1,4 +1,5 @@
 mod authorize;
+mod clients;
 mod diagnostics;
 mod discovery;
 mod error;
@@ -18,6 +19,7 @@ use semver::Version;
 use uuid::Uuid;
 
 pub use authorize::{AuthorizationError, AuthorizationState, WokCoreAuthorizer};
+pub use clients::{IntegrationRuntime, IssuedProxyToken};
 pub use diagnostics::{
     DiagnosticExportQuery, DiagnosticLogLevel, DiagnosticLogQuery, DiagnosticLogs, DiagnosticOrder,
 };
@@ -106,13 +108,17 @@ fn connection_from_capabilities(
 ) -> CoreConnection {
     let valid_identity =
         Uuid::parse_str(&capabilities.instance_id).is_ok_and(|id| id == discovery.instance_id);
+    let valid_installation_id = capabilities
+        .installation_id
+        .as_deref()
+        .is_none_or(valid_opaque_identity);
     let valid_version = Version::parse(&capabilities.wokcore_version)
         .is_ok_and(|version| version == discovery.wokcore_version);
     let valid_range = capabilities.minimum_management_api_major > 0
         && capabilities.minimum_management_api_major <= capabilities.maximum_management_api_major
         && capabilities.management_api_major >= capabilities.minimum_management_api_major
         && capabilities.management_api_major <= capabilities.maximum_management_api_major;
-    if !valid_identity || !valid_version || !valid_range {
+    if !valid_identity || !valid_installation_id || !valid_version || !valid_range {
         return CoreConnection::InvalidRuntime;
     }
 
@@ -135,11 +141,19 @@ fn connection_from_capabilities(
 
     CoreConnection::Running(CoreHandshake {
         instance_id: discovery.instance_id.to_string(),
+        installation_id: capabilities.installation_id,
         version: capabilities.wokcore_version,
         management_api_major: capabilities.management_api_major,
         provider_protocols: capabilities.provider_protocols.into_iter().collect(),
         capabilities: capabilities.capabilities.into_iter().collect(),
     })
+}
+
+fn valid_opaque_identity(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn valid_string_set(values: &[String]) -> bool {

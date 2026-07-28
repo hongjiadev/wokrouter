@@ -312,6 +312,7 @@ fn app_paths(root: &Path) -> AppPaths {
         config_file: root.join("config").join("config.toml"),
         wokcore_install_record: root.join("config").join("wokcore-install.json"),
         wokcore_install_dir: root.join("WokCore").join("bin"),
+        integration_dir: root.join("state").join("integrations"),
         runtime_dir: root.join("runtime"),
         log_dir: root.join("logs"),
         wokcore_discovery_file: root.join("WokCore").join("runtime").join("discovery.json"),

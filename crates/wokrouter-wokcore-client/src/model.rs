@@ -20,6 +20,7 @@ pub struct Compatibility {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoreHandshake {
     pub instance_id: String,
+    pub installation_id: Option<String>,
     pub version: String,
     pub management_api_major: u32,
     pub provider_protocols: BTreeSet<String>,

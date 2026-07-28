@@ -5525,6 +5525,7 @@ dependencies = [
  "libc",
  "minisign-verify",
  "reqwest",
+ "secrecy",
  "semver",
  "serde",
  "serde_json",
@@ -5534,10 +5535,13 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "toml_edit 0.25.13+spec-1.1.0",
  "url",
+ "uuid",
  "windows-sys 0.61.2",
  "wiremock",
  "wokrouter-storage",
+ "wokrouter-wokcore-client",
  "zip",
 ]
 

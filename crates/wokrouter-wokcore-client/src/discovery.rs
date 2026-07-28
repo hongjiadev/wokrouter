@@ -13,7 +13,7 @@ pub(crate) enum DiscoveryRead {
     Record(ValidatedDiscovery),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ValidatedDiscovery {
     pub base_url: Url,
     pub authority: String,

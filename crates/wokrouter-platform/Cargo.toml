@@ -16,6 +16,7 @@ fs4.workspace = true
 jiff = { workspace = true, features = ["tzdb-concatenated"] }
 minisign-verify.workspace = true
 reqwest.workspace = true
+secrecy.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -23,7 +24,11 @@ sha2.workspace = true
 sys-locale.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+toml_edit.workspace = true
 url.workspace = true
+uuid.workspace = true
+wokrouter-wokcore-client = { path = "../wokrouter-wokcore-client" }
 wokrouter-storage = { path = "../wokrouter-storage" }
 
 [target.'cfg(unix)'.dependencies]
@@ -43,6 +48,5 @@ windows-sys = { version = "0.61.2", features = [
 zip.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
 wiremock.workspace = true
 wokrouter-storage = { path = "../wokrouter-storage" }

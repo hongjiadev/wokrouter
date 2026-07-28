@@ -2,6 +2,7 @@ use std::{collections::BTreeSet, path::PathBuf};
 
 use secrecy::SecretString;
 use serde::Serialize;
+use wokrouter_platform::IntegrationError;
 use wokrouter_platform::{AppPaths, PlatformError, discover_wokcore_executable};
 use wokrouter_storage::{NativeWokCoreTokenVault, TokenVaultError, WokCoreTokenVault};
 use wokrouter_wokcore_client::{
@@ -9,6 +10,7 @@ use wokrouter_wokcore_client::{
     WokCoreAuthorizer, WokCoreClient,
 };
 
+pub mod integrations;
 pub mod start;
 pub mod status;
 pub mod stop;
@@ -151,7 +153,9 @@ impl CoreStatus {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CommandError {
-    #[error("usage: wokrouter <start|status [--json]|stop>")]
+    #[error(
+        "usage: wokrouter <start|status [--json]|stop|integrate <client>|restore <client>|doctor [--json|--repair <check-id>]|integration-token <client>>"
+    )]
     Usage,
     #[error("WokCore is not installed or is not available on PATH")]
     WokCoreMissing,
@@ -171,6 +175,20 @@ pub enum CommandError {
     InvalidRuntime,
     #[error("WokCore API version is incompatible")]
     Incompatible,
+    #[error("the client home directory is unavailable")]
+    ClientHomeUnavailable,
+    #[error("the client integration is not installed")]
+    ClientNotInstalled,
+    #[error("the client integration is unsupported by this WokCore runtime")]
+    ClientUnsupported,
+    #[error("the client configuration has an ownership conflict")]
+    ClientConflict,
+    #[error("the client integration belongs to a different WokCore installation")]
+    ClientRuntimeChanged,
+    #[error("the client integration state is invalid")]
+    ClientInvalidState,
+    #[error("the client integration operation failed")]
+    ClientOperation,
 }
 
 impl From<PlatformError> for CommandError {
@@ -216,6 +234,22 @@ impl From<ServiceError> for CommandError {
             ServiceError::Incompatible => Self::Incompatible,
             ServiceError::InvalidRuntime | ServiceError::InvalidResponse => Self::InvalidRuntime,
             ServiceError::Unauthorized | ServiceError::Forbidden => Self::AuthorizationRequired,
+        }
+    }
+}
+
+impl From<IntegrationError> for CommandError {
+    fn from(error: IntegrationError) -> Self {
+        match error {
+            IntegrationError::MissingHome => Self::ClientHomeUnavailable,
+            IntegrationError::NotInstalled => Self::ClientNotInstalled,
+            IntegrationError::Unsupported => Self::ClientUnsupported,
+            IntegrationError::Conflict => Self::ClientConflict,
+            IntegrationError::RuntimeChanged => Self::ClientRuntimeChanged,
+            IntegrationError::InvalidConfig | IntegrationError::InvalidState => {
+                Self::ClientInvalidState
+            }
+            IntegrationError::Operation => Self::ClientOperation,
         }
     }
 }

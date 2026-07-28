@@ -35,6 +35,8 @@ pub(crate) struct CapabilitiesWire {
     pub provider_protocols: Vec<String>,
     pub capabilities: Vec<String>,
     pub instance_id: String,
+    #[serde(default)]
+    pub installation_id: Option<String>,
 }
 
 #[derive(Clone, Copy)]

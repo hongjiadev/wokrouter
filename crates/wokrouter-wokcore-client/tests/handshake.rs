@@ -2,12 +2,13 @@ mod support;
 
 use std::net::TcpListener;
 
+use serde_json::json;
 use tempfile::tempdir;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{method, path},
+    matchers::{header, method, path},
 };
-use wokrouter_wokcore_client::{CoreConnection, WokCoreClient};
+use wokrouter_wokcore_client::{CoreConnection, ManagementError, WokCoreClient};
 
 use support::{INSTANCE_ID, mount_handshake, write_discovery};
 
@@ -29,6 +30,48 @@ async fn compatible_handshake_accepts_unknown_same_major_fields() {
     assert_eq!(handshake.management_api_major, 1);
     assert!(handshake.provider_protocols.contains("openai_responses"));
     assert!(handshake.capabilities.contains("service.status"));
+}
+
+#[tokio::test]
+async fn legacy_same_major_runtime_without_installation_id_remains_running() {
+    let server = MockServer::start().await;
+    let authority = server.uri().trim_start_matches("http://").to_owned();
+    Mock::given(method("GET"))
+        .and(path("/wokcore/v1/health"))
+        .and(header("host", authority.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "ok",
+            "instance_id": INSTANCE_ID
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/wokcore/v1/capabilities"))
+        .and(header("host", authority.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "wokcore_version": "0.1.0",
+            "management_api_major": 1,
+            "minimum_management_api_major": 1,
+            "maximum_management_api_major": 1,
+            "provider_protocols": ["openai.responses.v1"],
+            "capabilities": ["service.status"],
+            "instance_id": INSTANCE_ID
+        })))
+        .mount(&server)
+        .await;
+    let fixture = tempdir().unwrap();
+    let discovery = fixture.path().join("discovery.json");
+    write_discovery(&discovery, &server.uri(), INSTANCE_ID, 1, None);
+    let client = WokCoreClient::new(discovery).unwrap();
+
+    let CoreConnection::Running(handshake) = client.connection().await else {
+        panic!("expected a running legacy handshake");
+    };
+    assert_eq!(handshake.installation_id, None);
+    assert_eq!(
+        client.integration_runtime().await.unwrap_err(),
+        ManagementError::Incompatible
+    );
 }
 
 #[tokio::test]

@@ -48,7 +48,8 @@ async fn incompatible_capability_range_is_reported_explicitly() {
             "maximum_management_api_major": 3,
             "provider_protocols": [],
             "capabilities": [],
-            "instance_id": INSTANCE_ID
+            "instance_id": INSTANCE_ID,
+            "installation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         })))
         .mount(&server)
         .await;

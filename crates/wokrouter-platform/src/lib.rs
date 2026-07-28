@@ -1,5 +1,6 @@
 //! Platform-neutral WokRouter and WokCore discovery primitives.
 
+mod client;
 mod wokcore_install;
 
 pub mod system {
@@ -10,6 +11,12 @@ pub mod system {
     pub mod wokcore;
 }
 
+pub use client::{
+    ClientIntegrationManager, ClientKind, ClientRoots, CopilotSetup, DoctorCheck, DoctorReport,
+    DoctorSeverity, DoctorStatus, IntegrationDoctor, IntegrationError, IntegrationStatus,
+    MutationError, MutationId, MutationJournal, MutationOperation, MutationStatus, OwnedMutation,
+    PreparedMutation, RestoreResult,
+};
 pub use system::locale::{SystemContext, detect_system_context};
 pub use system::paths::AppPaths;
 pub use system::wokcore::discover_wokcore_executable;

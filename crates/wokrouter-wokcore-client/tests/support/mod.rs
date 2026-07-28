@@ -7,6 +7,8 @@ use wiremock::{
 };
 
 pub const INSTANCE_ID: &str = "01234567-89ab-4cde-8fab-0123456789ab";
+pub const INSTALLATION_ID: &str =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 pub fn write_discovery(
     path: &Path,
@@ -53,6 +55,7 @@ pub async fn mount_handshake(server: &MockServer, instance_id: &str) {
             "provider_protocols": ["openai_responses", "anthropic_messages"],
             "capabilities": ["discovery.v1", "service.status"],
             "instance_id": instance_id,
+            "installation_id": INSTALLATION_ID,
             "future_capability_field": {"enabled": true}
         })))
         .mount(server)

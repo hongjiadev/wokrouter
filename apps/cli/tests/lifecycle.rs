@@ -56,6 +56,7 @@ fn isolated_paths(home: &tempfile::TempDir) -> AppPaths {
         config_file: home.path().join("config").join("config.toml"),
         wokcore_install_record: home.path().join("config").join("wokcore-install.json"),
         wokcore_install_dir: home.path().join("WokCore").join("bin"),
+        integration_dir: home.path().join("state").join("integrations"),
         runtime_dir: home.path().join("runtime"),
         log_dir: home.path().join("logs"),
         wokcore_discovery_file: home.path().join("runtime").join("discovery.json"),
