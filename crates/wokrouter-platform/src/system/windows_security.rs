@@ -47,14 +47,14 @@ pub(crate) enum PrivatePathKind {
 }
 
 pub(crate) fn secure_private_path(path: &Path, kind: PrivatePathKind) -> io::Result<()> {
-    let file = open_security_handle(path, kind, READ_CONTROL | WRITE_DAC)?;
-    if !matches_kind_without_reparse(&file, kind) || !owned_by_current_user(&file) {
+    let file = open_security_handle(path, kind, READ_CONTROL | WRITE_DAC | WRITE_OWNER)?;
+    if !matches_kind_without_reparse(&file, kind) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "unsafe Windows path ownership",
+            "unsafe Windows path type",
         ));
     }
-    apply_private_dacl(&file, kind)?;
+    apply_private_owner_and_dacl(&file, kind)?;
     private_owned_by_current_user_and_system(&file, kind)
         .then_some(())
         .ok_or_else(|| {
@@ -151,7 +151,7 @@ fn matches_kind_without_reparse(file: &File, kind: PrivatePathKind) -> bool {
     expected_kind && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
 }
 
-fn apply_private_dacl(file: &File, kind: PrivatePathKind) -> io::Result<()> {
+fn apply_private_owner_and_dacl(file: &File, kind: PrivatePathKind) -> io::Result<()> {
     let user = current_user_sid().ok_or_else(io::Error::last_os_error)?;
     let system = local_system_sid().ok_or_else(io::Error::last_os_error)?;
     let inheritance = match kind {
@@ -162,10 +162,14 @@ fn apply_private_dacl(file: &File, kind: PrivatePathKind) -> io::Result<()> {
         explicit_access(user.as_ptr(), TRUSTEE_IS_USER, inheritance),
         explicit_access(system.as_ptr(), TRUSTEE_IS_WELL_KNOWN_GROUP, inheritance),
     ];
-    apply_explicit_dacl(file, &entries)
+    apply_explicit_dacl(file, &entries, Some(user.as_ptr()))
 }
 
-fn apply_explicit_dacl(file: &File, entries: &[EXPLICIT_ACCESS_W]) -> io::Result<()> {
+fn apply_explicit_dacl(
+    file: &File,
+    entries: &[EXPLICIT_ACCESS_W],
+    owner: Option<PSID>,
+) -> io::Result<()> {
     let mut acl: *mut ACL = ptr::null_mut();
     let status = unsafe {
         SetEntriesInAclW(
@@ -179,12 +183,18 @@ fn apply_explicit_dacl(file: &File, entries: &[EXPLICIT_ACCESS_W]) -> io::Result
     if status != ERROR_SUCCESS || acl.0.is_null() {
         return Err(io::Error::from_raw_os_error(status as i32));
     }
+    let security_information = DACL_SECURITY_INFORMATION
+        | PROTECTED_DACL_SECURITY_INFORMATION
+        | owner
+            .is_some()
+            .then_some(OWNER_SECURITY_INFORMATION)
+            .unwrap_or_default();
     let status = unsafe {
         SetSecurityInfo(
             file.as_raw_handle(),
             SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            ptr::null_mut(),
+            security_information,
+            owner.unwrap_or(ptr::null_mut()),
             ptr::null_mut(),
             acl.0.cast(),
             ptr::null(),
@@ -541,13 +551,16 @@ mod tests {
             Authorization::{TRUSTEE_IS_USER, TRUSTEE_IS_WELL_KNOWN_GROUP},
             NO_INHERITANCE, WinBuiltinUsersSid,
         },
-        Storage::FileSystem::{FILE_ALL_ACCESS, FILE_GENERIC_READ, FILE_GENERIC_WRITE},
+        Storage::FileSystem::{
+            FILE_ALL_ACCESS, FILE_GENERIC_READ, FILE_GENERIC_WRITE, READ_CONTROL,
+        },
     };
 
     use super::{
         PrivatePathKind, apply_explicit_dacl, current_user_sid, explicit_access, local_system_sid,
-        open_security_handle, path_executable_is_not_untrusted_writable,
-        private_path_owned_by_current_user_and_system, secure_private_path, well_known_sid,
+        open_security_handle, owned_by_current_user, path_executable_is_not_untrusted_writable,
+        private_dacl_allows_only_user_and_system, private_path_owned_by_current_user_and_system,
+        secure_private_path, well_known_sid,
     };
 
     #[test]
@@ -571,6 +584,20 @@ mod tests {
         ));
         assert!(private_path_owned_by_current_user_and_system(
             &file,
+            PrivatePathKind::File
+        ));
+        let secured_directory =
+            open_security_handle(&directory, PrivatePathKind::Directory, READ_CONTROL).unwrap();
+        assert!(owned_by_current_user(&secured_directory));
+        assert!(private_dacl_allows_only_user_and_system(
+            &secured_directory,
+            PrivatePathKind::Directory
+        ));
+        let secured_file =
+            open_security_handle(&file, PrivatePathKind::File, READ_CONTROL).unwrap();
+        assert!(owned_by_current_user(&secured_file));
+        assert!(private_dacl_allows_only_user_and_system(
+            &secured_file,
             PrivatePathKind::File
         ));
     }
@@ -648,6 +675,6 @@ mod tests {
             },
         ];
         assert_eq!(entries[0].grfAccessPermissions, FILE_ALL_ACCESS);
-        apply_explicit_dacl(&file, &entries).unwrap();
+        apply_explicit_dacl(&file, &entries, None).unwrap();
     }
 }
