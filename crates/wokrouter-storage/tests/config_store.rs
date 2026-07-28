@@ -19,7 +19,7 @@ fn commit_requires_current_revision_and_survives_reload() {
     assert_eq!(initial.config, AppConfig::default());
 
     let mut candidate = initial.config.clone();
-    candidate.server.port = 10101;
+    candidate.ui.locale_override = Some("en-US".into());
     let committed = store.commit(0, &candidate).unwrap();
     assert_eq!(committed.revision, 1);
     assert_eq!(store.load().unwrap(), committed);
@@ -57,7 +57,7 @@ fn commit_atomically_replaces_an_existing_config() {
 
     let first = store.commit(0, &AppConfig::default()).unwrap();
     let mut replacement = first.config.clone();
-    replacement.server.port = 10102;
+    replacement.ui.timezone_override = Some("Europe/Paris".into());
 
     let second = store.commit(first.revision, &replacement).unwrap();
 

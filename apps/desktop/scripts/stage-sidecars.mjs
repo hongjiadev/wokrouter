@@ -13,7 +13,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const sidecarNames = ["wokrouter", "wokrouterd"];
+const sidecarNames = ["wokrouter"];
 const supportedTargetTriples = new Set([
   "x86_64-pc-windows-msvc",
   "x86_64-apple-darwin",
@@ -107,8 +107,6 @@ export function cargoBuildArguments(targetTriple) {
     supportedTargetTriple(targetTriple),
     "-p",
     "wokrouter-cli",
-    "-p",
-    "wokrouter-daemon",
   ];
 }
 

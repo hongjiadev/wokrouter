@@ -1,8 +1,4 @@
-//! Platform-neutral operating system integration primitives.
-
-pub mod service {
-    pub mod manager;
-}
+//! Platform-neutral WokRouter and WokCore discovery primitives.
 
 pub mod system {
     pub mod locale;
@@ -10,7 +6,6 @@ pub mod system {
     pub mod wokcore;
 }
 
-pub use service::manager::{ServiceManager, ServiceStatus};
 pub use system::locale::{SystemContext, detect_system_context};
 pub use system::paths::AppPaths;
 pub use system::wokcore::discover_wokcore_executable;
@@ -19,8 +14,6 @@ pub use system::wokcore::discover_wokcore_executable;
 pub enum PlatformError {
     #[error("the operating system did not provide {name}")]
     MissingPlatformData { name: &'static str },
-    #[error("service manager error: {message}")]
-    Service { message: String },
     #[error("the WokCore install record is invalid")]
     InvalidWokCoreInstallRecord,
 }

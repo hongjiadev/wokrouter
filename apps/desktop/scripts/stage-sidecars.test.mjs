@@ -178,9 +178,6 @@ describe("sidecar staging paths", () => {
     expect(
       sidecarFileName("wokrouter", "x86_64-pc-windows-msvc"),
     ).toBe("wokrouter-x86_64-pc-windows-msvc.exe");
-    expect(
-      sidecarFileName("wokrouterd", "aarch64-apple-darwin"),
-    ).toBe("wokrouterd-aarch64-apple-darwin");
   });
 
   it("reads the target-specific Cargo release directory", () => {
@@ -217,7 +214,7 @@ describe("sidecar staging paths", () => {
     });
   });
 
-  it("builds both lifecycle binaries for the resolved target", () => {
+  it("builds only the WokRouter lifecycle binary for the resolved target", () => {
     expect(cargoBuildArguments("aarch64-apple-darwin")).toEqual([
       "build",
       "--locked",
@@ -226,9 +223,28 @@ describe("sidecar staging paths", () => {
       "aarch64-apple-darwin",
       "-p",
       "wokrouter-cli",
-      "-p",
-      "wokrouter-daemon",
     ]);
+  });
+
+  it("stages only the WokRouter sidecar", () => {
+    const copyFileSync = vi.fn();
+    const staged = stageBuiltSidecars({
+      workspaceRoot: "/work/wokrouter",
+      tauriDir: "/work/wokrouter/apps/desktop/src-tauri",
+      targetTriple: "x86_64-unknown-linux-gnu",
+      hostPlatform: "linux",
+      fileSystem: {
+        copyFileSync,
+        existsSync: () => true,
+        mkdirSync: vi.fn(),
+      },
+    });
+
+    expect(staged).toHaveLength(1);
+    expect(staged[0].destination).toBe(
+      "/work/wokrouter/apps/desktop/src-tauri/binaries/wokrouter-x86_64-unknown-linux-gnu",
+    );
+    expect(copyFileSync).toHaveBeenCalledOnce();
   });
 
   it("fails before copying when a built lifecycle binary is missing", () => {

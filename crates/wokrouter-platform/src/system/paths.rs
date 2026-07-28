@@ -9,7 +9,6 @@ const WOKCORE_APPLICATION_NAME: &str = "WokCore";
 pub struct AppPaths {
     pub config_file: PathBuf,
     pub wokcore_install_record: PathBuf,
-    pub state_db: PathBuf,
     pub runtime_dir: PathBuf,
     pub log_dir: PathBuf,
     pub wokcore_discovery_file: PathBuf,
@@ -24,7 +23,6 @@ impl AppPaths {
         Ok(Self {
             config_file: config_dir.join("config.toml"),
             wokcore_install_record: config_dir.join("wokcore-install.json"),
-            state_db: state_dir.join("state.sqlite3"),
             runtime_dir: platform_runtime_dir(&state_dir),
             log_dir: state_dir.join("logs"),
             wokcore_discovery_file,

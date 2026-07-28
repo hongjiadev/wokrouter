@@ -9,12 +9,10 @@ const packagePath = resolve(process.cwd(), "package.json");
 const packageJson = JSON.parse(readFileSync(packagePath, "utf8"));
 
 describe("desktop bundle contract", () => {
-  it("bundles both lifecycle sidecars", () => {
+  it("keeps WokCore out of the online bundle", () => {
     expect(config.bundle.active).toBe(true);
-    expect(config.bundle.externalBin).toEqual([
-      "binaries/wokrouter",
-      "binaries/wokrouterd",
-    ]);
+    expect(config.bundle.externalBin).toEqual(["binaries/wokrouter"]);
+    expect(config.bundle.externalBin).not.toContain("binaries/wokcore");
     expect(config.build.beforeBuildCommand).toBe("pnpm build:bundle");
     expect(config.build.beforeBundleCommand).toBe("pnpm stage:sidecars");
     expect(packageJson.scripts["stage:sidecars"]).toBe(

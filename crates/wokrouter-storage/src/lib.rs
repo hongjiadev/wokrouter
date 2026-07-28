@@ -1,16 +1,9 @@
-//! Durable, non-secret storage for WokRouter.
+//! WokRouter preferences and native WokCore client-token storage.
 
 pub mod config;
-pub mod secrets;
-pub mod state;
 mod wokcore_token;
 
-pub use config::{AppConfig, ConfigStore, ServerConfig, UiConfig, VersionedConfig};
-pub use secrets::{
-    EnvironmentSecretStore, HeadlessSecretStoreConfig, MemorySecretStore, NativeSecretStore,
-    PermissionedFileSecretStore, SecretStore,
-};
-pub use state::{RequestMetric, StateHealth, StateStore};
+pub use config::{AppConfig, ConfigStore, UiConfig, VersionedConfig};
 pub use wokcore_token::{NativeWokCoreTokenVault, TokenVaultError, WokCoreTokenVault};
 
 #[derive(Debug, thiserror::Error)]
@@ -26,25 +19,4 @@ pub enum StorageError {
         #[source]
         source: std::io::Error,
     },
-    #[error("state database is corrupt: {message}")]
-    StateDatabaseCorrupt { message: String },
-    #[error("state database error: {source}")]
-    StateDatabase {
-        #[source]
-        source: rusqlite::Error,
-    },
-    #[error("secret was not found")]
-    SecretNotFound,
-    #[error("the native credential service is unavailable")]
-    CredentialServiceUnavailable,
-    #[error("the secret backend failed without exposing secret material")]
-    SecretBackendFailure,
-    #[error("the selected secret backend is read-only")]
-    ReadOnlySecretStore,
-    #[error("the explicit headless secret backend configuration does not match this store")]
-    InvalidHeadlessSecretStoreConfig,
-    #[error("the secret file grants access beyond the current user")]
-    InsecureSecretFilePermissions,
-    #[error("secret material is not valid UTF-8")]
-    InvalidSecretEncoding,
 }
