@@ -3,6 +3,7 @@
 pub mod config;
 pub mod secrets;
 pub mod state;
+mod wokcore_token;
 
 pub use config::{AppConfig, ConfigStore, ServerConfig, UiConfig, VersionedConfig};
 pub use secrets::{
@@ -10,6 +11,7 @@ pub use secrets::{
     PermissionedFileSecretStore, SecretStore,
 };
 pub use state::{RequestMetric, StateHealth, StateStore};
+pub use wokcore_token::{NativeWokCoreTokenVault, TokenVaultError, WokCoreTokenVault};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {

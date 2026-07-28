@@ -5784,9 +5784,11 @@ dependencies = [
 name = "wokrouter-wokcore-client"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "futures",
  "libc",
  "reqwest",
+ "secrecy",
  "semver",
  "serde",
  "serde_json",
@@ -5797,6 +5799,7 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]

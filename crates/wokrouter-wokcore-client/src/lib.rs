@@ -1,3 +1,4 @@
+mod authorize;
 mod discovery;
 mod error;
 mod http;
@@ -10,6 +11,7 @@ use http::{CapabilitiesWire, HealthWire, HttpError, WokCoreHttp};
 use semver::Version;
 use uuid::Uuid;
 
+pub use authorize::{AuthorizationError, AuthorizationState, WokCoreAuthorizer};
 pub use error::ClientError;
 pub use model::{Compatibility, CoreConnection, CoreHandshake};
 
