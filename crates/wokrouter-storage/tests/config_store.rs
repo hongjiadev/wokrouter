@@ -63,10 +63,11 @@ fn commit_atomically_replaces_an_existing_config() {
 
     assert_eq!(second.revision, 2);
     assert_eq!(store.load().unwrap(), second);
-    let entries = fs::read_dir(directory.path())
+    let mut entries = fs::read_dir(directory.path())
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .collect::<Vec<_>>();
+    entries.sort();
     assert_eq!(entries, vec!["config.toml", "config.toml.lock"]);
 }
 
