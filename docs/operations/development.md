@@ -79,10 +79,12 @@ self-test and the full workspace through the stable
 powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -File tests/scripts/run-fixed-test-host.tests.ps1
 
+$repositoryRoot = (Get-Location).Path
+$targetDirectory = Join-Path $repositoryRoot 'target'
 $command = @"
 & './tests/scripts/run-fixed-test-host.ps1' `
-  -TargetDirectory 'E:\Projects\wokrouter\target' `
-  -RepositoryRoot '$PWD' `
+  -TargetDirectory '$targetDirectory' `
+  -RepositoryRoot '$repositoryRoot' `
   -Offline `
   -HarnessArguments @('--nocapture')
 "@
