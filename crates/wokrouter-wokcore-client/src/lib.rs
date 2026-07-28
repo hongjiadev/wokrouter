@@ -3,6 +3,7 @@ mod discovery;
 mod error;
 mod http;
 mod model;
+mod service;
 
 use std::{fmt, path::PathBuf};
 
@@ -14,6 +15,7 @@ use uuid::Uuid;
 pub use authorize::{AuthorizationError, AuthorizationState, WokCoreAuthorizer};
 pub use error::ClientError;
 pub use model::{Compatibility, CoreConnection, CoreHandshake};
+pub use service::{ServiceError, ServicePhase, ServiceStatus};
 
 const SUPPORTED_API_MAJOR: u32 = 1;
 

@@ -1,104 +1,121 @@
 use std::{
-    ffi::OsString,
-    io::Read,
+    path::Path,
     process::{Child, Command, Stdio},
     time::Duration,
 };
 
 use tokio::time::Instant;
-use wokrouter_control::ControlError;
 use wokrouter_platform::AppPaths;
+use wokrouter_wokcore_client::{CoreConnection, ServiceError};
 
-use super::{CommandError, endpoint, operation_deadline, ping_before};
+use super::{CommandError, authorize, client, executable, reauthorize};
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_DELAY: Duration = Duration::from_millis(50);
 
 pub async fn execute(paths: &AppPaths) -> Result<u8, CommandError> {
-    let deadline = Instant::now() + START_TIMEOUT;
-    let endpoint = endpoint(paths)?;
-    match ping_before(&endpoint, operation_deadline(deadline)).await {
-        Ok(()) => {
-            println!("WokRouter daemon is already running.");
-            return Ok(0);
-        }
-        Err(CommandError::Control(ControlError::EndpointUnavailable)) => {}
-        Err(error) => return Err(error),
+    let executable = executable(paths)?;
+    let client = client(paths)?;
+    if let CoreConnection::Running(_) = client.connection().await {
+        ensure_authorized(&client, executable).await?;
+        println!("WokCore is already running.");
+        return Ok(0);
     }
 
-    let mut child = spawn_daemon()?;
-    let mut startup_error = None;
+    let mut child = spawn_core(&executable)?;
+    let deadline = Instant::now() + START_TIMEOUT;
     loop {
-        if Instant::now() >= deadline {
-            return finish_timed_out_start(&mut child, startup_error);
-        }
-        match ping_before(&endpoint, operation_deadline(deadline)).await {
-            Ok(()) => {
-                println!("WokRouter daemon is running.");
+        match client.connection().await {
+            CoreConnection::Running(_) => {
+                ensure_authorized(&client, executable).await?;
+                println!("WokCore is running.");
                 return Ok(0);
             }
-            Err(CommandError::Control(ControlError::EndpointUnavailable))
-            | Err(CommandError::RequestTimedOut) => {}
-            Err(error) => return Err(error),
+            CoreConnection::Incompatible(_) => {
+                kill_created_child(&mut child);
+                return Err(CommandError::Incompatible);
+            }
+            CoreConnection::InvalidRuntime => {
+                kill_created_child(&mut child);
+                return Err(CommandError::InvalidRuntime);
+            }
+            CoreConnection::Missing | CoreConnection::Stopped => {}
         }
 
-        if startup_error.is_none() && child.try_wait()?.is_some() {
-            startup_error = read_stderr(&mut child)?;
-        }
         if Instant::now() >= deadline {
-            return finish_timed_out_start(&mut child, startup_error);
+            let child_exited = child.try_wait().is_ok_and(|status| status.is_some());
+            kill_created_child(&mut child);
+            return Err(if child_exited {
+                CommandError::StartFailed
+            } else {
+                CommandError::StartTimedOut
+            });
         }
         tokio::time::sleep_until(std::cmp::min(deadline, Instant::now() + RETRY_DELAY)).await;
     }
 }
 
-fn finish_timed_out_start(
-    child: &mut Child,
-    mut startup_error: Option<String>,
-) -> Result<u8, CommandError> {
-    if child.try_wait()?.is_none() {
-        child.kill()?;
-        child.wait()?;
-        startup_error = read_stderr(child)?;
+async fn ensure_authorized(
+    client: &wokrouter_wokcore_client::WokCoreClient,
+    executable: std::path::PathBuf,
+) -> Result<(), CommandError> {
+    let token = authorize(executable.clone()).await?;
+    match client.service_status(&token).await {
+        Ok(_) => Ok(()),
+        Err(ServiceError::Unauthorized | ServiceError::Forbidden) => {
+            let token = reauthorize(executable).await?;
+            client.service_status(&token).await?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
     }
-    startup_error
-        .filter(|message| !message.is_empty())
-        .map(|message| Err(CommandError::DaemonFailed { message }))
-        .unwrap_or(Err(CommandError::StartTimedOut))
 }
 
-fn spawn_daemon() -> Result<Child, CommandError> {
-    let mut command = Command::new(daemon_executable()?);
-    if let Some(arguments) = std::env::var_os("WOKROUTER_DAEMON_ARGS") {
-        command.args(arguments.to_string_lossy().split_ascii_whitespace());
-    }
+fn spawn_core(executable: &Path) -> Result<Child, CommandError> {
+    spawn_command(executable)
+        .spawn()
+        .map_err(|_| CommandError::StartFailed)
+}
+
+fn spawn_command(executable: &Path) -> Command {
+    let mut command = Command::new(executable);
     command
+        .args(["serve", "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    Ok(command.spawn()?)
+    command
 }
 
-fn daemon_executable() -> Result<OsString, CommandError> {
-    if let Some(path) = std::env::var_os("WOKROUTER_DAEMON_EXE") {
-        return Ok(path);
+fn kill_created_child(child: &mut Child) {
+    if child.try_wait().is_ok_and(|status| status.is_none()) {
+        let _ = child.kill();
+        let _ = child.wait();
     }
-    let current = std::env::current_exe()?;
-    let file_name = format!("wokrouterd{}", std::env::consts::EXE_SUFFIX);
-    Ok(current.with_file_name(file_name).into_os_string())
 }
 
-fn read_stderr(child: &mut Child) -> Result<Option<String>, CommandError> {
-    let Some(mut stderr) = child.stderr.take() else {
-        return Ok(None);
-    };
-    let mut message = String::new();
-    stderr.read_to_string(&mut message)?;
-    Ok(Some(message.trim().to_owned()))
+#[cfg(test)]
+mod tests {
+    use std::{ffi::OsStr, path::Path};
+
+    use super::spawn_command;
+
+    #[test]
+    fn start_process_contains_only_the_fixed_serve_command() {
+        let executable = Path::new(r"C:\Program Files\WokCore\wokcore.exe");
+        let command = spawn_command(executable);
+
+        assert_eq!(command.get_program(), executable.as_os_str());
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![OsStr::new("serve"), OsStr::new("--json")]
+        );
+    }
 }

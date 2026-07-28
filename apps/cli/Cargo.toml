@@ -11,13 +11,14 @@ name = "wokrouter"
 path = "src/main.rs"
 
 [dependencies]
+secrecy.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-wokrouter-control = { path = "../../crates/wokrouter-control" }
 wokrouter-platform = { path = "../../crates/wokrouter-platform" }
+wokrouter-storage = { path = "../../crates/wokrouter-storage" }
+wokrouter-wokcore-client = { path = "../../crates/wokrouter-wokcore-client" }
 
 [dev-dependencies]
 tempfile.workspace = true
-wokrouter-daemon = { path = "../../crates/wokrouter-daemon" }
-wokrouter-storage = { path = "../../crates/wokrouter-storage" }

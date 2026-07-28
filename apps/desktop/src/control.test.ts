@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { getDaemonStatus, startDaemon } from "./control";
+import { getCoreStatus, startCore, stopCore } from "./control";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
@@ -10,26 +10,42 @@ describe("desktop control bridge", () => {
     vi.mocked(invoke).mockReset();
   });
 
-  it("accepts a valid daemon status DTO", async () => {
-    vi.mocked(invoke).mockResolvedValue({ state: "running", version: "0.1.0" });
-
-    await expect(getDaemonStatus()).resolves.toEqual({
+  it("accepts a valid WokCore status DTO", async () => {
+    vi.mocked(invoke).mockResolvedValue({
       state: "running",
       version: "0.1.0",
+      management_api_major: 1,
+      capabilities: ["service.status"],
+      phase: "running",
+      active_requests: 2,
     });
-    expect(invoke).toHaveBeenCalledWith("daemon_status");
+
+    await expect(getCoreStatus()).resolves.toEqual({
+      state: "running",
+      version: "0.1.0",
+      management_api_major: 1,
+      capabilities: ["service.status"],
+      phase: "running",
+      active_requests: 2,
+    });
+    expect(invoke).toHaveBeenCalledWith("core_status");
   });
 
-  it("rejects a malformed daemon status DTO", async () => {
-    vi.mocked(invoke).mockResolvedValue({ state: "healthy", version: 1 });
+  it("rejects a malformed WokCore status DTO", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      state: "healthy",
+      capabilities: "service.status",
+    });
 
-    await expect(getDaemonStatus()).rejects.toThrow("Invalid daemon status");
+    await expect(getCoreStatus()).rejects.toThrow("Invalid WokCore status");
   });
 
-  it("delegates start to the narrow Tauri command", async () => {
+  it("delegates lifecycle actions to narrow Tauri commands", async () => {
     vi.mocked(invoke).mockResolvedValue(undefined);
 
-    await expect(startDaemon()).resolves.toBeUndefined();
-    expect(invoke).toHaveBeenCalledWith("start_daemon");
+    await expect(startCore()).resolves.toBeUndefined();
+    await expect(stopCore()).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenNthCalledWith(1, "start_core");
+    expect(invoke).toHaveBeenNthCalledWith(2, "stop_core");
   });
 });

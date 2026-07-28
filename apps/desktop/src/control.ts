@@ -1,26 +1,52 @@
 import { invoke } from "@tauri-apps/api/core";
 import { z } from "zod";
 
-const daemonStatusSchema = z
+const coreStatusSchema = z
   .object({
-    state: z.enum(["running", "stopped"]),
-    version: z.string().trim().min(1).max(64),
+    state: z.enum([
+      "missing",
+      "stopped",
+      "starting",
+      "running",
+      "draining",
+      "authorization_required",
+      "incompatible",
+      "invalid_runtime",
+    ]),
+    version: z.string().trim().min(1).max(64).optional(),
+    management_api_major: z.number().int().positive().optional(),
+    capabilities: z.array(z.string().trim().min(1).max(128)).max(256),
+    phase: z
+      .enum([
+        "starting",
+        "running",
+        "draining",
+        "awaiting_cancellation",
+        "stopping",
+      ])
+      .optional(),
+    active_requests: z.number().int().nonnegative().optional(),
+    error_code: z.string().trim().min(1).max(128).optional(),
   })
   .strict();
 
-export type DaemonStatus = z.infer<typeof daemonStatusSchema>;
+export type CoreStatus = z.infer<typeof coreStatusSchema>;
 
-export async function getDaemonStatus(): Promise<DaemonStatus> {
-  const status = await invoke<unknown>("daemon_status");
-  const parsed = daemonStatusSchema.safeParse(status);
+export async function getCoreStatus(): Promise<CoreStatus> {
+  const status = await invoke<unknown>("core_status");
+  const parsed = coreStatusSchema.safeParse(status);
   if (!parsed.success) {
-    throw new Error("Invalid daemon status returned by desktop bridge.", {
+    throw new Error("Invalid WokCore status returned by desktop bridge.", {
       cause: parsed.error,
     });
   }
   return parsed.data;
 }
 
-export async function startDaemon(): Promise<void> {
-  await invoke("start_daemon");
+export async function startCore(): Promise<void> {
+  await invoke("start_core");
+}
+
+export async function stopCore(): Promise<void> {
+  await invoke("stop_core");
 }

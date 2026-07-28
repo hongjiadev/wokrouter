@@ -253,6 +253,17 @@ a:focus-visible,
   background: var(--accent-hover);
 }
 
+.button--secondary {
+  border-color: var(--border);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.button--secondary:hover:not(:disabled) {
+  border-color: var(--muted);
+  background: var(--surface-subtle);
+}
+
 .button:active:not(:disabled) {
   translate: 0 1px;
 }
@@ -380,7 +391,8 @@ a:focus-visible,
     text-align: start;
   }
 
-  .button--primary {
+  .button--primary,
+  .button--secondary {
     width: 100%;
   }
 }

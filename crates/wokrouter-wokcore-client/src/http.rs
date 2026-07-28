@@ -2,11 +2,13 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use reqwest::{
-    Client, Response, StatusCode,
-    header::{CONTENT_LENGTH, HOST},
+    Client, Method, Response, StatusCode,
+    header::{AUTHORIZATION, CONTENT_LENGTH, HOST, HeaderValue},
     redirect::Policy,
 };
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, de::DeserializeOwned};
+use zeroize::Zeroizing;
 
 use crate::{ClientError, discovery::ValidatedDiscovery};
 
@@ -40,6 +42,14 @@ pub(crate) enum HttpError {
     InvalidResponse,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ProtectedHttpError {
+    Transport,
+    Unauthorized,
+    Forbidden,
+    InvalidResponse,
+}
+
 impl WokCoreHttp {
     pub(crate) fn new() -> Result<Self, ClientError> {
         let client = Client::builder()
@@ -67,6 +77,49 @@ impl WokCoreHttp {
         self.get_json(discovery, "/wokcore/v1/capabilities").await
     }
 
+    pub(crate) async fn protected_json<T>(
+        &self,
+        discovery: &ValidatedDiscovery,
+        method: Method,
+        path: &str,
+        token: &SecretString,
+        request_timeout: Duration,
+    ) -> Result<T, ProtectedHttpError>
+    where
+        T: DeserializeOwned,
+    {
+        let url = discovery
+            .base_url
+            .join(path)
+            .map_err(|_| ProtectedHttpError::InvalidResponse)?;
+        let mut authorization = Zeroizing::new(Vec::with_capacity(
+            "Bearer ".len() + token.expose_secret().len(),
+        ));
+        authorization.extend_from_slice(b"Bearer ");
+        authorization.extend_from_slice(token.expose_secret().as_bytes());
+        let mut authorization = HeaderValue::from_bytes(&authorization)
+            .map_err(|_| ProtectedHttpError::InvalidResponse)?;
+        authorization.set_sensitive(true);
+
+        let response = self
+            .client
+            .request(method, url)
+            .header(HOST, discovery.authority.as_str())
+            .header(AUTHORIZATION, authorization)
+            .timeout(request_timeout)
+            .send()
+            .await
+            .map_err(classify_protected_transport)?;
+        match response.status() {
+            StatusCode::UNAUTHORIZED => Err(ProtectedHttpError::Unauthorized),
+            StatusCode::FORBIDDEN => Err(ProtectedHttpError::Forbidden),
+            StatusCode::OK => read_json(response)
+                .await
+                .map_err(|_| ProtectedHttpError::InvalidResponse),
+            _ => Err(ProtectedHttpError::InvalidResponse),
+        }
+    }
+
     async fn get_json<T>(&self, discovery: &ValidatedDiscovery, path: &str) -> Result<T, HttpError>
     where
         T: DeserializeOwned,
@@ -91,6 +144,14 @@ fn classify_transport(error: reqwest::Error) -> HttpError {
         HttpError::Transport
     } else {
         HttpError::InvalidResponse
+    }
+}
+
+fn classify_protected_transport(error: reqwest::Error) -> ProtectedHttpError {
+    if error.is_connect() || error.is_timeout() {
+        ProtectedHttpError::Transport
+    } else {
+        ProtectedHttpError::InvalidResponse
     }
 }
 

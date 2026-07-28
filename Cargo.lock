@@ -5665,14 +5665,15 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 name = "wokrouter-cli"
 version = "0.1.0"
 dependencies = [
+ "secrecy",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "wokrouter-control",
- "wokrouter-daemon",
  "wokrouter-platform",
  "wokrouter-storage",
+ "wokrouter-wokcore-client",
 ]
 
 [[package]]
@@ -5730,7 +5731,7 @@ dependencies = [
  "tauri-build",
  "thiserror 2.0.19",
  "tokio",
- "wokrouter-control",
+ "wokrouter-cli",
  "wokrouter-platform",
 ]
 
@@ -5740,9 +5741,14 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "jiff",
+ "libc",
+ "serde",
+ "serde_json",
  "sys-locale",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "windows-sys 0.61.2",
  "wokrouter-storage",
 ]
 

@@ -1,8 +1,6 @@
-mod commands;
-
 use std::process::ExitCode;
 
-use commands::CommandError;
+use wokrouter_cli::commands::{self, CommandError};
 use wokrouter_platform::AppPaths;
 
 enum Command {

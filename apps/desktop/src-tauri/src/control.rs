@@ -8,53 +8,60 @@ use std::{
     time::Duration,
 };
 
-use serde::Serialize;
 use tokio::{
     process::{Child, Command},
     sync::{Mutex, watch},
 };
-use wokrouter_control::{
-    ControlClient, ControlEndpoint, ControlError, ControlRequest, ControlResponse, DaemonState,
-    DaemonStatus,
-};
+use wokrouter_cli::commands::{CoreStatus, CoreUiState, status::snapshot};
 use wokrouter_platform::AppPaths;
 
-const START_TIMEOUT: Duration = Duration::from_secs(6);
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(6);
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct DaemonStatusDto {
-    state: DaemonState,
-    version: String,
+type ControlFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+trait StatusReader: Send + Sync {
+    fn status(&self) -> ControlFuture<'_, Result<CoreStatus, DesktopControlError>>;
 }
 
-impl From<DaemonStatus> for DaemonStatusDto {
-    fn from(status: DaemonStatus) -> Self {
-        Self {
-            state: status.state,
-            version: status.version,
-        }
+struct SystemStatusReader {
+    paths: AppPaths,
+}
+
+impl StatusReader for SystemStatusReader {
+    fn status(&self) -> ControlFuture<'_, Result<CoreStatus, DesktopControlError>> {
+        Box::pin(async {
+            snapshot(&self.paths)
+                .await
+                .map(|(status, _)| status)
+                .map_err(|_| DesktopControlError::StatusUnavailable)
+        })
     }
 }
 
-type CliFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-
 trait CliChild: Send {
-    fn wait(&mut self) -> CliFuture<'_, Result<bool, DesktopControlError>>;
-    fn kill_and_wait(&mut self) -> CliFuture<'_, ()>;
+    fn wait(&mut self) -> ControlFuture<'_, Result<bool, DesktopControlError>>;
+    fn kill_and_wait(&mut self) -> ControlFuture<'_, ()>;
 }
 
 trait CliRunner: Send + Sync {
-    fn spawn(&self, executable: &Path) -> Result<Box<dyn CliChild>, DesktopControlError>;
+    fn spawn(
+        &self,
+        executable: &Path,
+        action: CliAction,
+    ) -> Result<Box<dyn CliChild>, DesktopControlError>;
 }
 
 struct SystemCliRunner;
 
 impl CliRunner for SystemCliRunner {
-    fn spawn(&self, executable: &Path) -> Result<Box<dyn CliChild>, DesktopControlError> {
-        let mut command = start_command(executable.as_os_str());
-        let child = command
+    fn spawn(
+        &self,
+        executable: &Path,
+        action: CliAction,
+    ) -> Result<Box<dyn CliChild>, DesktopControlError> {
+        let child = cli_command(executable.as_os_str(), action)
             .spawn()
-            .map_err(|_| DesktopControlError::StartUnavailable)?;
+            .map_err(|_| action.error())?;
         Ok(Box::new(SystemCliChild { child }))
     }
 }
@@ -64,21 +71,43 @@ struct SystemCliChild {
 }
 
 impl CliChild for SystemCliChild {
-    fn wait(&mut self) -> CliFuture<'_, Result<bool, DesktopControlError>> {
+    fn wait(&mut self) -> ControlFuture<'_, Result<bool, DesktopControlError>> {
         Box::pin(async {
             self.child
                 .wait()
                 .await
                 .map(|status| status.success())
-                .map_err(|_| DesktopControlError::StartUnavailable)
+                .map_err(|_| DesktopControlError::CommandUnavailable)
         })
     }
 
-    fn kill_and_wait(&mut self) -> CliFuture<'_, ()> {
+    fn kill_and_wait(&mut self) -> ControlFuture<'_, ()> {
         Box::pin(async {
             let _ = self.child.kill().await;
             let _ = self.child.wait().await;
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CliAction {
+    Start,
+    Stop,
+}
+
+impl CliAction {
+    const fn argument(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Stop => "stop",
+        }
+    }
+
+    const fn error(self) -> DesktopControlError {
+        match self {
+            Self::Start => DesktopControlError::StartUnavailable,
+            Self::Stop => DesktopControlError::StopUnavailable,
+        }
     }
 }
 
@@ -91,64 +120,45 @@ struct StartGate {
 
 #[derive(Clone)]
 pub(crate) struct DesktopControl {
-    endpoint: ControlEndpoint,
     cli_executable: PathBuf,
+    status_reader: Arc<dyn StatusReader>,
     runner: Arc<dyn CliRunner>,
     start_gate: Arc<Mutex<StartGate>>,
-    start_timeout: Duration,
+    command_timeout: Duration,
 }
 
 impl DesktopControl {
     pub(crate) fn discover() -> Result<Self, DesktopControlError> {
         let paths = AppPaths::discover().map_err(|_| DesktopControlError::Initialization)?;
-        let endpoint = ControlEndpoint::for_runtime_dir(&paths.runtime_dir)
-            .map_err(|_| DesktopControlError::Initialization)?;
         let current_executable =
             std::env::current_exe().map_err(|_| DesktopControlError::Initialization)?;
         let cli_executable =
             current_executable.with_file_name(format!("wokrouter{}", std::env::consts::EXE_SUFFIX));
-        Ok(Self::new(endpoint, cli_executable))
-    }
-
-    pub(crate) fn new(endpoint: ControlEndpoint, cli_executable: impl Into<PathBuf>) -> Self {
-        Self::new_with_runner(
-            endpoint,
-            cli_executable.into(),
+        Ok(Self::new_with_dependencies(
+            cli_executable,
+            Arc::new(SystemStatusReader { paths }),
             Arc::new(SystemCliRunner),
-            START_TIMEOUT,
-        )
+            COMMAND_TIMEOUT,
+        ))
     }
 
-    fn new_with_runner(
-        endpoint: ControlEndpoint,
+    fn new_with_dependencies(
         cli_executable: PathBuf,
+        status_reader: Arc<dyn StatusReader>,
         runner: Arc<dyn CliRunner>,
-        start_timeout: Duration,
+        command_timeout: Duration,
     ) -> Self {
         Self {
-            endpoint,
             cli_executable,
+            status_reader,
             runner,
             start_gate: Arc::new(Mutex::new(StartGate::default())),
-            start_timeout,
+            command_timeout,
         }
     }
 
-    pub(crate) async fn status(&self) -> Result<DaemonStatusDto, DesktopControlError> {
-        let client = match ControlClient::connect(&self.endpoint).await {
-            Ok(client) => client,
-            Err(ControlError::EndpointUnavailable) => return Ok(stopped_status()),
-            Err(_) => return Err(DesktopControlError::StatusUnavailable),
-        };
-        let response = match client.request(ControlRequest::Status).await {
-            Ok(response) => response,
-            Err(ControlError::EndpointUnavailable) => return Ok(stopped_status()),
-            Err(_) => return Err(DesktopControlError::StatusUnavailable),
-        };
-        match response {
-            ControlResponse::Status(status) => Ok(status.into()),
-            _ => Err(DesktopControlError::StatusUnavailable),
-        }
+    pub(crate) async fn status(&self) -> Result<CoreStatus, DesktopControlError> {
+        self.status_reader.status().await
     }
 
     pub(crate) async fn start(&self) -> StartResult {
@@ -181,40 +191,49 @@ impl DesktopControl {
     }
 
     async fn start_once(&self) -> StartResult {
-        match self.status().await {
-            Ok(status) if status.state == DaemonState::Running => return Ok(()),
-            Ok(_) => {}
-            Err(_) => return Err(DesktopControlError::StartUnavailable),
+        if self.status().await?.state == CoreUiState::Running {
+            return Ok(());
         }
-
-        let mut child = self.runner.spawn(&self.cli_executable)?;
-        match tokio::time::timeout(self.start_timeout, child.wait()).await {
-            Ok(Ok(true)) => {}
-            Ok(Ok(false)) => return Err(DesktopControlError::StartUnavailable),
-            Ok(Err(_)) | Err(_) => {
-                child.kill_and_wait().await;
-                return Err(DesktopControlError::StartUnavailable);
-            }
-        }
-
+        self.run_cli(CliAction::Start).await?;
         match self.status().await {
-            Ok(status) if status.state == DaemonState::Running => Ok(()),
+            Ok(status) if status.state == CoreUiState::Running => Ok(()),
             _ => Err(DesktopControlError::StartUnavailable),
         }
     }
-}
 
-fn stopped_status() -> DaemonStatusDto {
-    DaemonStatusDto {
-        state: DaemonState::Stopped,
-        version: env!("CARGO_PKG_VERSION").to_owned(),
+    pub(crate) async fn stop(&self) -> Result<(), DesktopControlError> {
+        if matches!(
+            self.status().await?.state,
+            CoreUiState::Missing | CoreUiState::Stopped
+        ) {
+            return Ok(());
+        }
+        self.run_cli(CliAction::Stop).await?;
+        match self.status().await {
+            Ok(status) if matches!(status.state, CoreUiState::Missing | CoreUiState::Stopped) => {
+                Ok(())
+            }
+            _ => Err(DesktopControlError::StopUnavailable),
+        }
+    }
+
+    async fn run_cli(&self, action: CliAction) -> Result<(), DesktopControlError> {
+        let mut child = self.runner.spawn(&self.cli_executable, action)?;
+        match tokio::time::timeout(self.command_timeout, child.wait()).await {
+            Ok(Ok(true)) => Ok(()),
+            Ok(Ok(false)) => Err(action.error()),
+            Ok(Err(_)) | Err(_) => {
+                child.kill_and_wait().await;
+                Err(action.error())
+            }
+        }
     }
 }
 
-fn start_command(executable: &OsStr) -> Command {
+fn cli_command(executable: &OsStr, action: CliAction) -> Command {
     let mut command = Command::new(executable);
     command
-        .arg("start")
+        .arg(action.argument())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -229,18 +248,22 @@ fn start_command(executable: &OsStr) -> Command {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum DesktopControlError {
-    #[error("Unable to initialize desktop control.")]
+    #[error("Unable to initialize WokCore control.")]
     Initialization,
-    #[error("Unable to read daemon status. Try again.")]
+    #[error("Unable to read WokCore status. Try again.")]
     StatusUnavailable,
-    #[error("WokRouter could not start. Try again.")]
+    #[error("WokCore could not start. Try again.")]
     StartUnavailable,
+    #[error("WokCore could not stop. Try again.")]
+    StopUnavailable,
+    #[error("Unable to run the local WokRouter command.")]
+    CommandUnavailable,
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::VecDeque,
+        collections::{BTreeSet, VecDeque},
         ffi::OsStr,
         future::{Future, pending},
         path::{Path, PathBuf},
@@ -252,18 +275,30 @@ mod tests {
         time::Duration,
     };
 
-    use wokrouter_control::{
-        ControlEndpoint, ControlError, ControlResponse, ControlServer, DaemonState, DaemonStatus,
-    };
-
     use super::{
-        CliChild, CliRunner, DaemonStatusDto, DesktopControl, DesktopControlError, start_command,
+        CliAction, CliChild, CliRunner, DesktopControl, DesktopControlError, StatusReader,
+        cli_command,
     };
+    use wokrouter_cli::commands::{CoreStatus, CoreUiState};
 
     enum FakeBehavior {
         Fail,
         Hang,
         SucceedAfter(Duration),
+    }
+
+    struct FakeStatusReader {
+        running: Arc<AtomicBool>,
+    }
+
+    impl StatusReader for FakeStatusReader {
+        fn status(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<CoreStatus, DesktopControlError>> + Send + '_>>
+        {
+            let running = self.running.load(Ordering::SeqCst);
+            Box::pin(async move { Ok(status(running)) })
+        }
     }
 
     struct FakeRunner {
@@ -288,7 +323,11 @@ mod tests {
     }
 
     impl CliRunner for FakeRunner {
-        fn spawn(&self, _executable: &Path) -> Result<Box<dyn CliChild>, DesktopControlError> {
+        fn spawn(
+            &self,
+            _executable: &Path,
+            action: CliAction,
+        ) -> Result<Box<dyn CliChild>, DesktopControlError> {
             self.spawn_count.fetch_add(1, Ordering::SeqCst);
             let behavior = self
                 .behaviors
@@ -298,6 +337,7 @@ mod tests {
                 .expect("test runner behavior must be present");
             Ok(Box::new(FakeChild {
                 behavior: Some(behavior),
+                action,
                 kill_count: Arc::clone(&self.kill_count),
                 running: Arc::clone(&self.running),
             }))
@@ -306,6 +346,7 @@ mod tests {
 
     struct FakeChild {
         behavior: Option<FakeBehavior>,
+        action: CliAction,
         kill_count: Arc<AtomicUsize>,
         running: Arc<AtomicBool>,
     }
@@ -315,6 +356,7 @@ mod tests {
             &mut self,
         ) -> Pin<Box<dyn Future<Output = Result<bool, DesktopControlError>> + Send + '_>> {
             let behavior = self.behavior.take().expect("child wait runs once");
+            let action = self.action;
             let running = Arc::clone(&self.running);
             Box::pin(async move {
                 match behavior {
@@ -322,7 +364,7 @@ mod tests {
                     FakeBehavior::Hang => pending().await,
                     FakeBehavior::SucceedAfter(delay) => {
                         tokio::time::sleep(delay).await;
-                        running.store(true, Ordering::SeqCst);
+                        running.store(action == CliAction::Start, Ordering::SeqCst);
                         Ok(true)
                     }
                 }
@@ -335,154 +377,100 @@ mod tests {
         }
     }
 
-    async fn bind_status_server(
-        endpoint: ControlEndpoint,
+    fn control(
         running: Arc<AtomicBool>,
-    ) -> ControlServer {
-        ControlServer::bind(endpoint, move |_| {
-            let running = running.load(Ordering::SeqCst);
-            async move {
-                ControlResponse::Status(DaemonStatus {
-                    state: if running {
-                        DaemonState::Running
-                    } else {
-                        DaemonState::Stopped
-                    },
-                    version: "0.1.0".to_owned(),
-                })
-            }
-        })
-        .await
-        .unwrap()
+        runner: Arc<FakeRunner>,
+        timeout: Duration,
+    ) -> DesktopControl {
+        DesktopControl::new_with_dependencies(
+            PathBuf::from("wokrouter-test"),
+            Arc::new(FakeStatusReader { running }),
+            runner,
+            timeout,
+        )
     }
 
-    #[tokio::test]
-    async fn absent_endpoint_maps_to_stopped_desktop_version() {
-        let endpoint = ControlEndpoint::temporary("desktop-absent").unwrap();
-        let control = DesktopControl::new(endpoint, "wokrouter-test");
-
-        let status = control.status().await.unwrap();
-
-        assert_eq!(
-            status,
-            DaemonStatusDto {
-                state: DaemonState::Stopped,
-                version: env!("CARGO_PKG_VERSION").to_owned(),
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn running_status_uses_the_daemon_version() {
-        let endpoint = ControlEndpoint::temporary("desktop-running").unwrap();
-        let server = ControlServer::bind(endpoint.clone(), |_| async {
-            ControlResponse::Status(DaemonStatus {
-                state: DaemonState::Running,
-                version: "8.4.2".to_owned(),
-            })
-        })
-        .await
-        .unwrap();
-        let control = DesktopControl::new(endpoint, "wokrouter-test");
-
-        let status = control.status().await.unwrap();
-
-        assert_eq!(
-            status,
-            DaemonStatusDto {
-                state: DaemonState::Running,
-                version: "8.4.2".to_owned(),
-            }
-        );
-        server.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn typed_ipc_error_is_mapped_without_wire_details() {
-        let endpoint = ControlEndpoint::temporary("desktop-error").unwrap();
-        let server = ControlServer::bind(endpoint.clone(), |_| async {
-            ControlResponse::Error(ControlError::InvalidFrame {
-                message: r"private payload at C:\Users\someone\state.db".to_owned(),
-            })
-        })
-        .await
-        .unwrap();
-        let control = DesktopControl::new(endpoint, "wokrouter-test");
-
-        let message = control.status().await.unwrap_err().to_string();
-
-        assert_eq!(message, "Unable to read daemon status. Try again.");
-        assert!(!message.contains("someone"));
-        assert!(!message.contains("state.db"));
-        server.shutdown().await.unwrap();
+    fn status(running: bool) -> CoreStatus {
+        CoreStatus {
+            state: if running {
+                CoreUiState::Running
+            } else {
+                CoreUiState::Stopped
+            },
+            version: running.then(|| "0.1.0".to_owned()),
+            management_api_major: running.then_some(1),
+            capabilities: BTreeSet::new(),
+            phase: None,
+            active_requests: running.then_some(0),
+            error_code: (!running).then_some("not_running"),
+        }
     }
 
     #[test]
-    fn start_boundary_invokes_only_the_sibling_cli_start_command() {
+    fn cli_boundary_uses_only_fixed_start_and_stop_commands() {
         let executable = Path::new(r"C:\Program Files\WokRouter\wokrouter.exe");
 
-        let command = start_command(executable.as_os_str());
-        let command = command.as_std();
-
-        assert_eq!(command.get_program(), executable.as_os_str());
-        assert_eq!(
-            command.get_args().collect::<Vec<_>>(),
-            vec![OsStr::new("start")]
-        );
-    }
-
-    #[tokio::test]
-    async fn hung_start_child_is_killed_and_bounded() {
-        let endpoint = ControlEndpoint::temporary("desktop-start-hung").unwrap();
-        let running = Arc::new(AtomicBool::new(false));
-        let server = bind_status_server(endpoint.clone(), Arc::clone(&running)).await;
-        let runner = Arc::new(FakeRunner::new(Arc::clone(&running), [FakeBehavior::Hang]));
-        let control = DesktopControl::new_with_runner(
-            endpoint,
-            PathBuf::from("wokrouter-test"),
-            runner.clone(),
-            Duration::from_millis(20),
-        );
-
-        let result = tokio::time::timeout(Duration::from_secs(1), control.start())
-            .await
-            .expect("hung child must be bounded");
-
-        assert_eq!(result, Err(DesktopControlError::StartUnavailable));
-        assert_eq!(runner.spawn_count.load(Ordering::SeqCst), 1);
-        assert_eq!(runner.kill_count.load(Ordering::SeqCst), 1);
-        server.shutdown().await.unwrap();
+        for (action, argument) in [(CliAction::Start, "start"), (CliAction::Stop, "stop")] {
+            let command = cli_command(executable.as_os_str(), action);
+            let command = command.as_std();
+            assert_eq!(command.get_program(), executable.as_os_str());
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                vec![OsStr::new(argument)]
+            );
+        }
     }
 
     #[tokio::test]
     async fn concurrent_start_calls_share_one_cli_child() {
-        let endpoint = ControlEndpoint::temporary("desktop-start-concurrent").unwrap();
         let running = Arc::new(AtomicBool::new(false));
-        let server = bind_status_server(endpoint.clone(), Arc::clone(&running)).await;
         let runner = Arc::new(FakeRunner::new(
             Arc::clone(&running),
-            [FakeBehavior::SucceedAfter(Duration::from_millis(40))],
+            [FakeBehavior::SucceedAfter(Duration::from_millis(30))],
         ));
-        let control = DesktopControl::new_with_runner(
-            endpoint,
-            PathBuf::from("wokrouter-test"),
-            runner.clone(),
-            Duration::from_secs(1),
-        );
+        let control = control(Arc::clone(&running), runner.clone(), Duration::from_secs(1));
 
         let (first, second) = tokio::join!(control.start(), control.start());
 
         assert_eq!(first, Ok(()));
         assert_eq!(second, Ok(()));
         assert_eq!(runner.spawn_count.load(Ordering::SeqCst), 1);
-        server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hung_start_child_is_killed_and_bounded() {
+        let running = Arc::new(AtomicBool::new(false));
+        let runner = Arc::new(FakeRunner::new(Arc::clone(&running), [FakeBehavior::Hang]));
+        let control = control(
+            Arc::clone(&running),
+            runner.clone(),
+            Duration::from_millis(20),
+        );
+
+        assert_eq!(
+            control.start().await,
+            Err(DesktopControlError::StartUnavailable)
+        );
+        assert_eq!(runner.kill_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stop_uses_the_same_bounded_cli_boundary() {
+        let running = Arc::new(AtomicBool::new(true));
+        let runner = Arc::new(FakeRunner::new(
+            Arc::clone(&running),
+            [FakeBehavior::SucceedAfter(Duration::ZERO)],
+        ));
+        let control = control(Arc::clone(&running), runner.clone(), Duration::from_secs(1));
+
+        assert_eq!(control.stop().await, Ok(()));
+        assert!(!running.load(Ordering::SeqCst));
+        assert_eq!(runner.spawn_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
     async fn failed_start_can_be_retried() {
-        let endpoint = ControlEndpoint::temporary("desktop-start-retry").unwrap();
         let running = Arc::new(AtomicBool::new(false));
-        let server = bind_status_server(endpoint.clone(), Arc::clone(&running)).await;
         let runner = Arc::new(FakeRunner::new(
             Arc::clone(&running),
             [
@@ -490,12 +478,7 @@ mod tests {
                 FakeBehavior::SucceedAfter(Duration::ZERO),
             ],
         ));
-        let control = DesktopControl::new_with_runner(
-            endpoint,
-            PathBuf::from("wokrouter-test"),
-            runner.clone(),
-            Duration::from_secs(1),
-        );
+        let control = control(Arc::clone(&running), runner.clone(), Duration::from_secs(1));
 
         assert_eq!(
             control.start().await,
@@ -503,6 +486,5 @@ mod tests {
         );
         assert_eq!(control.start().await, Ok(()));
         assert_eq!(runner.spawn_count.load(Ordering::SeqCst), 2);
-        server.shutdown().await.unwrap();
     }
 }

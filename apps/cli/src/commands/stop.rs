@@ -1,42 +1,58 @@
 use std::time::Duration;
 
 use tokio::time::Instant;
-use wokrouter_control::{ControlError, ControlRequest, ControlResponse};
 use wokrouter_platform::AppPaths;
+use wokrouter_wokcore_client::{CoreConnection, ServiceError};
 
-use super::{CommandError, connect_before, endpoint, operation_deadline, request};
+use super::{CommandError, authorize, client, executable, reauthorize};
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_DELAY: Duration = Duration::from_millis(50);
 
 pub async fn execute(paths: &AppPaths) -> Result<u8, CommandError> {
-    let endpoint = endpoint(paths)?;
-    match request(&endpoint, ControlRequest::Shutdown).await {
-        Ok(ControlResponse::Accepted { .. }) => {}
-        Ok(response) => return Err(CommandError::UnexpectedResponse { response }),
-        Err(CommandError::Control(ControlError::EndpointUnavailable)) => {
-            println!("WokRouter daemon is already stopped.");
+    let executable = match executable(paths) {
+        Ok(executable) => executable,
+        Err(CommandError::WokCoreMissing) => {
+            println!("WokCore is already stopped.");
             return Ok(0);
         }
         Err(error) => return Err(error),
+    };
+    let client = client(paths)?;
+    match client.connection().await {
+        CoreConnection::Missing | CoreConnection::Stopped => {
+            println!("WokCore is already stopped.");
+            return Ok(0);
+        }
+        CoreConnection::Incompatible(_) => return Err(CommandError::Incompatible),
+        CoreConnection::InvalidRuntime => return Err(CommandError::InvalidRuntime),
+        CoreConnection::Running(_) => {}
+    }
+
+    let token = authorize(executable.clone()).await?;
+    match client.stop(&token).await {
+        Ok(()) => {}
+        Err(ServiceError::Unauthorized | ServiceError::Forbidden) => {
+            let token = reauthorize(executable).await?;
+            client.stop(&token).await?;
+        }
+        Err(error) => return Err(error.into()),
     }
 
     let deadline = Instant::now() + STOP_TIMEOUT;
     loop {
+        match client.connection().await {
+            CoreConnection::Missing | CoreConnection::Stopped => {
+                println!("WokCore is stopped.");
+                return Ok(0);
+            }
+            CoreConnection::Running(_)
+            | CoreConnection::Incompatible(_)
+            | CoreConnection::InvalidRuntime => {}
+        }
         if Instant::now() >= deadline {
             return Err(CommandError::StopTimedOut);
         }
-        match connect_before(&endpoint, operation_deadline(deadline)).await {
-            Err(CommandError::Control(ControlError::EndpointUnavailable)) => {
-                println!("WokRouter daemon is stopped.");
-                return Ok(0);
-            }
-            Err(CommandError::RequestTimedOut) => {}
-            Err(error) => return Err(error),
-            Ok(_) => {
-                tokio::time::sleep_until(std::cmp::min(deadline, Instant::now() + RETRY_DELAY))
-                    .await;
-            }
-        }
+        tokio::time::sleep_until(std::cmp::min(deadline, Instant::now() + RETRY_DELAY)).await;
     }
 }

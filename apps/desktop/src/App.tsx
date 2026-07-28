@@ -1,4 +1,4 @@
-import { DaemonHealth } from "./components/DaemonHealth";
+import { CoreHealth } from "./components/CoreHealth";
 
 export function App() {
   return (
@@ -13,10 +13,10 @@ export function App() {
         <p className="surface-name">Local desktop control</p>
       </header>
       <main className="app-main">
-        <DaemonHealth />
+        <CoreHealth />
       </main>
       <footer className="app-footer">
-        Desktop controls communicate with the daemon over local IPC.
+        Desktop controls communicate with WokCore over loopback HTTP.
       </footer>
     </div>
   );
