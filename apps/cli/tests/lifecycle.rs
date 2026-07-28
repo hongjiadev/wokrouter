@@ -428,6 +428,12 @@ impl TestHome {
                 .join("state")
                 .join("WokRouter")
                 .join("logs"),
+            wokcore_discovery_file: directory
+                .path()
+                .join("state")
+                .join("WokCore")
+                .join("runtime")
+                .join("discovery.json"),
         };
         Self { directory, paths }
     }

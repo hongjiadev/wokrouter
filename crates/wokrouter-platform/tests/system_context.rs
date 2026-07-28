@@ -47,6 +47,19 @@ fn discovered_paths_are_not_derived_from_the_current_directory() {
         paths.state_db.file_name().and_then(|name| name.to_str()),
         Some("state.sqlite3")
     );
+    assert_eq!(
+        paths
+            .wokcore_discovery_file
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some("discovery.json")
+    );
+    assert!(
+        paths
+            .wokcore_discovery_file
+            .components()
+            .any(|component| component.as_os_str() == "WokCore")
+    );
 }
 
 #[derive(Clone)]

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::PlatformError;
 
 const APPLICATION_NAME: &str = "WokRouter";
+const WOKCORE_APPLICATION_NAME: &str = "WokCore";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppPaths {
@@ -10,20 +11,51 @@ pub struct AppPaths {
     pub state_db: PathBuf,
     pub runtime_dir: PathBuf,
     pub log_dir: PathBuf,
+    pub wokcore_discovery_file: PathBuf,
 }
 
 impl AppPaths {
     pub fn discover() -> Result<Self, PlatformError> {
         let config_dir = platform_config_dir()?;
         let state_dir = platform_state_dir()?;
+        let wokcore_discovery_file = platform_wokcore_discovery_file(&state_dir)?;
 
         Ok(Self {
             config_file: config_dir.join("config.toml"),
             state_db: state_dir.join("state.sqlite3"),
             runtime_dir: platform_runtime_dir(&state_dir),
             log_dir: state_dir.join("logs"),
+            wokcore_discovery_file,
         })
     }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn platform_wokcore_discovery_file(state_dir: &Path) -> Result<PathBuf, PlatformError> {
+    sibling_runtime_discovery(state_dir)
+}
+
+#[cfg(target_os = "linux")]
+fn platform_wokcore_discovery_file(state_dir: &Path) -> Result<PathBuf, PlatformError> {
+    if let Some(runtime_root) = environment_path("XDG_RUNTIME_DIR") {
+        return Ok(runtime_root
+            .join(WOKCORE_APPLICATION_NAME)
+            .join("discovery.json"));
+    }
+    sibling_runtime_discovery(state_dir)
+}
+
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+fn sibling_runtime_discovery(state_dir: &Path) -> Result<PathBuf, PlatformError> {
+    let state_root = state_dir
+        .parent()
+        .ok_or(PlatformError::MissingPlatformData {
+            name: "WokCore runtime directory",
+        })?;
+    let mut path = state_root.join(WOKCORE_APPLICATION_NAME);
+    path.push("runtime");
+    path.push("discovery.json");
+    Ok(path)
 }
 
 #[cfg(windows)]
