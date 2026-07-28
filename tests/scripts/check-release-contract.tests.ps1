@@ -203,6 +203,19 @@ try {
         Assert-Rejects -Root $root -ExpectedText "contents: read" -Scenario "broad write permission"
     }
 
+    Invoke-Scenario -Name "publish must name the repository without a checkout" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText '--repo "$GITHUB_REPOSITORY" ' `
+            -NewText ""
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "explicit GitHub repository" `
+            -Scenario "publish without a checkout repository"
+    }
+
     if ($failures.Count -gt 0) {
         foreach ($failure in $failures) {
             Write-Host "RELEASE CONTRACT SELF-TEST ERROR: $failure"

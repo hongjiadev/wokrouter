@@ -188,9 +188,10 @@ if ($failures.Count -eq 0) {
     if (
         $publishJob -notmatch [regex]::Escape("startsWith(github.ref, 'refs/tags/')") -or
         $publishJob -notmatch '(?m)^    permissions:\n      contents: write\s*$' -or
-        $publishJob -notmatch 'gh release create "\$RELEASE_TAG".*--verify-tag'
+        $publishJob -notmatch 'gh release create "\$RELEASE_TAG".*--verify-tag' -or
+        $publishJob -notmatch [regex]::Escape('--repo "$GITHUB_REPOSITORY"')
     ) {
-        Add-Failure -Message "Publishing must be tag-only, verified, and scoped to contents: write."
+        Add-Failure -Message "Publishing must be tag-only, verified, scoped to contents: write, and use an explicit GitHub repository."
     }
 
     foreach ($requiredFact in @(
