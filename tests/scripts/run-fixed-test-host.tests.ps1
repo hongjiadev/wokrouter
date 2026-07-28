@@ -1,3 +1,8 @@
+[CmdletBinding()]
+param(
+    [switch] $SkipParentExitCodeContract
+)
+
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
@@ -179,9 +184,23 @@ if (`$CargoArguments[1] -eq 'test') {
         throw "Expected the fixed host runner to propagate test exit code 23"
     }
 
+    if (-not $SkipParentExitCodeContract) {
+        $powerShellExecutable = (Get-Process -Id $PID).Path
+        $childCommand = "& '$PSCommandPath' -SkipParentExitCodeContract; exit `$LASTEXITCODE"
+        & $powerShellExecutable `
+            -NoProfile `
+            -ExecutionPolicy Bypass `
+            -Command $childCommand
+        if ($LASTEXITCODE -ne 0) {
+            throw "The fixed test host runner self-test must leave its parent process with exit code 0."
+        }
+    }
+
     Write-Output "fixed test host runner tests passed"
 } finally {
     if (Test-Path -LiteralPath $temporaryRoot) {
         Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
     }
 }
+
+$global:LASTEXITCODE = 0

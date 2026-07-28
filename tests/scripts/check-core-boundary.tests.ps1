@@ -1,8 +1,14 @@
 [CmdletBinding()]
-param()
+param(
+    [switch] $ConstrainCommandLookup
+)
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+if ($ConstrainCommandLookup) {
+    $env:PATH = [System.IO.Path]::GetTempPath()
+}
 
 $checker = Join-Path $PSScriptRoot "check-core-boundary.ps1"
 if (-not (Test-Path -LiteralPath $checker -PathType Leaf)) {
@@ -62,7 +68,11 @@ function Invoke-Checker {
         [string] $Root
     )
 
-    & powershell.exe `
+    $powerShellExecutable = (Get-Process -Id $PID).Path
+    if ([string]::IsNullOrWhiteSpace($powerShellExecutable)) {
+        throw "Unable to locate the current PowerShell executable."
+    }
+    & $powerShellExecutable `
         -NoProfile `
         -ExecutionPolicy Bypass `
         -File $checker `
@@ -151,3 +161,15 @@ foreach ($case in $cases) {
 }
 
 Write-Output "core boundary checker tests passed"
+
+if (-not $ConstrainCommandLookup) {
+    $powerShellExecutable = (Get-Process -Id $PID).Path
+    & $powerShellExecutable `
+        -NoProfile `
+        -ExecutionPolicy Bypass `
+        -File $PSCommandPath `
+        -ConstrainCommandLookup *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw "The core boundary checker tests must pass without powershell.exe command lookup."
+    }
+}
