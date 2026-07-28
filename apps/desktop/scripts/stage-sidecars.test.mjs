@@ -3,11 +3,14 @@ import { describe, expect, it, vi } from "vitest";
 import * as sidecars from "./stage-sidecars.mjs";
 
 const {
+  bundleArtifactName,
   cargoBuildArguments,
+  resolveBundleKind,
   resolveTargetTriple,
   resolveTargetTripleFromEnvironment,
   sidecarFileName,
   sidecarPaths,
+  stageBundleArtifact,
   stageBuiltSidecars,
   tauriTargetTriple,
 } = sidecars;
@@ -174,6 +177,109 @@ describe("target environment resolution", () => {
 });
 
 describe("sidecar staging paths", () => {
+  it("uses distinct target-specific online and offline artifact names", () => {
+    expect(resolveBundleKind(undefined)).toBe("online");
+    expect(
+      bundleArtifactName({
+        targetTriple: "x86_64-pc-windows-msvc",
+      }),
+    ).toBe("wokrouter-online-x86_64-pc-windows-msvc");
+    expect(
+      bundleArtifactName({
+        kind: "offline",
+        targetTriple: "aarch64-apple-darwin",
+      }),
+    ).toBe("wokrouter-offline-aarch64-apple-darwin");
+    expect(() => resolveBundleKind("combined")).toThrow(
+      "Unsupported bundle kind: combined",
+    );
+  });
+
+  it("writes online bundle inputs to the target-specific artifact directory", () => {
+    const copyFileSync = vi.fn();
+    const result = stageBundleArtifact({
+      kind: "online",
+      targetDir: "/work/wokrouter/target",
+      targetTriple: "x86_64-unknown-linux-gnu",
+      hostPlatform: "linux",
+      stagedSidecars: [
+        {
+          source:
+            "/work/wokrouter/target/x86_64-unknown-linux-gnu/release/wokrouter",
+          destination:
+            "/work/wokrouter/apps/desktop/src-tauri/binaries/wokrouter-x86_64-unknown-linux-gnu",
+        },
+      ],
+      fileSystem: {
+        copyFileSync,
+        existsSync: () => true,
+        mkdirSync: vi.fn(),
+        rmSync: vi.fn(),
+      },
+    });
+
+    expect(result.artifactName).toBe(
+      "wokrouter-online-x86_64-unknown-linux-gnu",
+    );
+    expect(result.artifactDirectory).toBe(
+      "/work/wokrouter/target/wokrouter-bundles/wokrouter-online-x86_64-unknown-linux-gnu",
+    );
+    expect(result.files.map(({ destination }) => destination)).toEqual([
+      "/work/wokrouter/target/wokrouter-bundles/wokrouter-online-x86_64-unknown-linux-gnu/wokrouter-x86_64-unknown-linux-gnu",
+    ]);
+    expect(copyFileSync).toHaveBeenCalledOnce();
+  });
+
+  it("requires and stages signed WokCore inputs only for an offline artifact", () => {
+    const copyFileSync = vi.fn();
+    const fileSystem = {
+      copyFileSync,
+      existsSync: () => true,
+      mkdirSync: vi.fn(),
+      rmSync: vi.fn(),
+    };
+    const common = {
+      kind: "offline",
+      targetDir: "/work/wokrouter/target",
+      targetTriple: "aarch64-apple-darwin",
+      hostPlatform: "linux",
+      stagedSidecars: [
+        {
+          source:
+            "/work/wokrouter/target/aarch64-apple-darwin/release/wokrouter",
+          destination:
+            "/work/wokrouter/apps/desktop/src-tauri/binaries/wokrouter-aarch64-apple-darwin",
+        },
+      ],
+      fileSystem,
+    };
+
+    expect(() => stageBundleArtifact(common)).toThrow(
+      "Offline WokCore inputs are required",
+    );
+
+    const result = stageBundleArtifact({
+      ...common,
+      offlineWokCore: {
+        manifest: "/release/wokcore-update-v1.json",
+        signature: "/release/wokcore-update-v1.json.minisig",
+        artifact:
+          "/release/wokcore-v1.2.3-aarch64-apple-darwin.tar.gz",
+      },
+    });
+
+    expect(result.artifactName).toBe(
+      "wokrouter-offline-aarch64-apple-darwin",
+    );
+    expect(result.files.map(({ destination }) => destination)).toEqual([
+      "/work/wokrouter/target/wokrouter-bundles/wokrouter-offline-aarch64-apple-darwin/wokrouter-aarch64-apple-darwin",
+      "/work/wokrouter/target/wokrouter-bundles/wokrouter-offline-aarch64-apple-darwin/wokcore-update-v1.json",
+      "/work/wokrouter/target/wokrouter-bundles/wokrouter-offline-aarch64-apple-darwin/wokcore-update-v1.json.minisig",
+      "/work/wokrouter/target/wokrouter-bundles/wokrouter-offline-aarch64-apple-darwin/wokcore-v1.2.3-aarch64-apple-darwin.tar.gz",
+    ]);
+    expect(copyFileSync).toHaveBeenCalledTimes(4);
+  });
+
   it("derives the executable extension from the target triple", () => {
     expect(
       sidecarFileName("wokrouter", "x86_64-pc-windows-msvc"),
@@ -243,6 +349,14 @@ describe("sidecar staging paths", () => {
     expect(staged).toHaveLength(1);
     expect(staged[0].destination).toBe(
       "/work/wokrouter/apps/desktop/src-tauri/binaries/wokrouter-x86_64-unknown-linux-gnu",
+    );
+    expect(staged.map(({ destination }) => destination)).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("wokrouterd"),
+        expect.stringContaining("wokcore"),
+        expect.stringContaining("provider-sim"),
+        expect.stringContaining("loadgen"),
+      ]),
     );
     expect(copyFileSync).toHaveBeenCalledOnce();
   });

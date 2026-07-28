@@ -9,6 +9,7 @@ const WOKCORE_APPLICATION_NAME: &str = "WokCore";
 pub struct AppPaths {
     pub config_file: PathBuf,
     pub wokcore_install_record: PathBuf,
+    pub wokcore_install_dir: PathBuf,
     pub runtime_dir: PathBuf,
     pub log_dir: PathBuf,
     pub wokcore_discovery_file: PathBuf,
@@ -23,11 +24,29 @@ impl AppPaths {
         Ok(Self {
             config_file: config_dir.join("config.toml"),
             wokcore_install_record: config_dir.join("wokcore-install.json"),
+            wokcore_install_dir: platform_wokcore_install_dir(&state_dir)?,
             runtime_dir: platform_runtime_dir(&state_dir),
             log_dir: state_dir.join("logs"),
             wokcore_discovery_file,
         })
     }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn platform_wokcore_install_dir(state_dir: &Path) -> Result<PathBuf, PlatformError> {
+    let state_root = state_dir
+        .parent()
+        .ok_or(PlatformError::MissingPlatformData {
+            name: "WokCore install directory",
+        })?;
+    Ok(state_root.join(WOKCORE_APPLICATION_NAME).join("bin"))
+}
+
+#[cfg(target_os = "linux")]
+fn platform_wokcore_install_dir(_state_dir: &Path) -> Result<PathBuf, PlatformError> {
+    Ok(xdg_directory("XDG_DATA_HOME", &[".local", "share"])?
+        .join(WOKCORE_APPLICATION_NAME)
+        .join("bin"))
 }
 
 #[cfg(any(windows, target_os = "macos"))]

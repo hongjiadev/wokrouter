@@ -2,6 +2,7 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  rmSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
@@ -14,6 +15,7 @@ import {
 import { fileURLToPath } from "node:url";
 
 const sidecarNames = ["wokrouter"];
+const bundleKinds = new Set(["online", "offline"]);
 const supportedTargetTriples = new Set([
   "x86_64-pc-windows-msvc",
   "x86_64-apple-darwin",
@@ -31,6 +33,18 @@ const tauriTargets = new Map([
 
 function normalized(value) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+export function resolveBundleKind(value) {
+  const bundleKind = normalized(value) ?? "online";
+  if (!bundleKinds.has(bundleKind)) {
+    throw new Error(`Unsupported bundle kind: ${bundleKind}`);
+  }
+  return bundleKind;
+}
+
+export function bundleArtifactName({ kind, targetTriple }) {
+  return `wokrouter-${resolveBundleKind(kind)}-${supportedTargetTriple(targetTriple)}`;
 }
 
 function supportedTargetTriple(targetTriple) {
@@ -178,6 +192,100 @@ export function stageBuiltSidecars({
   return paths;
 }
 
+export function stageBundleArtifact({
+  kind,
+  targetDir,
+  targetTriple,
+  hostPlatform,
+  stagedSidecars,
+  offlineWokCore,
+  fileSystem = { copyFileSync, existsSync, mkdirSync, rmSync },
+}) {
+  const bundleKind = resolveBundleKind(kind);
+  const supportedTarget = supportedTargetTriple(targetTriple);
+  const path = hostPlatform === "win32" ? win32 : posix;
+  const artifactName = bundleArtifactName({
+    kind: bundleKind,
+    targetTriple: supportedTarget,
+  });
+  const artifactDirectory = path.join(
+    targetDir,
+    "wokrouter-bundles",
+    artifactName,
+  );
+  const expectedSidecarName = sidecarFileName("wokrouter", supportedTarget);
+  if (
+    stagedSidecars?.length !== 1 ||
+    path.basename(stagedSidecars[0].destination) !== expectedSidecarName
+  ) {
+    throw new Error("Exactly one target-specific WokRouter sidecar is required");
+  }
+
+  const files = [
+    {
+      source: stagedSidecars[0].source,
+      destination: path.join(artifactDirectory, expectedSidecarName),
+    },
+  ];
+  if (bundleKind === "offline") {
+    const manifest = normalized(offlineWokCore?.manifest);
+    const signature = normalized(offlineWokCore?.signature);
+    const artifact = normalized(offlineWokCore?.artifact);
+    if (!manifest || !signature || !artifact) {
+      throw new Error("Offline WokCore inputs are required");
+    }
+
+    const archiveExtension =
+      supportedTarget === "x86_64-pc-windows-msvc" ? "zip" : "tar.gz";
+    const archiveName = path.basename(artifact);
+    const escapedTarget = supportedTarget.replace(
+      /[.*+?^${}()|[\]\\]/g,
+      "\\$&",
+    );
+    const archivePattern = new RegExp(
+      `^wokcore-v[^/\\\\]+-${escapedTarget}\\.${archiveExtension.replace(".", "\\.")}$`,
+    );
+    if (
+      path.basename(manifest) !== "wokcore-update-v1.json" ||
+      path.basename(signature) !== "wokcore-update-v1.json.minisig" ||
+      !archivePattern.test(archiveName)
+    ) {
+      throw new Error("Offline WokCore inputs do not match the target contract");
+    }
+
+    files.push(
+      {
+        source: manifest,
+        destination: path.join(
+          artifactDirectory,
+          "wokcore-update-v1.json",
+        ),
+      },
+      {
+        source: signature,
+        destination: path.join(
+          artifactDirectory,
+          "wokcore-update-v1.json.minisig",
+        ),
+      },
+      {
+        source: artifact,
+        destination: path.join(artifactDirectory, archiveName),
+      },
+    );
+  }
+
+  if (files.some(({ source }) => !fileSystem.existsSync(source))) {
+    throw new Error("Bundle input is missing");
+  }
+  fileSystem.rmSync(artifactDirectory, { recursive: true, force: true });
+  fileSystem.mkdirSync(artifactDirectory, { recursive: true });
+  for (const file of files) {
+    fileSystem.copyFileSync(file.source, file.destination);
+  }
+  return { artifactName, artifactDirectory, files };
+}
+
 function commandOutput(command, arguments_, options = {}) {
   return execFileSync(command, arguments_, {
     encoding: "utf8",
@@ -201,8 +309,10 @@ function main() {
     readHostTargetTriple: () =>
       commandOutput(rustc, ["--print", "host-tuple"]),
   });
+  const bundleKind = resolveBundleKind(process.env.WOKROUTER_BUNDLE_KIND);
+  const artifactName = bundleArtifactName({ kind: bundleKind, targetTriple });
 
-  process.stdout.write(`Building sidecars for ${targetTriple}\n`);
+  process.stdout.write(`Building ${artifactName}\n`);
   try {
     execFileSync(cargo, cargoBuildArguments(targetTriple), {
       cwd: workspaceRoot,
@@ -226,6 +336,19 @@ function main() {
   for (const path of staged) {
     process.stdout.write(`Staged ${path.destination}\n`);
   }
+  const bundle = stageBundleArtifact({
+    kind: bundleKind,
+    targetDir,
+    targetTriple,
+    hostPlatform: process.platform,
+    stagedSidecars: staged,
+    offlineWokCore: {
+      manifest: process.env.WOKCORE_OFFLINE_MANIFEST,
+      signature: process.env.WOKCORE_OFFLINE_SIGNATURE,
+      artifact: process.env.WOKCORE_OFFLINE_ARTIFACT,
+    },
+  });
+  process.stdout.write(`Prepared ${bundle.artifactDirectory}\n`);
 }
 
 if (import.meta.url.startsWith("file:") && process.argv[1]) {

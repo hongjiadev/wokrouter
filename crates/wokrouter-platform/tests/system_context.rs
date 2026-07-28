@@ -57,4 +57,18 @@ fn discovered_paths_separate_wokrouter_state_from_wokcore_discovery() {
             .components()
             .any(|component| component.as_os_str() == "WokCore")
     );
+    assert_eq!(
+        paths
+            .wokcore_install_dir
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some("bin")
+    );
+    assert!(
+        paths
+            .wokcore_install_dir
+            .components()
+            .any(|component| component.as_os_str() == "WokCore")
+    );
+    assert!(!paths.wokcore_install_dir.starts_with(&paths.runtime_dir));
 }

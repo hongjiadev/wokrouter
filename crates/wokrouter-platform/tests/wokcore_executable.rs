@@ -3,6 +3,7 @@ use std::fs;
 use tempfile::tempdir;
 use wokrouter_platform::{PlatformError, discover_wokcore_executable};
 
+#[cfg(any(not(windows), feature = "test-support"))]
 #[test]
 fn verified_install_record_precedes_path_discovery() {
     let fixture = tempdir().unwrap();
@@ -54,7 +55,12 @@ fn make_executable(path: &std::path::Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-#[cfg(not(unix))]
+#[cfg(all(windows, feature = "test-support"))]
+fn make_executable(path: &std::path::Path) {
+    wokrouter_platform::test_support::secure_private_file(path).unwrap();
+}
+
+#[cfg(not(any(unix, windows)))]
 fn make_executable(_path: &std::path::Path) {}
 
 #[cfg(unix)]
@@ -64,5 +70,10 @@ fn secure_record(path: &std::path::Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
-#[cfg(not(unix))]
+#[cfg(all(windows, feature = "test-support"))]
+fn secure_record(path: &std::path::Path) {
+    wokrouter_platform::test_support::secure_private_file(path).unwrap();
+}
+
+#[cfg(not(any(unix, all(windows, feature = "test-support"))))]
 fn secure_record(_path: &std::path::Path) {}

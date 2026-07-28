@@ -6,16 +6,30 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
+base64.workspace = true
+fs4.workspace = true
 jiff = { workspace = true, features = ["tzdb-concatenated"] }
+minisign-verify.workspace = true
+reqwest.workspace = true
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sys-locale.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
+url.workspace = true
 wokrouter-storage = { path = "../wokrouter-storage" }
 
 [target.'cfg(unix)'.dependencies]
+flate2.workspace = true
 libc = "0.2.189"
+tar.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
@@ -26,7 +40,9 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_System_Memory",
   "Win32_System_Threading",
 ] }
+zip.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+tokio.workspace = true
+wiremock.workspace = true
 wokrouter-storage = { path = "../wokrouter-storage" }

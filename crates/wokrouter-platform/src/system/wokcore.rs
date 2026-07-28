@@ -43,7 +43,7 @@ fn read_install_record(path: &Path) -> Result<Option<PathBuf>, PlatformError> {
         .map_err(|_| PlatformError::InvalidWokCoreInstallRecord)?;
     if record.schema_version != INSTALL_RECORD_SCHEMA_VERSION
         || !record.executable.is_absolute()
-        || !valid_executable(&record.executable)
+        || !valid_managed_executable(&record.executable)
     {
         return Err(PlatformError::InvalidWokCoreInstallRecord);
     }
@@ -54,7 +54,7 @@ fn search_path() -> Option<PathBuf> {
     let search_path = std::env::var_os("PATH")?;
     std::env::split_paths(&search_path)
         .map(|directory| directory.join(executable_name()))
-        .find(|candidate| valid_executable(candidate))
+        .find(|candidate| valid_path_executable(candidate))
 }
 
 #[cfg(windows)]
@@ -67,7 +67,15 @@ fn executable_name() -> &'static OsStr {
     OsStr::new("wokcore")
 }
 
-fn valid_executable(path: &Path) -> bool {
+fn valid_managed_executable(path: &Path) -> bool {
+    valid_executable(path, valid_managed_platform_executable)
+}
+
+fn valid_path_executable(path: &Path) -> bool {
+    valid_executable(path, valid_path_platform_executable)
+}
+
+fn valid_executable(path: &Path, valid_platform: fn(&Path, &std::fs::Metadata) -> bool) -> bool {
     if path.file_name() != Some(executable_name()) {
         return false;
     }
@@ -77,19 +85,41 @@ fn valid_executable(path: &Path) -> bool {
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return false;
     }
-    valid_platform_executable(&metadata)
+    valid_platform(path, &metadata)
 }
 
 #[cfg(unix)]
-fn valid_platform_executable(metadata: &std::fs::Metadata) -> bool {
+fn valid_managed_platform_executable(_path: &Path, metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     metadata.uid() == unsafe { libc::geteuid() } && metadata.permissions().mode() & 0o111 != 0
 }
 
-#[cfg(not(unix))]
-fn valid_platform_executable(_metadata: &std::fs::Metadata) -> bool {
-    true
+#[cfg(windows)]
+fn valid_managed_platform_executable(path: &Path, _metadata: &std::fs::Metadata) -> bool {
+    use super::windows_security::{PrivatePathKind, private_path_owned_by_current_user_and_system};
+
+    private_path_owned_by_current_user_and_system(path, PrivatePathKind::File)
+}
+
+#[cfg(unix)]
+fn valid_path_platform_executable(path: &Path, metadata: &std::fs::Metadata) -> bool {
+    valid_managed_platform_executable(path, metadata)
+}
+
+#[cfg(windows)]
+fn valid_path_platform_executable(path: &Path, _metadata: &std::fs::Metadata) -> bool {
+    super::windows_security::path_executable_is_not_untrusted_writable(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn valid_managed_platform_executable(_path: &Path, _metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(not(any(unix, windows)))]
+fn valid_path_platform_executable(_path: &Path, _metadata: &std::fs::Metadata) -> bool {
+    false
 }
 
 #[derive(Deserialize)]
@@ -174,92 +204,14 @@ fn open_secure(path: &Path) -> Result<Option<File>, PlatformError> {
         .map_err(|_| PlatformError::InvalidWokCoreInstallRecord)?;
     if !metadata.is_file()
         || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-        || !owned_by_current_user(&file)
+        || !super::windows_security::private_owned_by_current_user_and_system(
+            &file,
+            super::windows_security::PrivatePathKind::File,
+        )
     {
         return Err(PlatformError::InvalidWokCoreInstallRecord);
     }
     Ok(Some(file))
-}
-
-#[cfg(windows)]
-fn owned_by_current_user(file: &File) -> bool {
-    use std::{ffi::c_void, mem::size_of, os::windows::io::AsRawHandle, ptr};
-
-    use windows_sys::Win32::{
-        Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, LocalFree},
-        Security::{
-            Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
-            EqualSid, GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-            TOKEN_QUERY, TOKEN_USER, TokenUser,
-        },
-        System::Threading::{GetCurrentProcess, OpenProcessToken},
-    };
-
-    struct Descriptor(PSECURITY_DESCRIPTOR);
-    impl Drop for Descriptor {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                unsafe {
-                    LocalFree(self.0.cast());
-                }
-            }
-        }
-    }
-    struct Token(HANDLE);
-    impl Drop for Token {
-        fn drop(&mut self) {
-            unsafe {
-                CloseHandle(self.0);
-            }
-        }
-    }
-
-    let mut owner: PSID = ptr::null_mut();
-    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
-    let status = unsafe {
-        GetSecurityInfo(
-            file.as_raw_handle(),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION,
-            &mut owner,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            &mut descriptor,
-        )
-    };
-    let _descriptor = Descriptor(descriptor);
-    if status != ERROR_SUCCESS || owner.is_null() {
-        return false;
-    }
-
-    let mut token_handle: HANDLE = ptr::null_mut();
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token_handle) } == 0 {
-        return false;
-    }
-    let token = Token(token_handle);
-    let mut required = 0;
-    unsafe {
-        GetTokenInformation(token.0, TokenUser, ptr::null_mut(), 0, &mut required);
-    }
-    if required == 0 {
-        return false;
-    }
-    let mut buffer = vec![0_usize; (required as usize).div_ceil(size_of::<usize>())];
-    if unsafe {
-        GetTokenInformation(
-            token.0,
-            TokenUser,
-            buffer.as_mut_ptr().cast::<c_void>(),
-            required,
-            &mut required,
-        )
-    } == 0
-    {
-        return false;
-    }
-    let token_user = unsafe { &*(buffer.as_ptr().cast::<TOKEN_USER>()) };
-    unsafe { EqualSid(owner, token_user.User.Sid) != 0 }
 }
 
 #[cfg(not(any(unix, windows)))]
