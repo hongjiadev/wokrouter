@@ -1,9 +1,12 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
+
+#[cfg(windows)]
+use std::io::SeekFrom;
 
 use fs4::fs_std::FileExt;
 use reqwest::{Response, header::LOCATION};

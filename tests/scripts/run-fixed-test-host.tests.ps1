@@ -8,10 +8,16 @@ $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) (
 
 try {
     New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
+    $fixtureSource = Join-Path $PSScriptRoot "../fixtures/run-fixed-test-host/fixed-test-artifact.rs"
+    $fixtureExecutable = Join-Path $temporaryRoot "fixed-test-artifact.exe"
     $firstArtifact = Join-Path $temporaryRoot "first-artifact.exe"
     $secondArtifact = Join-Path $temporaryRoot "second-artifact.exe"
-    Copy-Item -LiteralPath $env:ComSpec -Destination $firstArtifact
-    Copy-Item -LiteralPath $env:ComSpec -Destination $secondArtifact
+    & rustc "+1.97.1" $fixtureSource "-o" $fixtureExecutable
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to compile the fixed test host fixture with exit code $LASTEXITCODE"
+    }
+    Copy-Item -LiteralPath $fixtureExecutable -Destination $firstArtifact
+    Copy-Item -LiteralPath $fixtureExecutable -Destination $secondArtifact
 
     $manifest = Join-Path $temporaryRoot "artifacts.jsonl"
     @(
@@ -34,23 +40,25 @@ try {
     } | Set-Content -LiteralPath $manifest -Encoding UTF8
 
     $observed = Join-Path $temporaryRoot "observed-hosts.txt"
+    $successfulHarnessArguments = @(
+        "--observed-host",
+        $observed,
+        "--exit-code",
+        "0"
+    )
     & $runner `
         -ArtifactManifestPath $manifest `
         -TargetDirectory $temporaryRoot `
-        -HarnessArguments @(
-            "/d",
-            "/c",
-            "echo %CMDCMDLINE%>>`"$observed`""
-        )
+        -HarnessArguments $successfulHarnessArguments
 
     $hosts = @(Get-Content -LiteralPath $observed)
     if ($hosts.Count -ne 2) {
         throw "Expected two test artifacts to execute, observed $($hosts.Count)"
     }
     $fixedHost = Join-Path $temporaryRoot "wokrouter-test-host.exe"
-    foreach ($hostCommandLine in $hosts) {
-        if ($hostCommandLine -notlike "*$fixedHost*") {
-            throw "Test artifact did not execute through the fixed host: $hostCommandLine"
+    foreach ($hostExecutable in $hosts) {
+        if ($hostExecutable -ne $fixedHost) {
+            throw "Test artifact did not execute through the fixed host: $hostExecutable"
         }
     }
     if (-not (Test-Path -LiteralPath $fixedHost -PathType Leaf)) {
@@ -58,31 +66,32 @@ try {
     }
 
     Remove-Item -LiteralPath $observed
-    $fakeCargo = Join-Path $temporaryRoot "cargo-fixture.cmd"
+    $fakeCargo = Join-Path $temporaryRoot "cargo-fixture.ps1"
     $cargoInvocations = Join-Path $temporaryRoot "cargo-invocations.txt"
     @"
-@echo off
-echo %*>>"$cargoInvocations"
-echo Finished fixture 1>&2
-if "%2"=="test" type "$manifest"
-exit /b 0
-"@ | Set-Content -LiteralPath $fakeCargo -Encoding ASCII
+param([Parameter(ValueFromRemainingArguments = `$true)][string[]] `$CargoArguments)
+
+[System.IO.File]::AppendAllText(
+    '$cargoInvocations',
+    ((`$CargoArguments -join ' ') + [Environment]::NewLine)
+)
+[Console]::Error.WriteLine('Finished fixture')
+if (`$CargoArguments[1] -eq 'test') {
+    Get-Content -LiteralPath '$manifest'
+}
+"@ | Set-Content -LiteralPath $fakeCargo -Encoding UTF8
     & $runner `
         -CargoCommand $fakeCargo `
         -RepositoryRoot $temporaryRoot `
         -TargetDirectory $temporaryRoot `
-        -HarnessArguments @(
-            "/d",
-            "/c",
-            "echo %CMDCMDLINE%>>`"$observed`""
-        )
+        -HarnessArguments $successfulHarnessArguments
     $compiledHosts = @(Get-Content -LiteralPath $observed)
     if ($compiledHosts.Count -ne 2) {
         throw "Expected the Cargo discovery path to execute two artifacts"
     }
-    foreach ($hostCommandLine in $compiledHosts) {
-        if ($hostCommandLine -notlike "*$fixedHost*") {
-            throw "Cargo-discovered artifact bypassed the fixed host: $hostCommandLine"
+    foreach ($hostExecutable in $compiledHosts) {
+        if ($hostExecutable -ne $fixedHost) {
+            throw "Cargo-discovered artifact bypassed the fixed host: $hostExecutable"
         }
     }
     $invocations = @(Get-Content -LiteralPath $cargoInvocations)
@@ -107,13 +116,9 @@ exit /b 0
     & $runner `
         -ArtifactManifestPath $singleManifest `
         -TargetDirectory $temporaryRoot `
-        -HarnessArguments @(
-            "/d",
-            "/c",
-            "echo %CMDCMDLINE%>>`"$observed`""
-        )
+        -HarnessArguments $successfulHarnessArguments
     $singleHost = @(Get-Content -LiteralPath $observed)
-    if ($singleHost.Count -ne 1 -or $singleHost[0] -notlike "*$fixedHost*") {
+    if ($singleHost.Count -ne 1 -or $singleHost[0] -ne $fixedHost) {
         throw "Expected one manifest artifact to execute through the fixed host"
     }
 
@@ -150,13 +155,9 @@ exit /b 0
         & $runner `
             -ArtifactManifestPath $singleManifest `
             -TargetDirectory $temporaryRoot `
-            -HarnessArguments @(
-                "/d",
-                "/c",
-                "echo %CMDCMDLINE%>>`"$observed`""
-            )
+            -HarnessArguments $successfulHarnessArguments
         $retriedHost = @(Get-Content -LiteralPath $observed)
-        if ($retriedHost.Count -ne 1 -or $retriedHost[0] -notlike "*$fixedHost*") {
+        if ($retriedHost.Count -ne 1 -or $retriedHost[0] -ne $fixedHost) {
             throw "Expected fixed-host copy to recover from a transient sharing violation"
         }
     }
@@ -170,7 +171,7 @@ exit /b 0
         & $runner `
             -ArtifactManifestPath $manifest `
             -TargetDirectory $temporaryRoot `
-            -HarnessArguments @("/d", "/c", "exit /b 23")
+            -HarnessArguments @("--exit-code", "23")
     } catch {
         $failed = $_.Exception.Message -like "*exit code 23*"
     }
