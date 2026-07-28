@@ -1,0 +1,290 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: WokRouter release tag to verify (for example, v1.2.3)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  ANTHROPIC_API_KEY: ""
+  CARGO_TERM_COLOR: always
+  GEMINI_API_KEY: ""
+  GOOGLE_API_KEY: ""
+  OPENAI_API_KEY: ""
+
+jobs:
+  release-version:
+    name: release-version
+    runs-on: ubuntu-24.04
+    outputs:
+      source_sha: ${{ steps.version.outputs.source_sha }}
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+      - name: Derive version from the WokRouter tag
+        id: version
+        shell: pwsh
+        env:
+          DISPATCH_TAG: ${{ inputs.release_tag }}
+          PUSH_TAG: ${{ github.ref_name }}
+        run: |
+          $tag = if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $env:DISPATCH_TAG
+          } else {
+            $env:PUSH_TAG
+          }
+          if ($tag -notmatch '^v(?<version>0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$') {
+            throw "Release tag must be a canonical WokRouter semver tag: $tag"
+          }
+          $sourceSha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $sourceSha -notmatch '^[0-9a-f]{40}$') {
+            throw "Unable to resolve the requested WokRouter tag commit."
+          }
+          "source_sha=$sourceSha" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$($tag.Substring(1))" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+  release-build:
+    name: release (${{ matrix.target }})
+    needs: release-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            extension: zip
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            extension: tar.gz
+          - os: macos-15
+            target: aarch64-apple-darwin
+            extension: tar.gz
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            extension: tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            extension: tar.gz
+    runs-on: ${{ matrix.os }}
+    env:
+      WOKROUTER_BUNDLE_KIND: online
+      WOKROUTER_RELEASE_TAG: ${{ needs.release-version.outputs.tag }}
+      WOKROUTER_RELEASE_VERSION: ${{ needs.release-version.outputs.version }}
+      WOKROUTER_TARGET_TRIPLE: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release-version.outputs.source_sha }}
+      - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            build-essential \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.97.1
+          target: ${{ matrix.target }}
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.17.0
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm --dir apps/desktop install --frozen-lockfile
+      - name: Build target-specific online bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path target -Force | Out-Null
+          @{ version = $env:WOKROUTER_RELEASE_VERSION } |
+            ConvertTo-Json -Compress |
+            Set-Content -LiteralPath target/wokrouter-release-config.json -Encoding utf8
+          pnpm --dir apps/desktop tauri build `
+            --target $env:WOKROUTER_TARGET_TRIPLE `
+            --config ../../target/wokrouter-release-config.json
+      - name: Package release artifact and enforce online boundary
+        id: package
+        shell: pwsh
+        env:
+          ARCHIVE_EXTENSION: ${{ matrix.extension }}
+        run: |
+          $name = "wokrouter-$env:WOKROUTER_RELEASE_TAG-$env:WOKROUTER_TARGET_TRIPLE"
+          $packageRoot = Join-Path target "wokrouter-release/$name"
+          New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
+          $tauriBundle = Join-Path target "$env:WOKROUTER_TARGET_TRIPLE/release/bundle"
+          $onlineBundle = Join-Path target "wokrouter-bundles/wokrouter-online-$env:WOKROUTER_TARGET_TRIPLE"
+          if (-not (Test-Path -LiteralPath $tauriBundle -PathType Container)) {
+            throw "Tauri bundle is missing: $tauriBundle"
+          }
+          if (-not (Test-Path -LiteralPath $onlineBundle -PathType Container)) {
+            throw "Online bundle is missing: $onlineBundle"
+          }
+          Copy-Item -LiteralPath $tauriBundle -Destination (Join-Path $packageRoot "installers") -Recurse
+          Copy-Item -LiteralPath $onlineBundle -Destination (Join-Path $packageRoot "lifecycle") -Recurse
+          @{
+            product = "wokrouter"
+            tag = $env:WOKROUTER_RELEASE_TAG
+            target = $env:WOKROUTER_TARGET_TRIPLE
+            version = $env:WOKROUTER_RELEASE_VERSION
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $packageRoot "RELEASE-METADATA.json") -Encoding utf8
+          $forbidden = Get-ChildItem -LiteralPath $packageRoot -Recurse |
+            Where-Object {
+              $_.Name -match '(?i)(^|[-_.])(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen)($|[-_.])'
+            }
+          if ($forbidden) {
+            throw "Online WokRouter artifact contains a WokCore or legacy daemon payload."
+          }
+          $archive = Join-Path target "$name.$env:ARCHIVE_EXTENSION"
+          if ($env:ARCHIVE_EXTENSION -eq "zip") {
+            Compress-Archive -LiteralPath $packageRoot -DestinationPath $archive
+          } else {
+            tar -czf $archive -C (Split-Path -Parent $packageRoot) (Split-Path -Leaf $packageRoot)
+          }
+          "archive=$archive" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wokrouter-${{ needs.release-version.outputs.tag }}-${{ matrix.target }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+  release-compatibility:
+    name: release-compatibility
+    needs: release-version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release-version.outputs.source_sha }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.97.1
+      - name: Current WokCore
+        run: cargo test -p wokrouter-wokcore-client --test handshake current_wokrouter_accepts_current_wokcore --locked
+      - name: Newer same-major WokCore
+        run: cargo test -p wokrouter-wokcore-client --test handshake compatible_handshake_accepts_unknown_same_major_fields --locked
+      - name: Older same-major WokCore
+        run: cargo test -p wokrouter-wokcore-client --test handshake legacy_same_major_runtime_without_installation_id_remains_running --locked
+      - name: Non-overlapping management API
+        run: cargo test -p wokrouter-wokcore-client --test handshake non_overlapping_api_major_is_incompatible_without_http_fallback --locked
+      - name: WokRouter update does not overwrite WokCore
+        run: cargo test -p wokrouter-platform --features test-support --test wokcore_install an_existing_compatible_install_is_never_overwritten --locked
+      - name: WokCore install does not modify WokRouter
+        run: cargo test -p wokrouter-platform --features test-support --test wokcore_install installing_wokcore_does_not_modify_wokrouter_binary_or_version --locked
+
+  release-verify:
+    name: release-verify
+    needs:
+      - release-version
+      - release-build
+      - release-compatibility
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: wokrouter-${{ needs.release-version.outputs.tag }}-*
+          path: artifacts
+      - name: Verify five independent WokRouter artifacts
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.release-version.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.release-version.outputs.version }}
+        run: |
+          $targets = @(
+            "x86_64-pc-windows-msvc",
+            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu"
+          )
+          $archives = @(Get-ChildItem -LiteralPath artifacts -Recurse -File)
+          if ($archives.Count -ne $targets.Count) {
+            throw "Expected five release archives, found $($archives.Count)."
+          }
+          foreach ($target in $targets) {
+            $expected = if ($target -eq "x86_64-pc-windows-msvc") {
+              "wokrouter-$env:RELEASE_TAG-$target.zip"
+            } else {
+              "wokrouter-$env:RELEASE_TAG-$target.tar.gz"
+            }
+            $archive = @($archives | Where-Object Name -eq $expected)
+            if ($archive.Count -ne 1) {
+              throw "Expected exactly one $expected archive."
+            }
+            $extract = Join-Path $env:RUNNER_TEMP "verify-$target"
+            New-Item -ItemType Directory -Path $extract -Force | Out-Null
+            if ($expected.EndsWith(".zip")) {
+              Expand-Archive -LiteralPath $archive[0].FullName -DestinationPath $extract
+            } else {
+              tar -xzf $archive[0].FullName -C $extract
+            }
+            $metadataFiles = @(Get-ChildItem -LiteralPath $extract -Recurse -Filter RELEASE-METADATA.json)
+            if ($metadataFiles.Count -ne 1) {
+              throw "$expected must contain exactly one release metadata file."
+            }
+            $metadata = Get-Content -LiteralPath $metadataFiles[0].FullName -Raw | ConvertFrom-Json
+            if (
+              $metadata.product -ne "wokrouter" -or
+              $metadata.tag -ne $env:RELEASE_TAG -or
+              $metadata.version -ne $env:RELEASE_VERSION -or
+              $metadata.target -ne $target
+            ) {
+              throw "$expected metadata does not match the WokRouter tag and target."
+            }
+            $forbidden = Get-ChildItem -LiteralPath $extract -Recurse |
+              Where-Object {
+                $_.Name -match '(?i)(^|[-_.])(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen)($|[-_.])'
+              }
+            if ($forbidden) {
+              throw "$expected contains a WokCore or legacy daemon payload."
+            }
+          }
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wokrouter-${{ needs.release-version.outputs.tag }}-verified
+          path: artifacts
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - release-version
+      - release-verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: wokrouter-${{ needs.release-version.outputs.tag }}-verified
+          path: artifacts
+      - name: Publish verified WokRouter archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release-version.outputs.tag }}
+        run: gh release create "$RELEASE_TAG" artifacts/**/* --verify-tag --generate-notes

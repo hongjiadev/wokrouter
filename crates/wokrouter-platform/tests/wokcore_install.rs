@@ -155,6 +155,36 @@ async fn an_existing_compatible_install_is_never_overwritten() {
 }
 
 #[tokio::test]
+async fn installing_wokcore_does_not_modify_wokrouter_binary_or_version() {
+    let server = signed_release_server(ARCHIVE).await;
+    let fixture = tempdir().unwrap();
+    let paths = app_paths(fixture.path());
+    let router_dir = fixture.path().join("WokRouter");
+    fs::create_dir_all(&router_dir).unwrap();
+    let router_binary = router_dir.join(format!("wokrouter{}", std::env::consts::EXE_SUFFIX));
+    let router_version = router_dir.join("version");
+    fs::write(&router_binary, b"wokrouter binary 9.8.7").unwrap();
+    fs::write(&router_version, b"9.8.7").unwrap();
+    let source = WokCoreInstallSource::loopback(
+        Url::parse(&format!("{}/releases/", server.uri())).unwrap(),
+        PUBLIC_KEY,
+    )
+    .unwrap();
+
+    let outcome = install_missing_wokcore(&paths, &source).await.unwrap();
+
+    assert!(matches!(
+        outcome,
+        WokCoreInstallOutcome::Installed {
+            version,
+            ..
+        } if version == Version::new(1, 2, 3)
+    ));
+    assert_eq!(fs::read(router_binary).unwrap(), b"wokrouter binary 9.8.7");
+    assert_eq!(fs::read(router_version).unwrap(), b"9.8.7");
+}
+
+#[tokio::test]
 async fn artifact_hash_mismatch_leaves_no_install_or_record() {
     let mut corrupt = ARCHIVE.to_vec();
     corrupt[10] ^= 0x01;

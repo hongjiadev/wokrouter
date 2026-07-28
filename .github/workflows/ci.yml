@@ -1,4 +1,4 @@
-name: Foundation CI
+name: CI
 
 on:
   push:
@@ -8,7 +8,11 @@ permissions:
   contents: read
 
 env:
+  ANTHROPIC_API_KEY: ""
   CARGO_TERM_COLOR: always
+  GEMINI_API_KEY: ""
+  GOOGLE_API_KEY: ""
+  OPENAI_API_KEY: ""
 
 jobs:
   rust:
@@ -16,12 +20,6 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
-      - name: Self-test public repository hygiene checker
-        shell: pwsh
-        run: pwsh tests/scripts/check-public-repo-hygiene.tests.ps1
-      - name: Check public repository hygiene
-        shell: pwsh
-        run: pwsh tests/scripts/check-public-repo-hygiene.ps1
       - name: Install Tauri system dependencies
         run: |
           sudo apt-get update
@@ -36,14 +34,42 @@ jobs:
         with:
           toolchain: 1.97.1
           components: clippy, rustfmt
-      - name: Stage native sidecars
+      - name: Stage native WokRouter sidecar
         run: node apps/desktop/scripts/stage-sidecars.mjs
+      - name: Self-test public repository hygiene checker
+        shell: pwsh
+        run: pwsh tests/scripts/check-public-repo-hygiene.tests.ps1
+      - name: Check public repository hygiene
+        shell: pwsh
+        run: pwsh tests/scripts/check-public-repo-hygiene.ps1
+      - name: Self-test WokCore boundary checker
+        shell: pwsh
+        run: pwsh tests/scripts/check-core-boundary.tests.ps1
+      - name: Check WokCore boundary
+        shell: pwsh
+        run: pwsh tests/scripts/check-core-boundary.ps1
+      - name: Self-test persistence privacy checker
+        shell: pwsh
+        run: pwsh tests/scripts/check-no-body-persistence.tests.ps1
+      - name: Check persistence privacy boundary
+        shell: pwsh
+        run: pwsh tests/scripts/check-no-body-persistence.ps1
+      - name: Self-test foundation CI contract
+        shell: pwsh
+        run: pwsh tests/scripts/check-foundation-contract.tests.ps1
+      - name: Check foundation CI contract
+        shell: pwsh
+        run: pwsh tests/scripts/check-foundation-contract.ps1
+      - name: Self-test release contract
+        shell: pwsh
+        run: pwsh tests/scripts/check-release-contract.tests.ps1
+      - name: Check release contract
+        shell: pwsh
+        run: pwsh tests/scripts/check-release-contract.ps1
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint workspace
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - name: Test workspace
-        run: cargo test --workspace --all-features
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Check dependency policy
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
@@ -74,24 +100,25 @@ jobs:
       - name: Build frontend
         run: pnpm --dir apps/desktop build
 
-  platform-check-matrix:
-    name: platform-check (${{ matrix.os }})
+  native-test-matrix:
+    name: native-test (${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - windows-latest
-          - macos-15
-          - ubuntu-24.04
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
-      - name: Self-test public repository hygiene checker
-        shell: pwsh
-        run: pwsh tests/scripts/check-public-repo-hygiene.tests.ps1
-      - name: Check public repository hygiene
-        shell: pwsh
-        run: pwsh tests/scripts/check-public-repo-hygiene.ps1
       - name: Install Tauri system dependencies
         if: runner.os == 'Linux'
         run: |
@@ -106,30 +133,111 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: 1.97.1
-      - name: Stage native sidecars
+          target: ${{ matrix.target }}
+      - name: Stage native WokRouter sidecar
+        env:
+          WOKROUTER_TARGET_TRIPLE: ${{ matrix.target }}
         run: node apps/desktop/scripts/stage-sidecars.mjs
-      - name: Self-test foundation CI/configuration contract
+      - name: Self-test fixed Windows test host
+        if: runner.os == 'Windows'
         shell: pwsh
-        run: pwsh tests/scripts/check-foundation-contract.tests.ps1
-      - name: Check foundation CI/configuration contract
+        run: ./tests/scripts/run-fixed-test-host.tests.ps1
+      - name: Test workspace through fixed Windows host
+        if: runner.os == 'Windows'
         shell: pwsh
-        run: pwsh tests/scripts/check-foundation-contract.ps1
-      - name: Self-test persistence privacy checker
-        shell: pwsh
-        run: pwsh tests/scripts/check-no-body-persistence.tests.ps1
-      - name: Check persistence privacy boundary
-        shell: pwsh
-        run: pwsh tests/scripts/check-no-body-persistence.ps1
-      - name: Validate platform Rust and desktop configuration
-        run: cargo check -p wokrouter-platform -p wokrouter-desktop --all-features
+        run: |
+          $targetDirectory = Join-Path $env:RUNNER_TEMP "wokrouter-target"
+          & ./tests/scripts/run-fixed-test-host.ps1 `
+            -TargetDirectory $targetDirectory `
+            -RepositoryRoot $PWD `
+            -HarnessArguments @("--nocapture")
+      - name: Test workspace natively
+        if: runner.os != 'Windows'
+        run: cargo test --workspace --all-features --locked
+
+  target-check-matrix:
+    name: target-check (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            build-essential \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.97.1
+          target: ${{ matrix.target }}
+      - name: Stage target WokRouter sidecar
+        env:
+          WOKROUTER_TARGET_TRIPLE: ${{ matrix.target }}
+        run: node apps/desktop/scripts/stage-sidecars.mjs
+      - name: Check target workspace
+        run: cargo check --workspace --all-features --locked --target ${{ matrix.target }}
+
+  compatibility:
+    name: compatibility
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.97.1
+      - name: Current WokRouter with current WokCore
+        run: cargo test -p wokrouter-wokcore-client --test handshake current_wokrouter_accepts_current_wokcore --locked
+      - name: Current WokRouter with newer same-major WokCore
+        run: cargo test -p wokrouter-wokcore-client --test handshake compatible_handshake_accepts_unknown_same_major_fields --locked
+      - name: Current WokRouter with older same-major WokCore
+        run: cargo test -p wokrouter-wokcore-client --test handshake legacy_same_major_runtime_without_installation_id_remains_running --locked
+      - name: Non-overlapping management API
+        run: cargo test -p wokrouter-wokcore-client --test handshake non_overlapping_api_major_is_incompatible_without_http_fallback --locked
+      - name: WokRouter update leaves compatible WokCore installed
+        run: cargo test -p wokrouter-platform --features test-support --test wokcore_install an_existing_compatible_install_is_never_overwritten --locked
+      - name: WokCore install leaves WokRouter binary and version untouched
+        run: cargo test -p wokrouter-platform --features test-support --test wokcore_install installing_wokcore_does_not_modify_wokrouter_binary_or_version --locked
 
   platform-check:
     name: platform-check
     if: always()
-    needs: platform-check-matrix
+    needs:
+      - rust
+      - frontend
+      - native-test-matrix
+      - target-check-matrix
+      - compatibility
     runs-on: ubuntu-24.04
     steps:
-      - name: Require every platform check
+      - name: Require every CI gate
         env:
-          PLATFORM_RESULT: ${{ needs.platform-check-matrix.result }}
-        run: test "$PLATFORM_RESULT" = "success"
+          COMPATIBILITY_RESULT: ${{ needs.compatibility.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          NATIVE_TEST_RESULT: ${{ needs.native-test-matrix.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+          TARGET_CHECK_RESULT: ${{ needs.target-check-matrix.result }}
+        run: |
+          test "$RUST_RESULT" = "success"
+          test "$FRONTEND_RESULT" = "success"
+          test "$NATIVE_TEST_RESULT" = "success"
+          test "$TARGET_CHECK_RESULT" = "success"
+          test "$COMPATIBILITY_RESULT" = "success"

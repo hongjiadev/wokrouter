@@ -59,10 +59,12 @@ try {
 
     Remove-Item -LiteralPath $observed
     $fakeCargo = Join-Path $temporaryRoot "cargo-fixture.cmd"
+    $cargoInvocations = Join-Path $temporaryRoot "cargo-invocations.txt"
     @"
 @echo off
+echo %*>>"$cargoInvocations"
 echo Finished fixture 1>&2
-type "$manifest"
+if "%2"=="test" type "$manifest"
 exit /b 0
 "@ | Set-Content -LiteralPath $fakeCargo -Encoding ASCII
     & $runner `
@@ -82,6 +84,14 @@ exit /b 0
         if ($hostCommandLine -notlike "*$fixedHost*") {
             throw "Cargo-discovered artifact bypassed the fixed host: $hostCommandLine"
         }
+    }
+    $invocations = @(Get-Content -LiteralPath $cargoInvocations)
+    if (
+        $invocations.Count -ne 2 -or
+        $invocations[0] -notlike "* build *-p wokrouter-cli --bin wokrouter*" -or
+        $invocations[1] -notlike "* test *--no-run*"
+    ) {
+        throw "Expected the companion WokRouter binary to build before Cargo test discovery"
     }
 
     Remove-Item -LiteralPath $observed
@@ -105,6 +115,54 @@ exit /b 0
     $singleHost = @(Get-Content -LiteralPath $observed)
     if ($singleHost.Count -ne 1 -or $singleHost[0] -notlike "*$fixedHost*") {
         throw "Expected one manifest artifact to execute through the fixed host"
+    }
+
+    Remove-Item -LiteralPath $observed
+    $lockJob = Start-Job -ScriptBlock {
+        param([string] $Path)
+
+        $stream = [System.IO.File]::Open(
+            $Path,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+        )
+        try {
+            Write-Output "locked"
+            Start-Sleep -Milliseconds 500
+        }
+        finally {
+            $stream.Dispose()
+        }
+    } -ArgumentList $fixedHost
+    try {
+        $locked = $false
+        for ($attempt = 0; $attempt -lt 100 -and -not $locked; $attempt += 1) {
+            $locked = @(Receive-Job -Job $lockJob -Keep) -contains "locked"
+            if (-not $locked) {
+                Start-Sleep -Milliseconds 20
+            }
+        }
+        if (-not $locked) {
+            throw "Timed out while preparing the fixed-host sharing violation fixture"
+        }
+
+        & $runner `
+            -ArtifactManifestPath $singleManifest `
+            -TargetDirectory $temporaryRoot `
+            -HarnessArguments @(
+                "/d",
+                "/c",
+                "echo %CMDCMDLINE%>>`"$observed`""
+            )
+        $retriedHost = @(Get-Content -LiteralPath $observed)
+        if ($retriedHost.Count -ne 1 -or $retriedHost[0] -notlike "*$fixedHost*") {
+            throw "Expected fixed-host copy to recover from a transient sharing violation"
+        }
+    }
+    finally {
+        Wait-Job -Job $lockJob | Out-Null
+        Remove-Job -Job $lockJob
     }
 
     $failed = $false

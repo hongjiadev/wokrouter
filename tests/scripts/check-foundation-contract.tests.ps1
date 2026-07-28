@@ -145,118 +145,111 @@ try {
         Assert-ContractPasses -Root $root -Scenario "real workflow fixture"
     }
 
-    Invoke-Scenario -Name "broken platform aggregator is rejected" -Test {
+    Invoke-Scenario -Name "Windows fixed test host cannot be removed" -Test {
         $root = New-ContractFixture
         Edit-Workflow `
             -Root $root `
-            -OldText "    needs: platform-check-matrix" `
-            -NewText "    needs: frontend"
+            -OldText "          & ./tests/scripts/run-fixed-test-host.ps1 ``" `
+            -NewText "          & ./tests/scripts/not-fixed-test-host.ps1 ``"
         Assert-ContractRejects `
             -Root $root `
-            -ExpectedText "needs" `
-            -Scenario "broken platform aggregator"
+            -ExpectedText "fixed test host" `
+            -Scenario "missing fixed Windows test host"
     }
 
-    Invoke-Scenario -Name "required commands in the wrong jobs are rejected" -Test {
+    Invoke-Scenario -Name "direct Cargo tests cannot run on Windows" -Test {
         $root = New-ContractFixture
-        $workflowPath = Join-Path $root ".github/workflows/ci.yml"
-        $workflow = Get-Content -LiteralPath $workflowPath -Raw -Encoding UTF8
-        $rustCommand = "        run: cargo fmt --all -- --check"
-        $frontendCommand = "        run: pnpm --dir apps/desktop typecheck"
-        if (-not $workflow.Contains($rustCommand) -or -not $workflow.Contains($frontendCommand)) {
-            throw "Fixture command swap sources were not found."
-        }
-        $workflow = $workflow.Replace($rustCommand, "        run: __TASK9_SWAP__")
-        $workflow = $workflow.Replace($frontendCommand, $rustCommand)
-        $workflow = $workflow.Replace("        run: __TASK9_SWAP__", $frontendCommand)
-        Set-Content -LiteralPath $workflowPath -Value $workflow -Encoding UTF8
+        Edit-Workflow `
+            -Root $root `
+            -OldText "        if: runner.os != 'Windows'`n        run: cargo test --workspace --all-features --locked" `
+            -NewText "        run: cargo test --workspace --all-features --locked"
         Assert-ContractRejects `
             -Root $root `
-            -ExpectedText "cargo fmt" `
-            -Scenario "misplaced required commands"
+            -ExpectedText "non-Windows" `
+            -Scenario "unguarded direct Cargo test"
     }
 
-    Invoke-Scenario -Name "missing sidecar staging is rejected" -Test {
+    Invoke-Scenario -Name "provider credentials must remain empty" -Test {
+        $root = New-ContractFixture
+        Edit-Workflow `
+            -Root $root `
+            -OldText '  OPENAI_API_KEY: ""' `
+            -NewText "  OPENAI_API_KEY: inherited"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "OPENAI_API_KEY" `
+            -Scenario "non-empty provider environment"
+    }
+
+    Invoke-Scenario -Name "public hygiene gate cannot be removed" -Test {
         $root = New-ContractFixture
         Edit-Workflow `
             -Root $root `
             -OldText @"
-      - name: Stage native sidecars
-        run: node apps/desktop/scripts/stage-sidecars.mjs
+      - name: Check public repository hygiene
+        shell: pwsh
+        run: pwsh tests/scripts/check-public-repo-hygiene.ps1
 "@ `
             -NewText ""
         Assert-ContractRejects `
             -Root $root `
-            -ExpectedText "stage-sidecars" `
-            -Scenario "missing sidecar staging"
+            -ExpectedText "public-repo-hygiene" `
+            -Scenario "missing public hygiene gate"
     }
 
-    Invoke-Scenario -Name "sidecar staging in the wrong job is rejected" -Test {
+    Invoke-Scenario -Name "WokCore boundary gate cannot be removed" -Test {
         $root = New-ContractFixture
         Edit-Workflow `
             -Root $root `
             -OldText @"
-      - name: Stage native sidecars
-        run: node apps/desktop/scripts/stage-sidecars.mjs
+      - name: Check WokCore boundary
+        shell: pwsh
+        run: pwsh tests/scripts/check-core-boundary.ps1
 "@ `
             -NewText ""
-        $frontendCommand = "        run: pnpm --dir apps/desktop typecheck"
-        Edit-Workflow `
-            -Root $root `
-            -OldText $frontendCommand `
-            -NewText @"
-$frontendCommand
-      - name: Misplaced native sidecar staging
-        run: node apps/desktop/scripts/stage-sidecars.mjs
-"@
         Assert-ContractRejects `
             -Root $root `
-            -ExpectedText "stage-sidecars" `
-            -Scenario "misplaced sidecar staging"
+            -ExpectedText "core-boundary" `
+            -Scenario "missing core boundary gate"
     }
 
-    Invoke-Scenario -Name "broken platform matrix is rejected" -Test {
+    Invoke-Scenario -Name "five-target matrix cannot lose Linux arm64" -Test {
         $root = New-ContractFixture
         Edit-Workflow `
             -Root $root `
-            -OldText "          - macos-15" `
-            -NewText "          - macos-14"
+            -OldText @"
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+"@ `
+            -NewText ""
         Assert-ContractRejects `
             -Root $root `
-            -ExpectedText "macos-15" `
-            -Scenario "broken platform matrix"
+            -ExpectedText "aarch64-unknown-linux-gnu" `
+            -Scenario "missing Linux arm64 target"
     }
 
-    Invoke-Scenario -Name "fixed platform matrix runner is rejected" -Test {
+    Invoke-Scenario -Name "compatibility matrix cannot lose older same-major coverage" -Test {
         $root = New-ContractFixture
         Edit-Workflow `
             -Root $root `
-            -OldText '    runs-on: ${{ matrix.os }}' `
-            -NewText "    runs-on: ubuntu-24.04"
+            -OldText "        run: cargo test -p wokrouter-wokcore-client --test handshake legacy_same_major_runtime_without_installation_id_remains_running --locked" `
+            -NewText "        run: cargo test -p wokrouter-wokcore-client --test handshake redirects_are_not_followed --locked"
         Assert-ContractRejects `
             -Root $root `
-            -ExpectedText "runs-on" `
-            -Scenario "fixed platform matrix runner"
+            -ExpectedText "legacy_same_major" `
+            -Scenario "missing older same-major compatibility"
     }
 
-    Invoke-Scenario -Name "jobs outside the jobs mapping are rejected" -Test {
+    Invoke-Scenario -Name "platform aggregator cannot omit target checks" -Test {
         $root = New-ContractFixture
-        $workflowPath = Join-Path $root ".github/workflows/ci.yml"
-        $workflow = Get-Content -LiteralPath $workflowPath -Raw -Encoding UTF8
-        $workflow = $workflow.Replace("`r`n", "`n").Replace("`n", "`r`n")
-        [System.IO.File]::WriteAllText(
-            $workflowPath,
-            $workflow,
-            [System.Text.UTF8Encoding]::new($false)
-        )
         Edit-Workflow `
             -Root $root `
-            -OldText "jobs:`n" `
-            -NewText "not-jobs:`n"
+            -OldText "      - target-check-matrix`n" `
+            -NewText ""
         Assert-ContractRejects `
             -Root $root `
-            -ExpectedText "jobs" `
-            -Scenario "invalid workflow structure"
+            -ExpectedText "target-check-matrix" `
+            -Scenario "incomplete platform aggregator"
     }
 
     if ($failures.Count -gt 0) {

@@ -482,14 +482,43 @@ function Assert-NestedValue {
 }
 
 $workflowLines = @(Get-Content -LiteralPath $workflowPath -Encoding UTF8)
+$workflow = $workflowLines -join "`n"
 $deny = Get-Content -LiteralPath $denyPath -Raw -Encoding UTF8
 $development = Get-Content -LiteralPath $developmentPath -Raw -Encoding UTF8
 $jobs = Get-WorkflowJobs -Lines $workflowLines
 
-$requiredJobs = @("rust", "frontend", "platform-check-matrix", "platform-check")
+$requiredJobs = @(
+    "rust",
+    "frontend",
+    "native-test-matrix",
+    "target-check-matrix",
+    "compatibility",
+    "platform-check"
+)
 foreach ($jobName in $requiredJobs) {
     if (-not $jobs.ContainsKey($jobName)) {
         Add-ContractFailure -Message "Workflow jobs mapping is missing '$jobName'."
+    }
+}
+
+foreach ($providerVariable in @(
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY"
+    )) {
+    $providerDefinitions = @(
+        [regex]::Matches(
+            $workflow,
+            "(?m)^\s*$providerVariable`:\s*.*$"
+        )
+    )
+    if (
+        $workflow -notmatch "(?m)^  $providerVariable`: `"`"`$" -or
+        $providerDefinitions.Count -ne 1
+    ) {
+        Add-ContractFailure `
+            -Message "Workflow must define provider environment variable '$providerVariable' exactly once as empty."
     }
 }
 
@@ -497,9 +526,18 @@ if ($jobs.ContainsKey("rust")) {
     $rustSteps = @(Get-JobSteps -Job $jobs["rust"])
     foreach ($command in @(
             "node apps/desktop/scripts/stage-sidecars.mjs",
+            "pwsh tests/scripts/check-public-repo-hygiene.tests.ps1",
+            "pwsh tests/scripts/check-public-repo-hygiene.ps1",
+            "pwsh tests/scripts/check-core-boundary.tests.ps1",
+            "pwsh tests/scripts/check-core-boundary.ps1",
+            "pwsh tests/scripts/check-no-body-persistence.tests.ps1",
+            "pwsh tests/scripts/check-no-body-persistence.ps1",
+            "pwsh tests/scripts/check-foundation-contract.tests.ps1",
+            "pwsh tests/scripts/check-foundation-contract.ps1",
+            "pwsh tests/scripts/check-release-contract.tests.ps1",
+            "pwsh tests/scripts/check-release-contract.ps1",
             "cargo fmt --all -- --check",
-            "cargo clippy --workspace --all-targets --all-features -- -D warnings",
-            "cargo test --workspace --all-features"
+            "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
         )) {
         Assert-JobRunStep -JobName "rust" -Steps $rustSteps -Command $command
     }
@@ -567,67 +605,133 @@ if ($jobs.ContainsKey("frontend")) {
     }
 }
 
-if ($jobs.ContainsKey("platform-check-matrix")) {
-    $matrixJob = $jobs["platform-check-matrix"]
-    if ((Get-JobScalar -Job $matrixJob -Key "runs-on") -ne '${{ matrix.os }}') {
+function Assert-FiveTargetMatrix {
+    param(
+        [Parameter(Mandatory)]
+        [object]$Job,
+
+        [Parameter(Mandatory)]
+        [string]$JobName
+    )
+
+    if ((Get-JobScalar -Job $Job -Key "runs-on") -ne '${{ matrix.os }}') {
         Add-ContractFailure `
-            -Message "Platform matrix job runs-on must be '`${{ matrix.os }}'."
+            -Message "Workflow job '$JobName' runs-on must be '`${{ matrix.os }}'."
     }
-    $matrixSteps = @(Get-JobSteps -Job $matrixJob)
-    $actualRunners = @(Get-PlatformMatrixRunners -Job $matrixJob)
-    $expectedRunners = @("windows-latest", "macos-15", "ubuntu-24.04")
-    if (
-        $actualRunners.Count -ne $expectedRunners.Count -or
-        @($expectedRunners | Where-Object { $actualRunners -notcontains $_ }).Count -gt 0
+    $jobText = $Job.Lines -join "`n"
+    $expectedPairs = @(
+        @("windows-latest", "x86_64-pc-windows-msvc"),
+        @("macos-15-intel", "x86_64-apple-darwin"),
+        @("macos-15", "aarch64-apple-darwin"),
+        @("ubuntu-24.04", "x86_64-unknown-linux-gnu"),
+        @("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu")
+    )
+    foreach ($pair in $expectedPairs) {
+        $pattern = "(?m)^          - os: $([regex]::Escape($pair[0]))\n            target: $([regex]::Escape($pair[1]))$"
+        if ($jobText -notmatch $pattern) {
+            Add-ContractFailure `
+                -Message "Workflow job '$JobName' is missing native runner '$($pair[0])' for '$($pair[1])'."
+        }
+    }
+    $targetCount = @(
+        $Job.Lines | Where-Object { $_ -match "^            target: " }
+    ).Count
+    if ($targetCount -ne 5) {
+        Add-ContractFailure `
+            -Message "Workflow job '$JobName' must contain exactly five target entries."
+    }
+}
+
+if ($jobs.ContainsKey("native-test-matrix")) {
+    $nativeJob = $jobs["native-test-matrix"]
+    Assert-FiveTargetMatrix -Job $nativeJob -JobName "native-test-matrix"
+    $nativeSteps = @(Get-JobSteps -Job $nativeJob)
+    Assert-JobRunStep `
+        -JobName "native-test-matrix" `
+        -Steps $nativeSteps `
+        -Command "./tests/scripts/run-fixed-test-host.tests.ps1"
+    $fixedHostSteps = @(
+        $nativeSteps | Where-Object {
+            $_.Fields.ContainsKey("run") -and
+            $_.Fields["run"] -match "run-fixed-test-host\.ps1" -and
+            $_.Fields["run"] -match "HarnessArguments @\(`"--nocapture`"\)"
+        }
+    )
+    if ($fixedHostSteps.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "Windows native tests must execute the workspace through the fixed test host."
+    }
+    elseif (
+        -not $fixedHostSteps[0].Fields.ContainsKey("if") -or
+        $fixedHostSteps[0].Fields["if"] -ne "runner.os == 'Windows'"
     ) {
         Add-ContractFailure `
-            -Message "Platform matrix must contain exactly windows-latest, macos-15, and ubuntu-24.04."
+            -Message "The fixed test host step must run only on Windows."
     }
+    $nativeCargoSteps = @(
+        $nativeSteps | Where-Object {
+            $_.Fields.ContainsKey("run") -and
+            $_.Fields["run"] -eq "cargo test --workspace --all-features --locked"
+        }
+    )
+    if (
+        $nativeCargoSteps.Count -ne 1 -or
+        -not $nativeCargoSteps[0].Fields.ContainsKey("if") -or
+        $nativeCargoSteps[0].Fields["if"] -ne "runner.os != 'Windows'"
+    ) {
+        Add-ContractFailure `
+            -Message "Direct Cargo workspace tests must be restricted to non-Windows native runners."
+    }
+}
 
+if ($jobs.ContainsKey("target-check-matrix")) {
+    $targetJob = $jobs["target-check-matrix"]
+    Assert-FiveTargetMatrix -Job $targetJob -JobName "target-check-matrix"
+    $targetSteps = @(Get-JobSteps -Job $targetJob)
+    Assert-JobRunStep `
+        -JobName "target-check-matrix" `
+        -Steps $targetSteps `
+        -Command 'cargo check --workspace --all-features --locked --target ${{ matrix.target }}'
+}
+
+if ($jobs.ContainsKey("compatibility")) {
+    $compatibilitySteps = @(Get-JobSteps -Job $jobs["compatibility"])
     foreach ($command in @(
-            "node apps/desktop/scripts/stage-sidecars.mjs",
-            "pwsh tests/scripts/check-foundation-contract.tests.ps1",
-            "pwsh tests/scripts/check-foundation-contract.ps1",
-            "pwsh tests/scripts/check-no-body-persistence.tests.ps1",
-            "pwsh tests/scripts/check-no-body-persistence.ps1",
-            "cargo check -p wokrouter-platform -p wokrouter-desktop --all-features"
+            "cargo test -p wokrouter-wokcore-client --test handshake current_wokrouter_accepts_current_wokcore --locked",
+            "cargo test -p wokrouter-wokcore-client --test handshake compatible_handshake_accepts_unknown_same_major_fields --locked",
+            "cargo test -p wokrouter-wokcore-client --test handshake legacy_same_major_runtime_without_installation_id_remains_running --locked",
+            "cargo test -p wokrouter-wokcore-client --test handshake non_overlapping_api_major_is_incompatible_without_http_fallback --locked",
+            "cargo test -p wokrouter-platform --features test-support --test wokcore_install an_existing_compatible_install_is_never_overwritten --locked",
+            "cargo test -p wokrouter-platform --features test-support --test wokcore_install installing_wokcore_does_not_modify_wokrouter_binary_or_version --locked"
         )) {
         Assert-JobRunStep `
-            -JobName "platform-check-matrix" `
-            -Steps $matrixSteps `
+            -JobName "compatibility" `
+            -Steps $compatibilitySteps `
             -Command $command
     }
 }
 
 if ($jobs.ContainsKey("platform-check")) {
     $aggregator = $jobs["platform-check"]
-    if ((Get-JobScalar -Job $aggregator -Key "needs") -ne "platform-check-matrix") {
-        Add-ContractFailure `
-            -Message "Platform aggregator needs must be 'platform-check-matrix'."
-    }
     if ((Get-JobScalar -Job $aggregator -Key "if") -ne "always()") {
         Add-ContractFailure -Message "Platform aggregator if must be 'always()'."
     }
-
-    $aggregatorSteps = @(Get-JobSteps -Job $aggregator)
-    $aggregatorCommand = 'test "$PLATFORM_RESULT" = "success"'
-    Assert-JobRunStep `
-        -JobName "platform-check" `
-        -Steps $aggregatorSteps `
-        -Command $aggregatorCommand
-    $resultSteps = @(
-        $aggregatorSteps | Where-Object {
-            $_.Fields.ContainsKey("run") -and
-            $_.Fields["run"] -eq $aggregatorCommand
+    $aggregatorText = $aggregator.Lines -join "`n"
+    foreach ($dependency in @(
+            "rust",
+            "frontend",
+            "native-test-matrix",
+            "target-check-matrix",
+            "compatibility"
+        )) {
+        if ($aggregatorText -notmatch "(?m)^      - $([regex]::Escape($dependency))$") {
+            Add-ContractFailure `
+                -Message "Platform aggregator must require '$dependency'."
         }
-    )
-    if ($resultSteps.Count -eq 1) {
-        Assert-NestedValue `
-            -Step $resultSteps[0] `
-            -Mapping "env" `
-            -Key "PLATFORM_RESULT" `
-            -Value '${{ needs.platform-check-matrix.result }}' `
-            -Message "Platform aggregator must read needs.platform-check-matrix.result."
+        if ($aggregatorText -notmatch [regex]::Escape("needs.$dependency.result")) {
+            Add-ContractFailure `
+                -Message "Platform aggregator must verify the result of '$dependency'."
+        }
     }
 }
 

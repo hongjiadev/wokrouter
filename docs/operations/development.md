@@ -55,15 +55,45 @@ Run the same gates used by CI from the repository root:
 ```powershell
 pwsh tests/scripts/check-foundation-contract.tests.ps1
 pwsh tests/scripts/check-foundation-contract.ps1
+pwsh tests/scripts/check-release-contract.tests.ps1
+pwsh tests/scripts/check-release-contract.ps1
+pwsh tests/scripts/check-public-repo-hygiene.tests.ps1
+pwsh tests/scripts/check-public-repo-hygiene.ps1
+pwsh tests/scripts/check-core-boundary.tests.ps1
+pwsh tests/scripts/check-core-boundary.ps1
 pwsh tests/scripts/check-no-body-persistence.tests.ps1
 pwsh tests/scripts/check-no-body-persistence.ps1
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 pnpm --dir apps/desktop typecheck
 pnpm --dir apps/desktop test:unit
 pnpm --dir apps/desktop build
-cargo deny check
+cargo deny --all-features check
+```
+
+On Windows, never execute Cargo's hashed test programs directly. Run the
+self-test and the full workspace through the stable
+`wokrouter-test-host.exe` name:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File tests/scripts/run-fixed-test-host.tests.ps1
+
+$command = @"
+& './tests/scripts/run-fixed-test-host.ps1' `
+  -TargetDirectory 'E:\Projects\wokrouter\target' `
+  -RepositoryRoot '$PWD' `
+  -Offline `
+  -HarnessArguments @('--nocapture')
+"@
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -Command $command
+```
+
+Linux and macOS use their native test executables:
+
+```sh
+cargo test --workspace --all-features --locked
 ```
 
 The privacy check uses an explicit persisted-model list:
@@ -88,21 +118,42 @@ that job relationships, matrix runners, and required commands cannot move to a
 different job without failing the gate.
 
 The stable branch-protection checks are `rust`, `frontend`, and
-`platform-check`. The last check aggregates the Windows, macOS, and Linux
-platform matrix and succeeds only when every matrix entry succeeds.
+`platform-check`. The last check aggregates native tests, compatibility
+coverage, and target checks for Windows x64, macOS x64/arm64, and Linux
+x64/arm64. CI clears the OpenAI, Anthropic, Gemini, and Google provider
+environment variables before running any gate.
 
 ## macOS and Linux boundaries
 
-CI runs platform checks on `macos-15` and `ubuntu-24.04` in addition to
-`windows-latest`. Every runner executes the privacy checker and compiles both
-the platform crate and the Tauri desktop crate for its native host. Ubuntu CI
-installs the Tauri WebKitGTK 4.1, AppIndicator, SSL, SVG, XDO, and native build
-dependencies before compiling. A local Linux build needs the corresponding
-packages for its distribution; a local macOS build needs Xcode Command Line
-Tools.
+CI uses native GitHub-hosted runners for these Rust targets:
 
-These platform checks validate source compilation and Tauri build
-configuration. They do not install or start an operating-system service, build
-release installers, test code signing/notarization, or prove compatibility with
-Linux distributions other than the Ubuntu runner. Those operations belong to
-the later integration and release gates.
+- `x86_64-pc-windows-msvc`
+- `x86_64-apple-darwin`
+- `aarch64-apple-darwin`
+- `x86_64-unknown-linux-gnu`
+- `aarch64-unknown-linux-gnu`
+
+Ubuntu runners install the Tauri WebKitGTK 4.1, AppIndicator, SSL, SVG, XDO,
+and native build dependencies before compiling. A local Linux build needs the
+corresponding packages for its distribution; a local macOS build needs Xcode
+Command Line Tools.
+
+## Independent releases
+
+The Release workflow builds the five targets above from a WokRouter tag. Its
+version is derived only from that tag and remains independent of the installed
+WokCore version. A manual dispatch accepts the WokRouter tag and performs the
+same build and verification without publishing; a tag push publishes only
+after all five archives and the compatibility matrix pass.
+
+Every ordinary online WokRouter artifact contains the WokRouter desktop
+installers and lifecycle binary, but no WokCore binary, legacy daemon, provider
+simulator, or load generator. WokCore installation and upgrades use the
+separate signed WokCore release channel. Updating either product therefore
+does not overwrite the other product's binary or version.
+
+The compatibility matrix covers current and newer same-API WokCore responses,
+an older same-API WokCore with capability degradation, non-overlapping API
+majors, and both independent-upgrade directions. The release gate does not
+perform production code signing or notarization without the corresponding
+repository credentials.

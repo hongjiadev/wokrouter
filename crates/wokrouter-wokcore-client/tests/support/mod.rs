@@ -17,11 +17,22 @@ pub fn write_discovery(
     api_major: u32,
     extra: Option<(&str, serde_json::Value)>,
 ) {
+    write_discovery_with_version(path, base_url, instance_id, "0.1.0", api_major, extra);
+}
+
+pub fn write_discovery_with_version(
+    path: &Path,
+    base_url: &str,
+    instance_id: &str,
+    wokcore_version: &str,
+    api_major: u32,
+    extra: Option<(&str, serde_json::Value)>,
+) {
     let mut document = json!({
         "base_url": base_url,
         "pid": std::process::id(),
         "instance_id": instance_id,
-        "wokcore_version": "0.1.0",
+        "wokcore_version": wokcore_version,
         "api_major": api_major
     });
     if let Some((name, value)) = extra {
@@ -33,6 +44,14 @@ pub fn write_discovery(
 
 #[allow(dead_code)]
 pub async fn mount_handshake(server: &MockServer, instance_id: &str) {
+    mount_handshake_with_version(server, instance_id, "0.1.0").await;
+}
+
+pub async fn mount_handshake_with_version(
+    server: &MockServer,
+    instance_id: &str,
+    wokcore_version: &str,
+) {
     let authority = server.uri().trim_start_matches("http://").to_owned();
     Mock::given(method("GET"))
         .and(path("/wokcore/v1/health"))
@@ -48,7 +67,7 @@ pub async fn mount_handshake(server: &MockServer, instance_id: &str) {
         .and(path("/wokcore/v1/capabilities"))
         .and(header("host", authority.as_str()))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "wokcore_version": "0.1.0",
+            "wokcore_version": wokcore_version,
             "management_api_major": 1,
             "minimum_management_api_major": 1,
             "maximum_management_api_major": 1,

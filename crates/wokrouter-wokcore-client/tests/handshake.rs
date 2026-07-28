@@ -10,10 +10,13 @@ use wiremock::{
 };
 use wokrouter_wokcore_client::{CoreConnection, ManagementError, WokCoreClient};
 
-use support::{INSTANCE_ID, mount_handshake, write_discovery};
+use support::{
+    INSTANCE_ID, mount_handshake, mount_handshake_with_version, write_discovery,
+    write_discovery_with_version,
+};
 
 #[tokio::test]
-async fn compatible_handshake_accepts_unknown_same_major_fields() {
+async fn current_wokrouter_accepts_current_wokcore() {
     let server = MockServer::start().await;
     mount_handshake(&server, INSTANCE_ID).await;
     let fixture = tempdir().unwrap();
@@ -29,6 +32,23 @@ async fn compatible_handshake_accepts_unknown_same_major_fields() {
     assert_eq!(handshake.version, "0.1.0");
     assert_eq!(handshake.management_api_major, 1);
     assert!(handshake.provider_protocols.contains("openai_responses"));
+    assert!(handshake.capabilities.contains("service.status"));
+}
+
+#[tokio::test]
+async fn compatible_handshake_accepts_unknown_same_major_fields() {
+    let server = MockServer::start().await;
+    mount_handshake_with_version(&server, INSTANCE_ID, "0.2.0").await;
+    let fixture = tempdir().unwrap();
+    let discovery = fixture.path().join("discovery.json");
+    write_discovery_with_version(&discovery, &server.uri(), INSTANCE_ID, "0.2.0", 1, None);
+
+    let connection = WokCoreClient::new(discovery).unwrap().connection().await;
+    let CoreConnection::Running(handshake) = connection else {
+        panic!("expected a running handshake");
+    };
+
+    assert_eq!(handshake.version, "0.2.0");
     assert!(handshake.capabilities.contains("service.status"));
 }
 
@@ -68,6 +88,10 @@ async fn legacy_same_major_runtime_without_installation_id_remains_running() {
         panic!("expected a running legacy handshake");
     };
     assert_eq!(handshake.installation_id, None);
+    assert_eq!(
+        handshake.capabilities,
+        ["service.status".to_owned()].into_iter().collect()
+    );
     assert_eq!(
         client.integration_runtime().await.unwrap_err(),
         ManagementError::Incompatible

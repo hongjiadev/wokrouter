@@ -27,6 +27,30 @@ if (-not (Test-Path -LiteralPath $TargetDirectory -PathType Container)) {
 $targetPath = (Resolve-Path -LiteralPath $TargetDirectory).Path
 $fixedHost = Join-Path $targetPath "wokrouter-test-host.exe"
 
+function Copy-TestArtifactToFixedHost {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Source,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Destination
+    )
+
+    $attemptLimit = 20
+    for ($attempt = 1; $attempt -le $attemptLimit; $attempt += 1) {
+        try {
+            Copy-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop
+            return
+        }
+        catch [System.IO.IOException], [System.UnauthorizedAccessException] {
+            if ($attempt -eq $attemptLimit) {
+                throw
+            }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($ArtifactManifestPath)) {
     if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
         $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
@@ -34,6 +58,18 @@ if ([string]::IsNullOrWhiteSpace($ArtifactManifestPath)) {
         $RepositoryRoot = (Resolve-Path -LiteralPath $RepositoryRoot).Path
     }
     $ArtifactManifestPath = Join-Path $targetPath "wokrouter-test-artifacts.jsonl"
+    $companionArguments = @(
+        $Toolchain,
+        "build",
+        "--locked",
+        "--all-features",
+        "--target-dir",
+        $targetPath,
+        "-p",
+        "wokrouter-cli",
+        "--bin",
+        "wokrouter"
+    )
     $cargoArguments = @(
         $Toolchain,
         "test",
@@ -46,10 +82,23 @@ if ([string]::IsNullOrWhiteSpace($ArtifactManifestPath)) {
         $targetPath
     )
     if ($Offline) {
+        $companionArguments += "--offline"
         $cargoArguments += "--offline"
     }
     if (-not [string]::IsNullOrWhiteSpace($Target)) {
+        $companionArguments += @("--target", $Target)
         $cargoArguments += @("--target", $Target)
+    }
+
+    Push-Location $RepositoryRoot
+    try {
+        & $CargoCommand @companionArguments
+        if ($LASTEXITCODE -ne 0) {
+            throw "Cargo companion binary compilation failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally {
+        Pop-Location
     }
 
     $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
@@ -124,7 +173,9 @@ foreach ($artifact in $artifacts) {
     if (-not (Test-Path -LiteralPath $artifact.Executable -PathType Leaf)) {
         throw "Test executable is missing: $($artifact.Executable)"
     }
-    Copy-Item -LiteralPath $artifact.Executable -Destination $fixedHost -Force
+    Copy-TestArtifactToFixedHost `
+        -Source $artifact.Executable `
+        -Destination $fixedHost
     Write-Output "running $($artifact.Name) through $fixedHost"
     & $fixedHost @HarnessArguments
     if ($LASTEXITCODE -ne 0) {
