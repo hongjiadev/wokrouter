@@ -42,6 +42,21 @@ const ARCHIVE: &[u8] = UNIX_ARCHIVE;
 
 #[test]
 fn archive_fixtures_do_not_drift_from_signed_manifest() {
+    assert_eq!(MANIFEST.len(), 1701);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(MANIFEST)),
+        "c9e61b63a38067d3e8ceed3bc3cd051cc2562175502856f5a341fa6012d930b5"
+    );
+    assert_eq!(SIGNATURE.len(), 292);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(SIGNATURE)),
+        "fbf1193e515298b3163b72e9c6bf547d0b611ab3d60bd51fd3c48806c333c7a8"
+    );
+    assert_eq!(PUBLIC_KEY.len(), 113);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(PUBLIC_KEY.as_bytes())),
+        "380eb1a56f24a4ac61acf7441d45e53f213a654f046247c295436bfceced4ab2"
+    );
     assert_eq!(WINDOWS_ARCHIVE.len(), 134);
     assert_eq!(
         format!("{:x}", Sha256::digest(WINDOWS_ARCHIVE)),
