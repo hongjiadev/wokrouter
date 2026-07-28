@@ -19,6 +19,17 @@ const RESTARTED_INSTANCE_ID: &str = "11234567-89ab-4cde-8fab-0123456789ab";
 const MANAGEMENT_TOKEN: &str = "wok_proxy_v1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const CLIENT_TOKEN: &str = "wok_proxy_v1_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 
+#[cfg(windows)]
+#[test]
+fn windows_discovery_fixture_is_private_for_current_user() {
+    let fixture = tempdir().unwrap();
+    write_discovery_url(&fixture, "http://127.0.0.1:8765", INSTANCE_ID);
+
+    assert!(wokrouter_platform::test_support::is_private_file(
+        &fixture.path().join("discovery.json")
+    ));
+}
+
 #[tokio::test]
 async fn codex_injection_preserves_native_text_and_uses_command_backed_auth() {
     let fixture = tempdir().unwrap();
@@ -1002,5 +1013,10 @@ fn secure_test_file(path: &std::path::Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn secure_test_file(path: &std::path::Path) {
+    wokrouter_platform::test_support::secure_private_file(path).unwrap();
+}
+
+#[cfg(not(any(unix, windows)))]
 fn secure_test_file(_path: &std::path::Path) {}

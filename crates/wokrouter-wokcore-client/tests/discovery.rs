@@ -27,6 +27,16 @@ async fn oversized_discovery_is_invalid_runtime() {
 }
 
 #[tokio::test]
+async fn valid_discovery_is_read_before_transport() {
+    let fixture = tempdir().unwrap();
+    let path = fixture.path().join("discovery.json");
+    write_discovery(&path, "http://127.0.0.1:9", INSTANCE_ID, 1, None);
+    let client = WokCoreClient::new(path).unwrap();
+
+    assert_eq!(client.connection().await, CoreConnection::Stopped);
+}
+
+#[tokio::test]
 async fn discovery_rejects_unsafe_base_urls_and_invalid_identifiers() {
     let invalid_records = [
         ("http://localhost:8765", INSTANCE_ID, 1),
