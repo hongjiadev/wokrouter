@@ -3,3 +3,4 @@
 /crates/wokrouter-platform/tests/fixtures/wokcore-install/wokcore-update-v2.json text eol=lf
 /crates/wokrouter-platform/tests/fixtures/wokcore-install/wokcore-update-v2.json.minisig text eol=lf
 /crates/wokrouter-platform/tests/fixtures/wokcore-install/minisign.pub text eol=lf
+/release/minisign.pub text eol=lf

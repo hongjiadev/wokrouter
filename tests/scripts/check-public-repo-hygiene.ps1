@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string] $RepositoryRoot,
-    [string[]] $IndexLines
+    [string[]] $IndexLines,
+    [hashtable] $TrackedTextByPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,10 +12,65 @@ if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
     $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 }
 
-if ($null -eq $IndexLines) {
+$usingRepositoryIndex = $null -eq $IndexLines
+if ($usingRepositoryIndex) {
     $IndexLines = @(& git -C $RepositoryRoot ls-files --stage)
     if ($LASTEXITCODE -ne 0) {
         throw "git ls-files failed for $RepositoryRoot"
+    }
+}
+$contentViolationPaths = [Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::OrdinalIgnoreCase
+)
+if ($usingRepositoryIndex) {
+    $privateKeyPattern = "untrusted comment: minisign (encrypted )?" +
+        "secret key"
+    $markerPaths = @(
+        & git -C $RepositoryRoot grep --cached -I -i -l -E `
+            $privateKeyPattern 2>$null
+    )
+    $grepExitCode = $LASTEXITCODE
+    if ($grepExitCode -eq 1) {
+        $markerPaths = @()
+    } elseif ($grepExitCode -ne 0) {
+        throw "git grep failed while scanning Minisign private-key headers."
+    }
+    foreach ($path in $markerPaths) {
+        if (-not [string]::IsNullOrWhiteSpace($path)) {
+            $contentViolationPaths.Add($path) | Out-Null
+        }
+    }
+
+    $secretKeyCandidates = @(
+        & git -C $RepositoryRoot grep --cached -I -n -E `
+            "^[A-Za-z0-9+/]{208,216}={0,2}$" 2>$null
+    )
+    $grepExitCode = $LASTEXITCODE
+    if ($grepExitCode -eq 1) {
+        $secretKeyCandidates = @()
+    } elseif ($grepExitCode -ne 0) {
+        throw "git grep failed while scanning Minisign key payloads."
+    }
+    foreach ($candidate in $secretKeyCandidates) {
+        if (
+            $candidate -notmatch
+                "^(?<path>.*):[0-9]+:(?<payload>[A-Za-z0-9+/]{208,216}={0,2})$"
+        ) {
+            throw "Unrecognized git grep candidate shape."
+        }
+        try {
+            $decoded = [Convert]::FromBase64String($Matches.payload)
+        }
+        catch {
+            continue
+        }
+        if (
+            $decoded.Length -eq 158 -and
+            $decoded[0] -eq 0x45 -and
+            $decoded[1] -in @(0x44, 0x64)
+        ) {
+            $contentViolationPaths.Add($Matches.path) | Out-Null
+        }
     }
 }
 
@@ -25,7 +81,20 @@ $privateWorkflowArtifacts = @(
     "review", "reviews", "progress", "handoff", "handoffs",
     "plan", "plans", "spec", "specs", "workflow", "workflows"
 )
-
+$allowedFixturePublicKey = (
+    "crates/wokrouter-platform/tests/fixtures/" +
+    "wokcore-install/minisign.pub"
+)
+$allowedFixtureSignatures = @(
+    (
+        "crates/wokrouter-platform/tests/fixtures/" +
+        "wokcore-install/wokcore-update-v1.json.minisig"
+    ),
+    (
+        "crates/wokrouter-platform/tests/fixtures/" +
+        "wokcore-install/wokcore-update-v2.json.minisig"
+    )
+)
 $violations = foreach ($line in $IndexLines) {
     if ($line -notmatch "^(?<mode>\d{6}) [0-9a-f]{40} \d+\t(?<path>.+)$") {
         throw "Unrecognized git index line: $line"
@@ -33,6 +102,7 @@ $violations = foreach ($line in $IndexLines) {
 
     $mode = $Matches.mode
     $path = $Matches.path.Replace("\", "/")
+    $lowerPath = $path.ToLowerInvariant()
     $hasPrivateWorkflowName = $false
     foreach ($segment in $path.Split("/")) {
         $tokens = @(($segment.ToLowerInvariant() -split "[-_.]+") | Where-Object { $_ })
@@ -47,20 +117,75 @@ $violations = foreach ($line in $IndexLines) {
             break
         }
     }
+    $isForbiddenSigningOrPackageOutput = (
+        (
+            $path.EndsWith(".pub", [StringComparison]::OrdinalIgnoreCase) -and
+            $path -cne "release/minisign.pub" -and
+            $path -cne $allowedFixturePublicKey
+        ) -or
+        (
+            $path.EndsWith(
+                ".minisig",
+                [StringComparison]::OrdinalIgnoreCase
+            ) -and
+            $allowedFixtureSignatures -cnotcontains $path
+        ) -or
+        $lowerPath -match "(^|/)sha256sums$" -or
+        $lowerPath -match
+            "\.(key|sec|secret|private|pem|p12|pfx|zip|tgz|tar\.gz|msi|deb|rpm|appimage|dmg)$"
+    )
     if (
         $mode -eq "120000" -or
         $path -match "(^|/)docs/superpowers(/|$)" -or
         $path -match "(^|/)\.superpowers(/|$)" -or
         $path -match "(^|/)\.subpowers(/|$)" -or
         $path -match "(^|/)\.wokdocs(/|$)" -or
-        $hasPrivateWorkflowName
+        $lowerPath -match "(^|/)(target|dist|artifacts?)(/|$)" -or
+        $hasPrivateWorkflowName -or
+        $isForbiddenSigningOrPackageOutput
     ) {
         $line
     }
 }
 
-if (@($violations).Count -gt 0) {
-    throw "Public repository contains private workflow artifacts or symbolic links:`n$($violations -join "`n")"
+if (
+    @($violations).Count -gt 0 -or
+    $contentViolationPaths.Count -gt 0
+) {
+    throw (
+        "Public repository contains private workflow artifacts, generated " +
+        "release output, secret material, or symbolic links." +
+        "`nIndex entries:`n$($violations -join "`n")" +
+        "`nContent paths:`n$(@($contentViolationPaths) -join "`n")"
+    )
+}
+
+if ($null -ne $TrackedTextByPath) {
+    $privateHeaders = @(
+        "untrusted comment: minisign encrypted " + "secret key",
+        "untrusted comment: minisign " + "secret key"
+    )
+    $privateKeyViolations = foreach (
+        $entry in $TrackedTextByPath.GetEnumerator()
+    ) {
+        foreach ($header in $privateHeaders) {
+            if (
+                ([string] $entry.Value).IndexOf(
+                    $header,
+                    [StringComparison]::Ordinal
+                ) -ge 0
+            ) {
+                [string] $entry.Key
+                break
+            }
+        }
+    }
+    if (@($privateKeyViolations).Count -gt 0) {
+        throw (
+            "Public repository contains a Minisign private key header:`n" +
+            ($privateKeyViolations -join "`n")
+        )
+    }
 }
 
 Write-Output "public repository hygiene check passed"
