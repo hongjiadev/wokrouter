@@ -18,6 +18,8 @@ Install these prerequisites before building:
   releases, but it remains a required Tauri runtime dependency.
 - Visual Studio 2022 Build Tools with the **Desktop development with C++**
   workload, including the MSVC v143 toolset and a Windows 10 or Windows 11 SDK.
+  Windows ARM64 cross-builds also require the
+  `Microsoft.VisualStudio.Component.VC.Tools.ARM64` component.
 
 Confirm the pinned tools before running the project:
 
@@ -128,8 +130,11 @@ different job without failing the gate.
 The stable branch-protection checks are `rust`, `frontend`, and
 `platform-check`. The last check aggregates native tests, compatibility
 coverage, and target checks for Windows x64/arm64, macOS x64/arm64, and Linux
-x64/arm64. CI clears the OpenAI, Anthropic, Gemini, and Google provider
-environment variables before running any gate.
+x64/arm64. The Windows ARM64 matrix entries compile tests with `--no-run` and
+never execute a Rust test program. Both the fixed-host self-test and actual
+Windows Rust tests run only on the Windows x64 matrix entry. Immediately before
+the actual fixed-host wrapper, CI clears the OpenAI, Anthropic, Gemini, and
+Google provider environment variables.
 
 ## Release targets and public names
 
@@ -147,16 +152,24 @@ they never expose Rust vendor segments such as `unknown`, `pc-windows`, or
 `apple-darwin`.
 
 Ubuntu runners install the Tauri WebKitGTK 4.1, AppIndicator, SSL, SVG, XDO,
-and native build dependencies before compiling. A local Linux build needs the
-corresponding packages for its distribution; a local macOS build needs Xcode
-Command Line Tools.
+RPM, cpio, and native build dependencies before compiling and inspecting
+packages. A local Linux build needs the corresponding packages for its
+distribution; a local macOS build needs Xcode Command Line Tools.
+
+Each target produces normalized public files rather than an archive containing
+another bundle tree. Linux publishes AppImage, deb, and rpm; macOS publishes
+dmg, tar.gz, and zip; Windows publishes MSI and Portable.zip. Across both
+architectures this is exactly 16 payloads. The platform packagers inspect
+native metadata, architecture, exact inventory, and the online WokRouter
+boundary before any payload can enter the signing job.
 
 ## Independent releases
 
 The Release workflow builds the six targets above from a WokRouter tag. Its
 version is derived only from that tag and remains independent of the installed
 WokCore version. A manual dispatch accepts the WokRouter tag and performs the
-same build and verification without publishing; a tag push publishes only
+same build, signing, and verification without creating, editing, or publishing
+a GitHub Release. Only a tag push may start the serialized draft transaction,
 after all target assets and the compatibility matrix pass.
 
 Every ordinary online WokRouter artifact contains the WokRouter desktop
@@ -167,6 +180,20 @@ does not overwrite the other product's binary or version.
 
 The compatibility matrix covers current and newer same-API WokCore responses,
 an older same-API WokCore with capability degradation, non-overlapping API
-majors, and both independent-upgrade directions. The release gate does not
-perform production code signing or notarization without the corresponding
-repository credentials.
+majors, both independent-upgrade directions, signed WokCore manifest v2
+preference, the missing-v2 fallback to v1, and the two present-invalid-v2
+no-downgrade boundaries.
+
+WokRouter uses its own `WOKROUTER_MINISIGN_SECRET_KEY`; it never uses a WokCore
+signing key. The signing job first requires exactly 16 regular payloads, then
+creates a signature for every payload plus signed `SHA256SUMS` and the public
+key copy. The resulting bundle has exactly 35 files and is verified against
+the committed external trust anchor at `release/minisign.pub`.
+
+Publishing is an atomic draft transaction. An absent release is created as a
+verified draft; a rerun may replace assets only while that release remains a
+draft, and an existing public release is immutable to the workflow. Existing
+draft assets are removed, exactly 35 files are uploaded, the complete draft is
+downloaded into a separate clean directory and verified again, and only then
+is `--draft=false` applied. Production Authenticode signing, Apple notarization,
+and store publication remain outside this release workflow.

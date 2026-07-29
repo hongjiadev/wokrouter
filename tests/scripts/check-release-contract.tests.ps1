@@ -22,6 +22,7 @@ function New-ReleaseFixture {
     $null = New-Item -ItemType Directory -Path (Join-Path $root ".github/workflows") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "docs/operations") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "tests/release") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "release") -Force
     foreach ($relativePath in @(
             ".github/workflows/ci.yml",
             ".github/workflows/release.yml",
@@ -29,7 +30,10 @@ function New-ReleaseFixture {
             "tests/release/WokRouter.ReleaseContract.psm1",
             "tests/release/package-linux-assets.ps1",
             "tests/release/package-macos-assets.ps1",
-            "tests/release/package-windows-assets.ps1"
+            "tests/release/package-windows-assets.ps1",
+            "tests/release/sign-release-bundle.ps1",
+            "tests/release/verify-release-bundle.ps1",
+            "release/minisign.pub"
         )) {
         Copy-Item `
             -LiteralPath (Join-Path $repositoryRoot $relativePath) `
@@ -57,31 +61,9 @@ function Edit-FixtureFile {
     Set-Content -LiteralPath $path -Value $content.Replace($old, $new) -Encoding UTF8
 }
 
-function Add-WindowsArm64Target {
-    param([Parameter(Mandatory)][string]$Root)
-
-    Edit-FixtureFile `
-        -Root $Root `
-        -RelativePath ".github/workflows/release.yml" `
-        -OldText @"
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            extension: zip
-"@ `
-        -NewText @"
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            extension: zip
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-            extension: zip
-"@
-}
-
 function Invoke-Check {
     param(
-        [Parameter(Mandatory)][string]$Root,
-        [switch]$RequireSixTargets
+        [Parameter(Mandatory)][string]$Root
     )
 
     $arguments = @("-NoProfile")
@@ -89,9 +71,6 @@ function Invoke-Check {
         $arguments += @("-ExecutionPolicy", "Bypass")
     }
     $arguments += @("-File", $scriptUnderTest, "-Root", $Root)
-    if ($RequireSixTargets) {
-        $arguments += "-RequireSixTargets"
-    }
     $previous = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
@@ -107,11 +86,10 @@ function Invoke-Check {
 function Assert-Passes {
     param(
         [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][string]$Scenario,
-        [switch]$RequireSixTargets
+        [Parameter(Mandatory)][string]$Scenario
     )
 
-    $result = Invoke-Check -Root $Root -RequireSixTargets:$RequireSixTargets
+    $result = Invoke-Check -Root $Root
     if ($result.ExitCode -ne 0) {
         throw "$Scenario should pass, but exited $($result.ExitCode): $($result.Output)"
     }
@@ -121,11 +99,10 @@ function Assert-Rejects {
     param(
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$ExpectedText,
-        [Parameter(Mandatory)][string]$Scenario,
-        [switch]$RequireSixTargets
+        [Parameter(Mandatory)][string]$Scenario
     )
 
-    $result = Invoke-Check -Root $Root -RequireSixTargets:$RequireSixTargets
+    $result = Invoke-Check -Root $Root
     if ($result.ExitCode -ne 1) {
         throw "$Scenario should exit 1, but exited $($result.ExitCode): $($result.Output)"
     }
@@ -154,32 +131,39 @@ try {
         Assert-Passes -Root $root -Scenario "real release fixture"
     }
 
-    Invoke-Scenario -Name "six-target release matrix accepts Windows arm64" -Test {
-        $root = New-ReleaseFixture
-        Add-WindowsArm64Target -Root $root
-        Assert-Passes `
-            -Root $root `
-            -Scenario "six-target release fixture" `
-            -RequireSixTargets
-    }
-
     Invoke-Scenario -Name "release matrix must retain Windows arm64" -Test {
         $root = New-ReleaseFixture
-        Add-WindowsArm64Target -Root $root
         Edit-FixtureFile `
             -Root $root `
             -RelativePath ".github/workflows/release.yml" `
             -OldText @"
           - os: windows-latest
             target: aarch64-pc-windows-msvc
-            extension: zip
 "@ `
             -NewText ""
         Assert-Rejects `
             -Root $root `
             -ExpectedText "aarch64-pc-windows-msvc" `
-            -Scenario "missing Windows arm64 target" `
-            -RequireSixTargets
+            -Scenario "missing Windows arm64 target"
+    }
+
+    Invoke-Scenario -Name "macOS arm64 must use macos-14" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText @"
+          - os: macos-14
+            target: aarch64-apple-darwin
+"@ `
+            -NewText @"
+          - os: macos-15
+            target: aarch64-apple-darwin
+"@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "macos-14" `
+            -Scenario "wrong macOS arm64 runner"
     }
 
     Invoke-Scenario -Name "friendly asset contract module must remain complete" -Test {
@@ -211,7 +195,6 @@ try {
         Edit-FixtureFile -Root $root -RelativePath ".github/workflows/release.yml" -OldText @"
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            extension: tar.gz
 "@ -NewText ""
         Assert-Rejects -Root $root -ExpectedText "aarch64-unknown-linux-gnu" -Scenario "missing target"
     }
@@ -254,8 +237,8 @@ try {
         Edit-FixtureFile `
             -Root $root `
             -RelativePath ".github/workflows/release.yml" `
-            -OldText "contains a WokCore or legacy daemon payload." `
-            -NewText "contains a forbidden payload."
+            -OldText "      WOKROUTER_BUNDLE_KIND: online" `
+            -NewText "      WOKROUTER_BUNDLE_KIND: offline"
         Assert-Rejects `
             -Root $root `
             -ExpectedText "missing required boundary text" `
@@ -270,6 +253,19 @@ try {
             -OldText "legacy_same_major_runtime_without_installation_id_remains_running" `
             -NewText "redirects_are_not_followed"
         Assert-Rejects -Root $root -ExpectedText "legacy_same_major" -Scenario "missing compatibility case"
+    }
+
+    Invoke-Scenario -Name "compatibility matrix must retain WokCore v2 preference" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText "wokcore_install_prefers_a_valid_signed_v2_release_without_requesting_v1" `
+            -NewText "redirects_are_not_followed"
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "wokcore_install_prefers_a_valid_signed_v2_release_without_requesting_v1" `
+            -Scenario "missing WokCore v2 preference"
     }
 
     Invoke-Scenario -Name "provider credentials must be empty in release" -Test {
@@ -292,7 +288,217 @@ try {
         Assert-Rejects -Root $root -ExpectedText "contents: read" -Scenario "broad write permission"
     }
 
-    Invoke-Scenario -Name "publish must name the repository without a checkout" -Test {
+    foreach ($bundleSet in @(
+            "appimage,deb,rpm",
+            "app,dmg",
+            "msi"
+        )) {
+        Invoke-Scenario -Name "release build must retain --bundles $bundleSet" -Test {
+            $root = New-ReleaseFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath ".github/workflows/release.yml" `
+                -OldText "--bundles $bundleSet" `
+                -NewText "--bundles all"
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText "one executable '--bundles $bundleSet' line" `
+                -Scenario "missing explicit $bundleSet bundle set"
+        }
+    }
+
+    Invoke-Scenario -Name "Minisign secret cannot escape the signing step" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText @'
+    runs-on: ubuntu-24.04
+    outputs:
+'@ `
+            -NewText @'
+    runs-on: ubuntu-24.04
+    env:
+      LEAKED_KEY: ${{ secrets.WOKROUTER_MINISIGN_SECRET_KEY }}
+    outputs:
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "secret must appear only" `
+            -Scenario "secret outside signing step"
+    }
+
+    Invoke-Scenario -Name "old five-archive verification cannot return" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText "name: Release" `
+            -NewText "name: Release`n# Expected five release archives"
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "old five-archive" `
+            -Scenario "legacy five-archive path"
+    }
+
+    Invoke-Scenario -Name "local signed bundle verification cannot be removed" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText "            & tests/release/verify-release-bundle.ps1 ``" `
+            -NewText "            & tests/release/not-verify-release-bundle.ps1 ``"
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "locally verify" `
+            -Scenario "missing local signed bundle verification"
+    }
+
+    Invoke-Scenario -Name "private key write must remain inside cleanup try" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText @"
+          try {
+            [IO.File]::WriteAllText(
+              `$secretPath,
+              `$env:WOKROUTER_MINISIGN_SECRET_KEY,
+              [Text.UTF8Encoding]::new(`$false)
+            )
+"@ `
+            -NewText @"
+          [IO.File]::WriteAllText(
+            `$secretPath,
+            `$env:WOKROUTER_MINISIGN_SECRET_KEY,
+            [Text.UTF8Encoding]::new(`$false)
+          )
+          try {
+"@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "covered by secure finally cleanup" `
+            -Scenario "private key write before cleanup try"
+    }
+
+    Invoke-Scenario -Name "exact unsigned inventory cannot change" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText '$items.Count -ne 16' `
+            -NewText '$items.Count -ne 15'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "require 16 payloads" `
+            -Scenario "wrong unsigned payload count"
+    }
+
+    Invoke-Scenario -Name "draft guard cannot be removed" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText ".isDraft" `
+            -NewText ".isPublished"
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "guard a draft" `
+            -Scenario "missing draft guard"
+    }
+
+    Invoke-Scenario -Name "stale draft asset cleanup cannot be removed" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText 'gh release delete-asset "$RELEASE_TAG"' `
+            -NewText 'echo keep-stale-asset "$RELEASE_TAG"'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "tag-only" `
+            -Scenario "missing draft asset cleanup"
+    }
+
+    Invoke-Scenario -Name "draft must be rechecked before upload" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText "The WokRouter draft became public before upload." `
+            -NewText "Upload without rechecking the draft."
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "guard a draft" `
+            -Scenario "missing pre-upload draft recheck"
+    }
+
+    Invoke-Scenario -Name "remote draft download cannot be removed" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText 'gh release download "$RELEASE_TAG"' `
+            -NewText 'echo skip-download "$RELEASE_TAG"'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "tag-only" `
+            -Scenario "missing remote draft download"
+    }
+
+    Invoke-Scenario -Name "remote draft verification cannot be removed" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText "          pwsh tests/release/verify-release-bundle.ps1 \" `
+            -NewText "          pwsh tests/release/not-verify-release-bundle.ps1 \"
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "upload, re-download, verify" `
+            -Scenario "missing remote draft verification"
+    }
+
+    Invoke-Scenario -Name "draft publication cannot be removed" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText "--draft=false" `
+            -NewText "--draft=true`n          # --draft=false"
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "tag-only" `
+            -Scenario "missing draft publication"
+    }
+
+    Invoke-Scenario -Name "exact signed inventory cannot change" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText '"${#local_assets[@]}" -ne 35' `
+            -NewText '"${#local_assets[@]}" -ne 34'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "35-file bundle" `
+            -Scenario "wrong signed asset count"
+    }
+
+    Invoke-Scenario -Name "release concurrency cannot be removed" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText "  cancel-in-progress: false" `
+            -NewText "  cancel-in-progress: true"
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "without cancellation" `
+            -Scenario "release transaction cancellation"
+    }
+
+    Invoke-Scenario -Name "publish must name the repository" -Test {
         $root = New-ReleaseFixture
         Edit-FixtureFile `
             -Root $root `
@@ -302,7 +508,7 @@ try {
         Assert-Rejects `
             -Root $root `
             -ExpectedText "explicit GitHub repository" `
-            -Scenario "publish without a checkout repository"
+            -Scenario "publish without an explicit repository"
     }
 
     if ($failures.Count -gt 0) {

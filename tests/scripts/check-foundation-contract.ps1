@@ -1,8 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Root,
-
-    [switch]$RequireSixTargets
+    [string]$Root
 )
 
 $ErrorActionPreference = "Stop"
@@ -621,25 +619,14 @@ function Assert-TargetMatrix {
             -Message "Workflow job '$JobName' runs-on must be '`${{ matrix.os }}'."
     }
     $jobText = $Job.Lines -join "`n"
-    if ($RequireSixTargets) {
-        $expectedPairs = @(
-            @("windows-latest", "x86_64-pc-windows-msvc"),
-            @("windows-latest", "aarch64-pc-windows-msvc"),
-            @("macos-15-intel", "x86_64-apple-darwin"),
-            @("macos-15", "aarch64-apple-darwin"),
-            @("ubuntu-24.04", "x86_64-unknown-linux-gnu"),
-            @("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu")
-        )
-    }
-    else {
-        $expectedPairs = @(
-            @("windows-latest", "x86_64-pc-windows-msvc"),
-            @("macos-15-intel", "x86_64-apple-darwin"),
-            @("macos-15", "aarch64-apple-darwin"),
-            @("ubuntu-24.04", "x86_64-unknown-linux-gnu"),
-            @("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu")
-        )
-    }
+    $expectedPairs = @(
+        @("windows-latest", "x86_64-pc-windows-msvc"),
+        @("windows-latest", "aarch64-pc-windows-msvc"),
+        @("macos-15-intel", "x86_64-apple-darwin"),
+        @("macos-14", "aarch64-apple-darwin"),
+        @("ubuntu-24.04", "x86_64-unknown-linux-gnu"),
+        @("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu")
+    )
     foreach ($pair in $expectedPairs) {
         $pattern = "(?m)^          - os: $([regex]::Escape($pair[0]))\n            target: $([regex]::Escape($pair[1]))$"
         if ($jobText -notmatch $pattern) {
@@ -650,10 +637,9 @@ function Assert-TargetMatrix {
     $targetCount = @(
         $Job.Lines | Where-Object { $_ -match "^            target: " }
     ).Count
-    $expectedTargetCount = if ($RequireSixTargets) { 6 } else { 5 }
-    if ($targetCount -ne $expectedTargetCount) {
+    if ($targetCount -ne 6) {
         Add-ContractFailure `
-            -Message "Workflow job '$JobName' must contain exactly $expectedTargetCount target entries."
+            -Message "Workflow job '$JobName' must contain exactly 6 target entries."
     }
 }
 
@@ -665,6 +651,24 @@ if ($jobs.ContainsKey("native-test-matrix")) {
         -JobName "native-test-matrix" `
         -Steps $nativeSteps `
         -Command "./tests/scripts/run-fixed-test-host.tests.ps1"
+    $fixedHostSelfTests = @(
+        $nativeSteps | Where-Object {
+            $_.Fields.ContainsKey("run") -and
+            $_.Fields["run"] -eq "./tests/scripts/run-fixed-test-host.tests.ps1"
+        }
+    )
+    $windowsX64Condition = (
+        "runner.os == 'Windows' && " +
+        "matrix.target == 'x86_64-pc-windows-msvc'"
+    )
+    if (
+        $fixedHostSelfTests.Count -ne 1 -or
+        -not $fixedHostSelfTests[0].Fields.ContainsKey("if") -or
+        $fixedHostSelfTests[0].Fields["if"] -ne $windowsX64Condition
+    ) {
+        Add-ContractFailure `
+            -Message "The fixed test host self-test must run only for the Windows x64 target."
+    }
     $fixedHostSteps = @(
         $nativeSteps | Where-Object {
             $_.Fields.ContainsKey("run") -and
@@ -677,24 +681,90 @@ if ($jobs.ContainsKey("native-test-matrix")) {
             -Message "Windows native tests must execute the workspace through the fixed test host."
     }
     else {
-        $expectedFixedHostCondition = if ($RequireSixTargets) {
-            "runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc'"
-        }
-        else {
-            "runner.os == 'Windows'"
-        }
         if (
             -not $fixedHostSteps[0].Fields.ContainsKey("if") -or
-            $fixedHostSteps[0].Fields["if"] -ne $expectedFixedHostCondition
+            $fixedHostSteps[0].Fields["if"] -ne $windowsX64Condition
         ) {
-            $message = if ($RequireSixTargets) {
-                "The fixed test host step must run only for the Windows x64 target."
-            }
-            else {
-                "The fixed test host step must run only on Windows."
-            }
-            Add-ContractFailure -Message $message
+            Add-ContractFailure `
+                -Message "The fixed test host step must run only for the Windows x64 target."
         }
+        $providerClearPattern = (
+            '(?ms)\$env:OPENAI_API_KEY = ""\n' +
+            '\$env:ANTHROPIC_API_KEY = ""\n' +
+            '\$env:GEMINI_API_KEY = ""\n' +
+            '\$env:GOOGLE_API_KEY = ""\n' +
+            '\s*& \./tests/scripts/run-fixed-test-host\.ps1'
+        )
+        if ($fixedHostSteps[0].Fields["run"] -notmatch $providerClearPattern) {
+            Add-ContractFailure `
+                -Message "Windows Rust tests must clear all four Provider keys immediately before the fixed host."
+        }
+    }
+    $arm64ToolSteps = @(
+        $nativeSteps | Where-Object {
+            $_.Fields.ContainsKey("run") -and
+            $_.Fields["run"] -match "Microsoft\.VisualStudio\.Component\.VC\.Tools\.ARM64"
+        }
+    )
+    $windowsArm64Condition = (
+        "runner.os == 'Windows' && " +
+        "matrix.target == 'aarch64-pc-windows-msvc'"
+    )
+    if (
+        $arm64ToolSteps.Count -ne 1 -or
+        -not $arm64ToolSteps[0].Fields.ContainsKey("if") -or
+        $arm64ToolSteps[0].Fields["if"] -ne $windowsArm64Condition -or
+        $arm64ToolSteps[0].Fields["run"] -notmatch "-WindowStyle Hidden"
+    ) {
+        Add-ContractFailure `
+            -Message "Windows ARM64 native checks must install the Visual C++ ARM64 tools."
+    }
+    $arm64CompileSteps = @(
+        $nativeSteps | Where-Object {
+            $_.Fields.ContainsKey("run") -and
+            $_.Fields["run"] -eq (
+                'cargo test --workspace --all-features --locked --no-run ' +
+                '--target ${{ matrix.target }}'
+            )
+        }
+    )
+    if (
+        $arm64CompileSteps.Count -ne 1 -or
+        -not $arm64CompileSteps[0].Fields.ContainsKey("if") -or
+        $arm64CompileSteps[0].Fields["if"] -ne $windowsArm64Condition
+    ) {
+        Add-ContractFailure `
+            -Message "Windows ARM64 tests must compile without running."
+    }
+    $allowedCargoRuns = @(
+        'cargo test --workspace --all-features --locked',
+        (
+            'cargo test --workspace --all-features --locked --no-run ' +
+            '--target ${{ matrix.target }}'
+        )
+    )
+    $unexpectedCargoTests = @(
+        $nativeSteps | Where-Object {
+            $_.Fields.ContainsKey("run") -and
+            $_.Fields["run"] -match "(?m)(^|\n)\s*cargo test " -and
+            $_.Fields["run"] -notin $allowedCargoRuns
+        }
+    )
+    if ($unexpectedCargoTests.Count -ne 0) {
+        Add-ContractFailure `
+            -Message "Direct Windows Cargo tests are forbidden outside the two exact native matrix paths."
+    }
+    $hashedExecutableSteps = @(
+        $nativeSteps | Where-Object {
+            $_.Fields.ContainsKey("run") -and
+            $_.Fields["run"] -match (
+                "(?im)(^|\n).*target.*[\\/]deps[\\/].*\.exe(?:\s|$)"
+            )
+        }
+    )
+    if ($hashedExecutableSteps.Count -ne 0) {
+        Add-ContractFailure `
+            -Message "Cargo hash test executables must never run directly on Windows."
     }
     $nativeCargoSteps = @(
         $nativeSteps | Where-Object {
@@ -720,6 +790,21 @@ if ($jobs.ContainsKey("target-check-matrix")) {
         -JobName "target-check-matrix" `
         -Steps $targetSteps `
         -Command 'cargo check --workspace --all-features --locked --target ${{ matrix.target }}'
+    $arm64ToolSteps = @(
+        $targetSteps | Where-Object {
+            $_.Fields.ContainsKey("run") -and
+            $_.Fields["run"] -match "Microsoft\.VisualStudio\.Component\.VC\.Tools\.ARM64"
+        }
+    )
+    if (
+        $arm64ToolSteps.Count -ne 1 -or
+        -not $arm64ToolSteps[0].Fields.ContainsKey("if") -or
+        $arm64ToolSteps[0].Fields["if"] -ne $windowsArm64Condition -or
+        $arm64ToolSteps[0].Fields["run"] -notmatch "-WindowStyle Hidden"
+    ) {
+        Add-ContractFailure `
+            -Message "Windows ARM64 target checks must install the Visual C++ ARM64 tools."
+    }
 }
 
 if ($jobs.ContainsKey("compatibility")) {
@@ -730,7 +815,11 @@ if ($jobs.ContainsKey("compatibility")) {
             "cargo test -p wokrouter-wokcore-client --test handshake legacy_same_major_runtime_without_installation_id_remains_running --locked",
             "cargo test -p wokrouter-wokcore-client --test handshake non_overlapping_api_major_is_incompatible_without_http_fallback --locked",
             "cargo test -p wokrouter-platform --features test-support --test wokcore_install an_existing_compatible_install_is_never_overwritten --locked",
-            "cargo test -p wokrouter-platform --features test-support --test wokcore_install installing_wokcore_does_not_modify_wokrouter_binary_or_version --locked"
+            "cargo test -p wokrouter-platform --features test-support --test wokcore_install installing_wokcore_does_not_modify_wokrouter_binary_or_version --locked",
+            "cargo test -p wokrouter-platform --features test-support --test wokcore_install wokcore_install_prefers_a_valid_signed_v2_release_without_requesting_v1 --locked",
+            "cargo test -p wokrouter-platform --features test-support --test wokcore_install wokcore_install_missing_v2_manifest_falls_back_to_the_signed_v1_release --locked",
+            "cargo test -p wokrouter-platform --features test-support --test wokcore_install wokcore_install_present_invalid_v2_manifest_never_downgrades_to_v1 --locked",
+            "cargo test -p wokrouter-platform --features test-support --test wokcore_install wokcore_install_rejects_a_signed_v1_schema_at_the_v2_endpoint_without_downgrading --locked"
         )) {
         Assert-JobRunStep `
             -JobName "compatibility" `

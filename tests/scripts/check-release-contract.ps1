@@ -1,8 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Root,
-
-    [switch]$RequireSixTargets
+    [string]$Root
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,6 +26,9 @@ $macPackagerPath = Join-Path `
 $windowsPackagerPath = Join-Path `
     $rootPath `
     "tests/release/package-windows-assets.ps1"
+$signerPath = Join-Path $rootPath "tests/release/sign-release-bundle.ps1"
+$verifierPath = Join-Path $rootPath "tests/release/verify-release-bundle.ps1"
+$publicKeyPath = Join-Path $rootPath "release/minisign.pub"
 $failures = [System.Collections.Generic.List[string]]::new()
 
 function Add-Failure {
@@ -53,6 +54,16 @@ function Get-JobBlock {
     return $matches[0].Value
 }
 
+function Get-SourceMatchIndex {
+    param(
+        [Parameter(Mandatory)][string] $Source,
+        [Parameter(Mandatory)][string] $Pattern
+    )
+
+    $match = [regex]::Match($Source, $Pattern)
+    return $(if ($match.Success) { $match.Index } else { -1 })
+}
+
 foreach ($path in @(
         $releasePath,
         $ciPath,
@@ -60,7 +71,10 @@ foreach ($path in @(
         $releaseContractPath,
         $linuxPackagerPath,
         $macPackagerPath,
-        $windowsPackagerPath
+        $windowsPackagerPath,
+        $signerPath,
+        $verifierPath,
+        $publicKeyPath
     )) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         Add-Failure -Message "Required release contract file is missing: $path"
@@ -159,6 +173,15 @@ if ($failures.Count -eq 0) {
     if ($release -notmatch '(?m)^permissions:\n  contents: read\s*$') {
         Add-Failure -Message "Release workflow root permissions must be contents: read."
     }
+    $concurrencyBlock = @'
+concurrency:
+  group: wokrouter-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+'@
+    if (-not $release.Contains($concurrencyBlock)) {
+        Add-Failure `
+            -Message "Release workflow must serialize the same release tag without cancellation."
+    }
 
     foreach ($providerVariable in @(
             "OPENAI_API_KEY",
@@ -209,58 +232,109 @@ if ($failures.Count -eq 0) {
     $sourceCheckout = @'
       - uses: actions/checkout@v6
         with:
+          persist-credentials: false
           ref: ${{ needs.release-version.outputs.source_sha }}
 '@
     if (-not $buildJob.Contains($sourceCheckout)) {
         Add-Failure `
             -Message "Release builds must checkout the commit resolved from the requested WokRouter tag."
     }
-    if ($RequireSixTargets) {
-        $expectedPairs = @(
-            @("windows-latest", "x86_64-pc-windows-msvc", "zip"),
-            @("windows-latest", "aarch64-pc-windows-msvc", "zip"),
-            @("macos-15-intel", "x86_64-apple-darwin", "tar.gz"),
-            @("macos-15", "aarch64-apple-darwin", "tar.gz"),
-            @("ubuntu-24.04", "x86_64-unknown-linux-gnu", "tar.gz"),
-            @("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu", "tar.gz")
-        )
-    }
-    else {
-        $expectedPairs = @(
-            @("windows-latest", "x86_64-pc-windows-msvc", "zip"),
-            @("macos-15-intel", "x86_64-apple-darwin", "tar.gz"),
-            @("macos-15", "aarch64-apple-darwin", "tar.gz"),
-            @("ubuntu-24.04", "x86_64-unknown-linux-gnu", "tar.gz"),
-            @("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu", "tar.gz")
-        )
-    }
+    $expectedPairs = @(
+        @("windows-latest", "x86_64-pc-windows-msvc"),
+        @("windows-latest", "aarch64-pc-windows-msvc"),
+        @("macos-15-intel", "x86_64-apple-darwin"),
+        @("macos-14", "aarch64-apple-darwin"),
+        @("ubuntu-24.04", "x86_64-unknown-linux-gnu"),
+        @("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu")
+    )
     foreach ($pair in $expectedPairs) {
-        $pattern = "(?m)^          - os: $([regex]::Escape($pair[0]))\n            target: $([regex]::Escape($pair[1]))\n            extension: $([regex]::Escape($pair[2]))$"
+        $pattern = "(?m)^          - os: $([regex]::Escape($pair[0]))\n            target: $([regex]::Escape($pair[1]))$"
         if ($buildJob -notmatch $pattern) {
             Add-Failure `
                 -Message "Release matrix is missing '$($pair[1])' on '$($pair[0])'."
         }
     }
-    $expectedTargetCount = if ($RequireSixTargets) { 6 } else { 5 }
     if (
         @([regex]::Matches($buildJob, '(?m)^            target: ')).Count -ne
-        $expectedTargetCount
+        6
     ) {
         Add-Failure `
-            -Message "Release build matrix must contain exactly $expectedTargetCount targets."
+            -Message "Release build matrix must contain exactly 6 targets."
     }
     foreach ($requiredText in @(
             "WOKROUTER_BUNDLE_KIND: online",
             'WOKROUTER_RELEASE_VERSION: ${{ needs.release-version.outputs.version }}',
             'WOKROUTER_TARGET_TRIPLE: ${{ matrix.target }}',
-            "Build target-specific online bundle",
-            "Package release artifact and enforce online boundary",
-            "wokrouter-online-",
-            "RELEASE-METADATA.json",
-            "contains a WokCore or legacy daemon payload"
+            "sudo apt-get install --yes --no-install-recommends",
+            'name: wokrouter-payload-${{ matrix.target }}',
+            'path: target/wokrouter-public-${{ matrix.target }}/*'
         )) {
         if (-not $buildJob.Contains($requiredText)) {
             Add-Failure -Message "Release build is missing required boundary text '$requiredText'."
+        }
+    }
+    $arm64ToolCondition = (
+        "if: runner.os == 'Windows' && " +
+        "matrix.target == 'aarch64-pc-windows-msvc'"
+    )
+    if (
+        @(
+            $buildJob -split "`n" |
+                Where-Object {
+                    $_.Trim() -ceq 'pnpm --dir apps/desktop tauri build `'
+                }
+        ).Count -ne 3 -or
+        -not $buildJob.Contains($arm64ToolCondition) -or
+        -not $buildJob.Contains(
+            "Microsoft.VisualStudio.Component.VC.Tools.ARM64"
+        ) -or
+        -not $buildJob.Contains("-WindowStyle Hidden") -or
+        $buildJob.Contains("ToolAdapterPath")
+    ) {
+        Add-Failure `
+            -Message "Release builds must run one explicit native packager path per platform and install Windows ARM64 tools."
+    }
+    foreach ($platformBuild in @(
+            @("runner.os == 'Linux'", "--bundles appimage,deb,rpm"),
+            @("runner.os == 'macOS'", "--bundles app,dmg"),
+            @("runner.os == 'Windows'", "--bundles msi")
+        )) {
+        $pattern = (
+            "(?ms)^      - name: Build .*?`n" +
+            "        if: $([regex]::Escape($platformBuild[0]))`n" +
+            ".*?$([regex]::Escape($platformBuild[1]))"
+        )
+        if ($buildJob -notmatch $pattern) {
+            Add-Failure `
+                -Message "Release build is missing the scoped '$($platformBuild[1])' command."
+        }
+        if (
+            @(
+                $buildJob -split "`n" |
+                    Where-Object {
+                        $_.Trim() -ceq "$($platformBuild[1]) ``"
+                    }
+            ).Count -ne 1
+        ) {
+            Add-Failure `
+                -Message "Release build must contain one executable '$($platformBuild[1])' line."
+        }
+    }
+    foreach ($packager in @(
+            "package-linux-assets.ps1",
+            "package-macos-assets.ps1",
+            "package-windows-assets.ps1"
+        )) {
+        if (
+            @(
+                $buildJob -split "`n" |
+                    Where-Object {
+                        $_.Trim() -ceq "& tests/release/$packager ``"
+                    }
+            ).Count -ne 1
+        ) {
+            Add-Failure `
+                -Message "Release build must execute '$packager' exactly once."
         }
     }
 
@@ -275,7 +349,11 @@ if ($failures.Count -eq 0) {
             "legacy_same_major_runtime_without_installation_id_remains_running",
             "non_overlapping_api_major_is_incompatible_without_http_fallback",
             "an_existing_compatible_install_is_never_overwritten",
-            "installing_wokcore_does_not_modify_wokrouter_binary_or_version"
+            "installing_wokcore_does_not_modify_wokrouter_binary_or_version",
+            "wokcore_install_prefers_a_valid_signed_v2_release_without_requesting_v1",
+            "wokcore_install_missing_v2_manifest_falls_back_to_the_signed_v1_release",
+            "wokcore_install_present_invalid_v2_manifest_never_downgrades_to_v1",
+            "wokcore_install_rejects_a_signed_v1_schema_at_the_v2_endpoint_without_downgrading"
         )) {
         $testPattern = "(?m)^        run: cargo test .* $([regex]::Escape($testName)) --locked$"
         if ($compatibilityJob -notmatch $testPattern) {
@@ -284,27 +362,225 @@ if ($failures.Count -eq 0) {
         }
     }
 
-    $verifyJob = Get-JobBlock -Workflow $release -Name "release-verify"
+    $verifyJob = Get-JobBlock -Workflow $release -Name "release-assemble"
     foreach ($requiredText in @(
             "release-build",
             "release-compatibility",
-            "Expected five release archives",
-            "RELEASE-METADATA.json",
-            "contains a WokCore or legacy daemon payload"
+            "merge-multiple: true",
+            "Get-WokRouterPayloadNames",
+            "WOKROUTER_MINISIGN_SECRET_KEY",
+            "sign-release-bundle.ps1",
+            "verify-release-bundle.ps1"
         )) {
         if (-not $verifyJob.Contains($requiredText)) {
             Add-Failure -Message "Release verification is missing '$requiredText'."
         }
     }
+    $assembleCheckout = @'
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          ref: ${{ needs.release-version.outputs.source_sha }}
+'@
+    if (
+        -not $verifyJob.Contains($assembleCheckout) -or
+        -not $verifyJob.Contains("sudo apt-get install --yes --no-install-recommends minisign") -or
+        -not $verifyJob.Contains("pattern: wokrouter-payload-*") -or
+        -not $verifyJob.Contains(
+            'name: wokrouter-${{ needs.release-version.outputs.tag }}-signed'
+        )
+    ) {
+        Add-Failure `
+            -Message "Release assembly must checkout the verified source and produce one exact signed bundle artifact."
+    }
+    $payloadIndex = Get-SourceMatchIndex `
+        -Source $verifyJob `
+        -Pattern '(?m)^            Get-WokRouterPayloadNames -Version '
+    $secretIndex = Get-SourceMatchIndex `
+        -Source $verifyJob `
+        -Pattern '(?m)^          WOKROUTER_MINISIGN_SECRET_KEY: '
+    $signIndex = Get-SourceMatchIndex `
+        -Source $verifyJob `
+        -Pattern '(?m)^            & tests/release/sign-release-bundle\.ps1 `\s*$'
+    $localVerifyIndex = Get-SourceMatchIndex `
+        -Source $verifyJob `
+        -Pattern '(?m)^            & tests/release/verify-release-bundle\.ps1 `\s*$'
+    $signedUploadIndex = Get-SourceMatchIndex `
+        -Source $verifyJob `
+        -Pattern '(?m)^          name: wokrouter-\$\{\{ needs\.release-version\.outputs\.tag \}\}-signed$'
+    if (
+        -not $verifyJob.Contains('$items.Count -ne 16') -or
+        $payloadIndex -lt 0 -or
+        $secretIndex -le $payloadIndex -or
+        $signIndex -le $secretIndex -or
+        $localVerifyIndex -le $signIndex -or
+        $signedUploadIndex -le $localVerifyIndex -or
+        -not $verifyJob.Contains("-PublicKeyPath release/minisign.pub")
+    ) {
+        Add-Failure `
+            -Message "Release assembly must require 16 payloads before reading the secret, then sign and locally verify before upload."
+    }
 
     $publishJob = Get-JobBlock -Workflow $release -Name "publish"
+    $draftCreateBlock = @'
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --draft \
+'@
+    $publishEditBlock = @'
+          gh release edit "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false
+'@
     if (
         $publishJob -notmatch [regex]::Escape("startsWith(github.ref, 'refs/tags/')") -or
         $publishJob -notmatch '(?m)^    permissions:\n      contents: write\s*$' -or
-        $publishJob -notmatch 'gh release create "\$RELEASE_TAG".*--verify-tag' -or
-        $publishJob -notmatch [regex]::Escape('--repo "$GITHUB_REPOSITORY"')
+        $publishJob -notmatch 'gh release create "\$RELEASE_TAG"' -or
+        $publishJob -notmatch '--verify-tag' -or
+        $publishJob -notmatch 'isDraft' -or
+        $publishJob -notmatch 'gh release delete-asset' -or
+        $publishJob -notmatch 'gh release download' -or
+        $publishJob -notmatch 'verify-release-bundle\.ps1' -or
+        $publishJob -notmatch 'gh release edit "\$RELEASE_TAG"' -or
+        $publishJob -notmatch '--draft=false' -or
+        -not $publishJob.Contains($draftCreateBlock) -or
+        -not $publishJob.Contains($publishEditBlock) -or
+        $publishJob -notmatch [regex]::Escape('--repo "$GITHUB_REPOSITORY"') -or
+        @([regex]::Matches($publishJob, '\bgh release (?:view|create|delete-asset|upload|download|edit)\b')).Count -ne
+        @([regex]::Matches(
+                $publishJob,
+                [regex]::Escape('--repo "$GITHUB_REPOSITORY"')
+            )).Count
     ) {
         Add-Failure -Message "Publishing must be tag-only, verified, scoped to contents: write, and use an explicit GitHub repository."
+    }
+    if (
+        @([regex]::Matches($release, '(?m)^\s+contents: write\s*$')).Count -ne
+        1 -or
+        $publishJob -notmatch (
+            "(?m)^    if: github\.event_name == 'push' && " +
+            "startsWith\(github\.ref, 'refs/tags/'\)$"
+        ) -or
+        -not $publishJob.Contains($assembleCheckout) -or
+        -not $publishJob.Contains(
+            'name: wokrouter-${{ needs.release-version.outputs.tag }}-signed'
+        ) -or
+        -not $publishJob.Contains("-PublicKeyPath release/minisign.pub") -or
+        -not $publishJob.Contains("Expected exactly 35 signed WokRouter assets") -or
+        -not $publishJob.Contains('"${#local_assets[@]}" -ne 35') -or
+        -not $publishJob.Contains(
+            "sudo apt-get install --yes --no-install-recommends minisign"
+        ) -or
+        -not $publishJob.Contains(
+            "The WokRouter draft became public before asset cleanup."
+        ) -or
+        $publishJob -notmatch '(?m)^              --draft \\\s*$'
+    ) {
+        Add-Failure `
+            -Message "Only a tag push may publish the exact externally verified 35-file bundle."
+    }
+    $preMutationVerify = Get-SourceMatchIndex `
+        -Source $publishJob `
+        -Pattern '(?m)^      - name: Verify the signed bundle before release mutation$'
+    $firstPublishVerify = Get-SourceMatchIndex `
+        -Source $publishJob `
+        -Pattern '(?m)^          & tests/release/verify-release-bundle\.ps1 `\s*$'
+    $releaseView = Get-SourceMatchIndex `
+        -Source $publishJob `
+        -Pattern '(?m)^            gh release view "\$RELEASE_TAG" \\$'
+    $draftGuard = Get-SourceMatchIndex `
+        -Source $publishJob `
+        -Pattern '(?m)^            if \[\[ "\$\(jq -r ''\.isDraft'''
+    $draftCreate = Get-SourceMatchIndex `
+        -Source $publishJob `
+        -Pattern '(?m)^            gh release create "\$RELEASE_TAG" \\$'
+    $assetCleanup = Get-SourceMatchIndex `
+        -Source $publishJob `
+        -Pattern '(?m)^            gh release delete-asset "\$RELEASE_TAG" "\$asset" \\$'
+    $preUploadGuard = Get-SourceMatchIndex `
+        -Source $publishJob `
+        -Pattern (
+            '(?ms)^          if \[\[ "\$\(\n' +
+            '            gh release view "\$RELEASE_TAG" \\\n' +
+            '              --repo "\$GITHUB_REPOSITORY" \\\n' +
+            '              --json isDraft \\\n' +
+            '              --jq ''\.isDraft''\n' +
+            '          \)" != "true" \]\]; then\n' +
+            '            echo "The WokRouter draft became public before upload\." >&2\n' +
+            '            exit 1\n' +
+            '          fi\n' +
+            '          gh release upload "\$RELEASE_TAG" dist/\* \\$'
+        )
+    $assetUpload = Get-SourceMatchIndex `
+        -Source $publishJob `
+        -Pattern '(?m)^          gh release upload "\$RELEASE_TAG" dist/\* \\$'
+    $remoteDownload = Get-SourceMatchIndex `
+        -Source $publishJob `
+        -Pattern '(?m)^          gh release download "\$RELEASE_TAG" \\$'
+    $remoteVerify = Get-SourceMatchIndex `
+        -Source $publishJob `
+        -Pattern '(?m)^          pwsh tests/release/verify-release-bundle\.ps1 \\$'
+    $publishRelease = Get-SourceMatchIndex `
+        -Source $publishJob `
+        -Pattern '(?m)^          gh release edit "\$RELEASE_TAG" \\$'
+    if (
+        $preMutationVerify -lt 0 -or
+        $firstPublishVerify -le $preMutationVerify -or
+        $releaseView -le $firstPublishVerify -or
+        $draftGuard -le $releaseView -or
+        $draftCreate -le $draftGuard -or
+        $assetCleanup -le $draftGuard -or
+        $preUploadGuard -le $assetCleanup -or
+        $assetUpload -le $preUploadGuard -or
+        $remoteDownload -le $assetUpload -or
+        $remoteVerify -le $remoteDownload -or
+        $publishRelease -le $remoteVerify
+    ) {
+        Add-Failure `
+            -Message "Publishing must guard a draft, clear stale draft assets, upload, re-download, verify, and only then publish."
+    }
+
+    $signingSteps = @(
+        [regex]::Matches(
+            $verifyJob,
+            "(?ms)^      - name: Sign and locally verify the release bundle\s*$.*?(?=^      - |\z)"
+        )
+    )
+    $signingStep = if ($signingSteps.Count -eq 1) {
+        $signingSteps[0].Value
+    }
+    else {
+        ""
+    }
+    $releaseWithoutSigningStep = if ($signingStep -eq "") {
+        $release
+    }
+    else {
+        $release.Replace($signingStep, "")
+    }
+    if (
+        $signingStep -eq "" -or
+        -not $signingStep.Contains("WOKROUTER_MINISIGN_SECRET_KEY") -or
+        $releaseWithoutSigningStep.Contains("WOKROUTER_MINISIGN_SECRET_KEY")
+    ) {
+        Add-Failure `
+            -Message "The WOKROUTER_MINISIGN_SECRET_KEY secret must appear only in the release-assemble signing step."
+    }
+    if (
+        $signingStep -notmatch (
+            '(?ms)try \{\n\s+\[IO\.File\]::WriteAllText\(.*?' +
+            'sign-release-bundle\.ps1.*?finally \{.*?' +
+            '\[IO\.File\]::WriteAllBytes\(.*?' +
+            'Remove-Item -LiteralPath \$secretPath -Force'
+        )
+    ) {
+        Add-Failure `
+            -Message "The plaintext Minisign key write must be covered by secure finally cleanup."
+    }
+    if ($release.Contains("Expected five release archives")) {
+        Add-Failure `
+            -Message "The old five-archive release verification path must be removed."
     }
 
     foreach ($requiredFact in @(
@@ -315,7 +591,11 @@ if ($failures.Count -eq 0) {
             "aarch64-unknown-linux-gnu",
             "online WokRouter",
             "WokRouter tag",
-            "independent"
+            "independent",
+            "exactly 16",
+            "exactly 35",
+            "release/minisign.pub",
+            "immutable"
         )) {
         if ($development -notmatch [regex]::Escape($requiredFact)) {
             Add-Failure `

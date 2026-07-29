@@ -108,9 +108,11 @@ jobs:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
           - os: macos-15-intel
             target: x86_64-apple-darwin
-          - os: macos-15
+          - os: macos-14
             target: aarch64-apple-darwin
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
@@ -134,23 +136,61 @@ jobs:
         with:
           toolchain: 1.97.1
           target: ${{ matrix.target }}
+      - name: Install Visual C++ ARM64 tools
+        if: runner.os == 'Windows' && matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $installerDirectory = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer"
+          $installer = Join-Path $installerDirectory "vs_installer.exe"
+          $vswhere = Join-Path $installerDirectory "vswhere.exe"
+          $installationPath = (& $vswhere -latest -products * -property installationPath).Trim()
+          if (
+            -not (Test-Path -LiteralPath $installer -PathType Leaf) -or
+            [string]::IsNullOrWhiteSpace($installationPath)
+          ) {
+            throw "Visual Studio Installer could not be resolved."
+          }
+          $process = Start-Process `
+            -FilePath $installer `
+            -ArgumentList @(
+              "modify",
+              "--installPath",
+              "`"$installationPath`"",
+              "--add",
+              "Microsoft.VisualStudio.Component.VC.Tools.ARM64",
+              "--quiet",
+              "--norestart"
+            ) `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden
+          if ($process.ExitCode -notin @(0, 3010)) {
+            throw "Visual C++ ARM64 tools installation failed: $($process.ExitCode)"
+          }
       - name: Stage native WokRouter sidecar
         env:
           WOKROUTER_TARGET_TRIPLE: ${{ matrix.target }}
         run: node apps/desktop/scripts/stage-sidecars.mjs
       - name: Self-test fixed Windows test host
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: ./tests/scripts/run-fixed-test-host.tests.ps1
       - name: Test workspace through fixed Windows host
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: |
           $targetDirectory = Join-Path $env:RUNNER_TEMP "wokrouter-target"
+          $env:OPENAI_API_KEY = ""
+          $env:ANTHROPIC_API_KEY = ""
+          $env:GEMINI_API_KEY = ""
+          $env:GOOGLE_API_KEY = ""
           & ./tests/scripts/run-fixed-test-host.ps1 `
             -TargetDirectory $targetDirectory `
             -RepositoryRoot $PWD `
             -HarnessArguments @("--nocapture")
+      - name: Compile Windows ARM64 tests without running them
+        if: runner.os == 'Windows' && matrix.target == 'aarch64-pc-windows-msvc'
+        run: cargo test --workspace --all-features --locked --no-run --target ${{ matrix.target }}
       - name: Test workspace natively
         if: runner.os != 'Windows'
         run: cargo test --workspace --all-features --locked
@@ -163,9 +203,11 @@ jobs:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
           - os: macos-15-intel
             target: x86_64-apple-darwin
-          - os: macos-15
+          - os: macos-14
             target: aarch64-apple-darwin
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
@@ -189,6 +231,37 @@ jobs:
         with:
           toolchain: 1.97.1
           target: ${{ matrix.target }}
+      - name: Install Visual C++ ARM64 tools
+        if: runner.os == 'Windows' && matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $installerDirectory = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer"
+          $installer = Join-Path $installerDirectory "vs_installer.exe"
+          $vswhere = Join-Path $installerDirectory "vswhere.exe"
+          $installationPath = (& $vswhere -latest -products * -property installationPath).Trim()
+          if (
+            -not (Test-Path -LiteralPath $installer -PathType Leaf) -or
+            [string]::IsNullOrWhiteSpace($installationPath)
+          ) {
+            throw "Visual Studio Installer could not be resolved."
+          }
+          $process = Start-Process `
+            -FilePath $installer `
+            -ArgumentList @(
+              "modify",
+              "--installPath",
+              "`"$installationPath`"",
+              "--add",
+              "Microsoft.VisualStudio.Component.VC.Tools.ARM64",
+              "--quiet",
+              "--norestart"
+            ) `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden
+          if ($process.ExitCode -notin @(0, 3010)) {
+            throw "Visual C++ ARM64 tools installation failed: $($process.ExitCode)"
+          }
       - name: Stage target WokRouter sidecar
         env:
           WOKROUTER_TARGET_TRIPLE: ${{ matrix.target }}
@@ -216,6 +289,14 @@ jobs:
         run: cargo test -p wokrouter-platform --features test-support --test wokcore_install an_existing_compatible_install_is_never_overwritten --locked
       - name: WokCore install leaves WokRouter binary and version untouched
         run: cargo test -p wokrouter-platform --features test-support --test wokcore_install installing_wokcore_does_not_modify_wokrouter_binary_or_version --locked
+      - name: Prefer a valid signed WokCore v2 release
+        run: cargo test -p wokrouter-platform --features test-support --test wokcore_install wokcore_install_prefers_a_valid_signed_v2_release_without_requesting_v1 --locked
+      - name: Fall back when the WokCore v2 manifest is missing
+        run: cargo test -p wokrouter-platform --features test-support --test wokcore_install wokcore_install_missing_v2_manifest_falls_back_to_the_signed_v1_release --locked
+      - name: Never downgrade from a present invalid WokCore v2 manifest
+        run: cargo test -p wokrouter-platform --features test-support --test wokcore_install wokcore_install_present_invalid_v2_manifest_never_downgrades_to_v1 --locked
+      - name: Reject a WokCore v1 schema served from the v2 endpoint
+        run: cargo test -p wokrouter-platform --features test-support --test wokcore_install wokcore_install_rejects_a_signed_v1_schema_at_the_v2_endpoint_without_downgrading --locked
 
   platform-check:
     name: platform-check

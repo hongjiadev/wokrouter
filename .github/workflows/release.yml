@@ -14,6 +14,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: wokrouter-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
 env:
   ANTHROPIC_API_KEY: ""
   CARGO_TERM_COLOR: always
@@ -68,19 +72,16 @@ jobs:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            extension: zip
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
           - os: macos-15-intel
             target: x86_64-apple-darwin
-            extension: tar.gz
-          - os: macos-15
+          - os: macos-14
             target: aarch64-apple-darwin
-            extension: tar.gz
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            extension: tar.gz
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            extension: tar.gz
     runs-on: ${{ matrix.os }}
     env:
       WOKROUTER_BUNDLE_KIND: online
@@ -90,22 +91,56 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          persist-credentials: false
           ref: ${{ needs.release-version.outputs.source_sha }}
       - name: Install Tauri system dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends \
+          sudo apt-get install --yes --no-install-recommends \
             build-essential \
+            cpio \
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libssl-dev \
             libwebkit2gtk-4.1-dev \
-            libxdo-dev
+            libxdo-dev \
+            rpm
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: 1.97.1
           target: ${{ matrix.target }}
+      - name: Install Visual C++ ARM64 tools
+        if: runner.os == 'Windows' && matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $installerDirectory = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer"
+          $installer = Join-Path $installerDirectory "vs_installer.exe"
+          $vswhere = Join-Path $installerDirectory "vswhere.exe"
+          $installationPath = (& $vswhere -latest -products * -property installationPath).Trim()
+          if (
+            -not (Test-Path -LiteralPath $installer -PathType Leaf) -or
+            [string]::IsNullOrWhiteSpace($installationPath)
+          ) {
+            throw "Visual Studio Installer could not be resolved."
+          }
+          $process = Start-Process `
+            -FilePath $installer `
+            -ArgumentList @(
+              "modify",
+              "--installPath",
+              "`"$installationPath`"",
+              "--add",
+              "Microsoft.VisualStudio.Component.VC.Tools.ARM64",
+              "--quiet",
+              "--norestart"
+            ) `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden
+          if ($process.ExitCode -notin @(0, 3010)) {
+            throw "Visual C++ ARM64 tools installation failed: $($process.ExitCode)"
+          }
       - uses: pnpm/action-setup@v6
         with:
           version: 11.17.0
@@ -117,59 +152,80 @@ jobs:
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
       - name: Install frontend dependencies
         run: pnpm --dir apps/desktop install --frozen-lockfile
-      - name: Build target-specific online bundle
+      - name: Configure target-specific online bundle
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path target -Force | Out-Null
           @{ version = $env:WOKROUTER_RELEASE_VERSION } |
             ConvertTo-Json -Compress |
             Set-Content -LiteralPath target/wokrouter-release-config.json -Encoding utf8
+      - name: Build Linux bundles
+        if: runner.os == 'Linux'
+        shell: pwsh
+        run: |
           pnpm --dir apps/desktop tauri build `
             --target $env:WOKROUTER_TARGET_TRIPLE `
+            --bundles appimage,deb,rpm `
             --config ../../target/wokrouter-release-config.json
-      - name: Package release artifact and enforce online boundary
-        id: package
+      - name: Build macOS bundles
+        if: runner.os == 'macOS'
         shell: pwsh
-        env:
-          ARCHIVE_EXTENSION: ${{ matrix.extension }}
         run: |
-          $name = "wokrouter-$env:WOKROUTER_RELEASE_TAG-$env:WOKROUTER_TARGET_TRIPLE"
-          $packageRoot = Join-Path target "wokrouter-release/$name"
-          New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
+          pnpm --dir apps/desktop tauri build `
+            --target $env:WOKROUTER_TARGET_TRIPLE `
+            --bundles app,dmg `
+            --config ../../target/wokrouter-release-config.json
+      - name: Build Windows bundle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          pnpm --dir apps/desktop tauri build `
+            --target $env:WOKROUTER_TARGET_TRIPLE `
+            --bundles msi `
+            --config ../../target/wokrouter-release-config.json
+      - name: Package normalized Linux payloads
+        if: runner.os == 'Linux'
+        shell: pwsh
+        run: |
           $tauriBundle = Join-Path target "$env:WOKROUTER_TARGET_TRIPLE/release/bundle"
-          $onlineBundle = Join-Path target "wokrouter-bundles/wokrouter-online-$env:WOKROUTER_TARGET_TRIPLE"
-          if (-not (Test-Path -LiteralPath $tauriBundle -PathType Container)) {
-            throw "Tauri bundle is missing: $tauriBundle"
-          }
-          if (-not (Test-Path -LiteralPath $onlineBundle -PathType Container)) {
-            throw "Online bundle is missing: $onlineBundle"
-          }
-          Copy-Item -LiteralPath $tauriBundle -Destination (Join-Path $packageRoot "installers") -Recurse
-          Copy-Item -LiteralPath $onlineBundle -Destination (Join-Path $packageRoot "lifecycle") -Recurse
-          @{
-            product = "wokrouter"
-            tag = $env:WOKROUTER_RELEASE_TAG
-            target = $env:WOKROUTER_TARGET_TRIPLE
-            version = $env:WOKROUTER_RELEASE_VERSION
-          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $packageRoot "RELEASE-METADATA.json") -Encoding utf8
-          $forbidden = Get-ChildItem -LiteralPath $packageRoot -Recurse |
-            Where-Object {
-              $_.Name -match '(?i)(^|[-_.])(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen)($|[-_.])'
-            }
-          if ($forbidden) {
-            throw "Online WokRouter artifact contains a WokCore or legacy daemon payload."
-          }
-          $archive = Join-Path target "$name.$env:ARCHIVE_EXTENSION"
-          if ($env:ARCHIVE_EXTENSION -eq "zip") {
-            Compress-Archive -LiteralPath $packageRoot -DestinationPath $archive
-          } else {
-            tar -czf $archive -C (Split-Path -Parent $packageRoot) (Split-Path -Leaf $packageRoot)
-          }
-          "archive=$archive" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $output = Join-Path target "wokrouter-public-$env:WOKROUTER_TARGET_TRIPLE"
+          & tests/release/package-linux-assets.ps1 `
+            -BundleDirectory $tauriBundle `
+            -OutputDirectory $output `
+            -Version $env:WOKROUTER_RELEASE_VERSION `
+            -Target $env:WOKROUTER_TARGET_TRIPLE
+      - name: Package normalized macOS payloads
+        if: runner.os == 'macOS'
+        shell: pwsh
+        run: |
+          $tauriBundle = Join-Path target "$env:WOKROUTER_TARGET_TRIPLE/release/bundle"
+          $output = Join-Path target "wokrouter-public-$env:WOKROUTER_TARGET_TRIPLE"
+          & tests/release/package-macos-assets.ps1 `
+            -BundleDirectory $tauriBundle `
+            -OutputDirectory $output `
+            -Version $env:WOKROUTER_RELEASE_VERSION `
+            -Target $env:WOKROUTER_TARGET_TRIPLE
+      - name: Package normalized Windows payloads
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $releaseRoot = Join-Path target "$env:WOKROUTER_TARGET_TRIPLE/release"
+          $tauriBundle = Join-Path $releaseRoot "bundle"
+          $desktop = Join-Path $releaseRoot "wokrouter-desktop.exe"
+          $sidecar = Join-Path $releaseRoot "wokrouter.exe"
+          $output = Join-Path target "wokrouter-public-$env:WOKROUTER_TARGET_TRIPLE"
+          & tests/release/package-windows-assets.ps1 `
+            -BundleDirectory $tauriBundle `
+            -DesktopExecutable $desktop `
+            -SidecarExecutable $sidecar `
+            -RepositoryRoot $PWD `
+            -OutputDirectory $output `
+            -Version $env:WOKROUTER_RELEASE_VERSION `
+            -Target $env:WOKROUTER_TARGET_TRIPLE
       - uses: actions/upload-artifact@v6
         with:
-          name: wokrouter-${{ needs.release-version.outputs.tag }}-${{ matrix.target }}
-          path: ${{ steps.package.outputs.archive }}
+          name: wokrouter-payload-${{ matrix.target }}
+          path: target/wokrouter-public-${{ matrix.target }}/*
           if-no-files-found: error
 
   release-compatibility:
@@ -179,6 +235,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          persist-credentials: false
           ref: ${{ needs.release-version.outputs.source_sha }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -195,96 +252,261 @@ jobs:
         run: cargo test -p wokrouter-platform --features test-support --test wokcore_install an_existing_compatible_install_is_never_overwritten --locked
       - name: WokCore install does not modify WokRouter
         run: cargo test -p wokrouter-platform --features test-support --test wokcore_install installing_wokcore_does_not_modify_wokrouter_binary_or_version --locked
+      - name: Prefer a valid signed WokCore v2 release
+        run: cargo test -p wokrouter-platform --features test-support --test wokcore_install wokcore_install_prefers_a_valid_signed_v2_release_without_requesting_v1 --locked
+      - name: Fall back when the WokCore v2 manifest is missing
+        run: cargo test -p wokrouter-platform --features test-support --test wokcore_install wokcore_install_missing_v2_manifest_falls_back_to_the_signed_v1_release --locked
+      - name: Never downgrade from a present invalid WokCore v2 manifest
+        run: cargo test -p wokrouter-platform --features test-support --test wokcore_install wokcore_install_present_invalid_v2_manifest_never_downgrades_to_v1 --locked
+      - name: Reject a WokCore v1 schema served from the v2 endpoint
+        run: cargo test -p wokrouter-platform --features test-support --test wokcore_install wokcore_install_rejects_a_signed_v1_schema_at_the_v2_endpoint_without_downgrading --locked
 
-  release-verify:
-    name: release-verify
+  release-assemble:
+    name: release-assemble
     needs:
       - release-version
       - release-build
       - release-compatibility
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          ref: ${{ needs.release-version.outputs.source_sha }}
+      - name: Install Minisign
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends minisign
+      - name: Prepare clean payload directory
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath dist) {
+            throw "The payload directory must start absent."
+          }
+          New-Item -ItemType Directory -Path dist | Out-Null
       - uses: actions/download-artifact@v7
         with:
-          pattern: wokrouter-${{ needs.release-version.outputs.tag }}-*
-          path: artifacts
-      - name: Verify five independent WokRouter artifacts
+          pattern: wokrouter-payload-*
+          path: dist
+          merge-multiple: true
+      - name: Require the exact unsigned payload inventory
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ needs.release-version.outputs.tag }}
           RELEASE_VERSION: ${{ needs.release-version.outputs.version }}
         run: |
-          $targets = @(
-            "x86_64-pc-windows-msvc",
-            "x86_64-apple-darwin",
-            "aarch64-apple-darwin",
-            "x86_64-unknown-linux-gnu",
-            "aarch64-unknown-linux-gnu"
+          Import-Module tests/release/WokRouter.ReleaseContract.psm1 -Force
+          [string[]] $expected = @(
+            Get-WokRouterPayloadNames -Version $env:RELEASE_VERSION
           )
-          $archives = @(Get-ChildItem -LiteralPath artifacts -Recurse -File)
-          if ($archives.Count -ne $targets.Count) {
-            throw "Expected five release archives, found $($archives.Count)."
-          }
-          foreach ($target in $targets) {
-            $expected = if ($target -eq "x86_64-pc-windows-msvc") {
-              "wokrouter-$env:RELEASE_TAG-$target.zip"
-            } else {
-              "wokrouter-$env:RELEASE_TAG-$target.tar.gz"
-            }
-            $archive = @($archives | Where-Object Name -eq $expected)
-            if ($archive.Count -ne 1) {
-              throw "Expected exactly one $expected archive."
-            }
-            $extract = Join-Path $env:RUNNER_TEMP "verify-$target"
-            New-Item -ItemType Directory -Path $extract -Force | Out-Null
-            if ($expected.EndsWith(".zip")) {
-              Expand-Archive -LiteralPath $archive[0].FullName -DestinationPath $extract
-            } else {
-              tar -xzf $archive[0].FullName -C $extract
-            }
-            $metadataFiles = @(Get-ChildItem -LiteralPath $extract -Recurse -Filter RELEASE-METADATA.json)
-            if ($metadataFiles.Count -ne 1) {
-              throw "$expected must contain exactly one release metadata file."
-            }
-            $metadata = Get-Content -LiteralPath $metadataFiles[0].FullName -Raw | ConvertFrom-Json
-            if (
-              $metadata.product -ne "wokrouter" -or
-              $metadata.tag -ne $env:RELEASE_TAG -or
-              $metadata.version -ne $env:RELEASE_VERSION -or
-              $metadata.target -ne $target
-            ) {
-              throw "$expected metadata does not match the WokRouter tag and target."
-            }
-            $forbidden = Get-ChildItem -LiteralPath $extract -Recurse |
-              Where-Object {
-                $_.Name -match '(?i)(^|[-_.])(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen)($|[-_.])'
+          $items = @(Get-ChildItem -LiteralPath dist -Force)
+          if (
+            $items.Count -ne 16 -or
+            @(
+              $items | Where-Object {
+                $_.PSIsContainer -or
+                ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
               }
-            if ($forbidden) {
-              throw "$expected contains a WokCore or legacy daemon payload."
+            ).Count -ne 0
+          ) {
+            throw "Expected exactly 16 regular WokRouter payloads."
+          }
+          [string[]] $actual = @($items | ForEach-Object Name)
+          [Array]::Sort($actual, [StringComparer]::Ordinal)
+          if (
+            [string]::Join("`n", $actual) -cne
+            [string]::Join("`n", $expected)
+          ) {
+            throw "Unsigned WokRouter payload inventory does not match."
+          }
+      - name: Sign and locally verify the release bundle
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.release-version.outputs.version }}
+          WOKROUTER_MINISIGN_SECRET_KEY: ${{ secrets.WOKROUTER_MINISIGN_SECRET_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WOKROUTER_MINISIGN_SECRET_KEY)) {
+            throw "WOKROUTER_MINISIGN_SECRET_KEY must not be empty."
+          }
+          $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP)
+          $secretPath = [IO.Path]::GetFullPath(
+            (Join-Path $runnerTemp "wokrouter-minisign.key")
+          )
+          if (
+            (Split-Path -Parent $secretPath) -cne $runnerTemp -or
+            (Split-Path -Leaf $secretPath) -cne "wokrouter-minisign.key" -or
+            (Test-Path -LiteralPath $secretPath)
+          ) {
+            throw "The temporary Minisign key path is not clean and exact."
+          }
+          try {
+            [IO.File]::WriteAllText(
+              $secretPath,
+              $env:WOKROUTER_MINISIGN_SECRET_KEY,
+              [Text.UTF8Encoding]::new($false)
+            )
+            & tests/release/sign-release-bundle.ps1 `
+              -ArtifactDirectory dist `
+              -Version $env:RELEASE_VERSION `
+              -SecretKeyPath $secretPath `
+              -PublicKeyPath release/minisign.pub `
+              -MinisignPath (Get-Command minisign).Source
+            & tests/release/verify-release-bundle.ps1 `
+              -ArtifactDirectory dist `
+              -Version $env:RELEASE_VERSION `
+              -PublicKeyPath release/minisign.pub `
+              -MinisignPath (Get-Command minisign).Source
+          }
+          finally {
+            if (Test-Path -LiteralPath $secretPath -PathType Leaf) {
+              try {
+                $length = (Get-Item -LiteralPath $secretPath).Length
+                [IO.File]::WriteAllBytes(
+                  $secretPath,
+                  [byte[]]::new($length)
+                )
+              }
+              finally {
+                Remove-Item -LiteralPath $secretPath -Force
+              }
+            }
+            if (Test-Path -LiteralPath $secretPath) {
+              throw "The temporary Minisign key was not removed."
             }
           }
       - uses: actions/upload-artifact@v6
         with:
-          name: wokrouter-${{ needs.release-version.outputs.tag }}-verified
-          path: artifacts
+          name: wokrouter-${{ needs.release-version.outputs.tag }}-signed
+          path: dist/*
           if-no-files-found: error
 
   publish:
     name: publish
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs:
       - release-version
-      - release-verify
+      - release-assemble
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          ref: ${{ needs.release-version.outputs.source_sha }}
+      - name: Install Minisign
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends minisign
+      - name: Prepare clean signed bundle directory
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath dist) {
+            throw "The signed bundle directory must start absent."
+          }
+          New-Item -ItemType Directory -Path dist | Out-Null
       - uses: actions/download-artifact@v7
         with:
-          name: wokrouter-${{ needs.release-version.outputs.tag }}-verified
-          path: artifacts
-      - name: Publish verified WokRouter archives
+          name: wokrouter-${{ needs.release-version.outputs.tag }}-signed
+          path: dist
+      - name: Verify the signed bundle before release mutation
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.release-version.outputs.version }}
+        run: |
+          & tests/release/verify-release-bundle.ps1 `
+            -ArtifactDirectory dist `
+            -Version $env:RELEASE_VERSION `
+            -PublicKeyPath release/minisign.pub `
+            -MinisignPath (Get-Command minisign).Source
+      - name: Publish one verified draft transaction
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.release-version.outputs.tag }}
-        run: gh release create "$RELEASE_TAG" artifacts/**/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+          RELEASE_VERSION: ${{ needs.release-version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          error_file="$RUNNER_TEMP/wokrouter-release-view-error"
+          if existing="$(
+            gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,tagName 2>"$error_file"
+          )"; then
+            if [[ "$(jq -r '.isDraft' <<<"$existing")" != "true" ]]; then
+              echo "An existing public WokRouter release is immutable." >&2
+              exit 1
+            fi
+            if [[ "$(jq -r '.tagName' <<<"$existing")" != "$RELEASE_TAG" ]]; then
+              echo "The existing draft tag does not match." >&2
+              exit 1
+            fi
+          else
+            if ! grep -Eq 'release not found|HTTP 404' "$error_file"; then
+              cat "$error_file" >&2
+              exit 1
+            fi
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --draft \
+              --title "WokRouter $RELEASE_TAG" \
+              --generate-notes
+          fi
+
+          mapfile -t existing_assets < <(
+            gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json assets \
+              --jq '.assets[].name'
+          )
+          for asset in "${existing_assets[@]}"; do
+            if [[ "$(
+              gh release view "$RELEASE_TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --json isDraft \
+                --jq '.isDraft'
+            )" != "true" ]]; then
+              echo "The WokRouter draft became public before asset cleanup." >&2
+              exit 1
+            fi
+            gh release delete-asset "$RELEASE_TAG" "$asset" \
+              --repo "$GITHUB_REPOSITORY" \
+              --yes
+          done
+
+          mapfile -t local_assets < <(
+            find dist -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort
+          )
+          if [[ "${#local_assets[@]}" -ne 35 ]]; then
+            echo "Expected exactly 35 signed WokRouter assets." >&2
+            exit 1
+          fi
+          if [[ "$(
+            gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json isDraft \
+              --jq '.isDraft'
+          )" != "true" ]]; then
+            echo "The WokRouter draft became public before upload." >&2
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY"
+
+          remote="$RUNNER_TEMP/wokrouter-remote-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [[ -e "$remote" ]]; then
+            echo "The remote verification directory must start absent." >&2
+            exit 1
+          fi
+          mkdir "$remote"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$remote"
+          pwsh tests/release/verify-release-bundle.ps1 \
+            -ArtifactDirectory "$remote" \
+            -Version "$RELEASE_VERSION" \
+            -PublicKeyPath release/minisign.pub \
+            -MinisignPath "$(command -v minisign)"
+          gh release edit "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false

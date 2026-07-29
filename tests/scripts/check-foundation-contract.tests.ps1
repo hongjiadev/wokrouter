@@ -55,26 +55,6 @@ function Edit-Workflow {
     Set-Content -LiteralPath $path -Value $content.Replace($OldText, $NewText) -Encoding UTF8
 }
 
-function Add-WindowsArm64Targets {
-    param(
-        [Parameter(Mandatory)]
-        [string]$Root
-    )
-
-    Edit-Workflow `
-        -Root $Root `
-        -OldText @"
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-"@ `
-        -NewText @"
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-"@
-}
-
 function Set-FixedHostCondition {
     param(
         [Parameter(Mandatory)]
@@ -88,7 +68,7 @@ function Set-FixedHostCondition {
         -Root $Root `
         -OldText @"
       - name: Test workspace through fixed Windows host
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc'
 "@ `
         -NewText @"
       - name: Test workspace through fixed Windows host
@@ -99,9 +79,7 @@ function Set-FixedHostCondition {
 function Invoke-ContractCheck {
     param(
         [Parameter(Mandatory)]
-        [string]$Root,
-
-        [switch]$RequireSixTargets
+        [string]$Root
     )
 
     $arguments = @("-NoProfile")
@@ -109,10 +87,6 @@ function Invoke-ContractCheck {
         $arguments += @("-ExecutionPolicy", "Bypass")
     }
     $arguments += @("-File", $scriptUnderTest, "-Root", $Root)
-    if ($RequireSixTargets) {
-        $arguments += "-RequireSixTargets"
-    }
-
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
@@ -135,14 +109,10 @@ function Assert-ContractPasses {
         [string]$Root,
 
         [Parameter(Mandatory)]
-        [string]$Scenario,
-
-        [switch]$RequireSixTargets
+        [string]$Scenario
     )
 
-    $result = Invoke-ContractCheck `
-        -Root $Root `
-        -RequireSixTargets:$RequireSixTargets
+    $result = Invoke-ContractCheck -Root $Root
     if ($result.ExitCode -ne 0) {
         throw "$Scenario should pass, but exited $($result.ExitCode): $($result.Output)"
     }
@@ -157,14 +127,10 @@ function Assert-ContractRejects {
         [string]$ExpectedText,
 
         [Parameter(Mandatory)]
-        [string]$Scenario,
-
-        [switch]$RequireSixTargets
+        [string]$Scenario
     )
 
-    $result = Invoke-ContractCheck `
-        -Root $Root `
-        -RequireSixTargets:$RequireSixTargets
+    $result = Invoke-ContractCheck -Root $Root
     if ($result.ExitCode -ne 1) {
         throw "$Scenario should exit 1, but exited $($result.ExitCode): $($result.Output)"
     }
@@ -199,63 +165,73 @@ try {
         Assert-ContractPasses -Root $root -Scenario "real workflow fixture"
     }
 
-    Invoke-Scenario -Name "six-target matrices accept Windows arm64" -Test {
+    Invoke-Scenario -Name "macOS arm64 must use the macos-14 runner" -Test {
         $root = New-ContractFixture
-        Add-WindowsArm64Targets -Root $root
-        Set-FixedHostCondition `
+        Edit-Workflow `
             -Root $root `
-            -Condition "runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc'"
-        Assert-ContractPasses `
+            -OldText @"
+          - os: macos-14
+            target: aarch64-apple-darwin
+"@ `
+            -NewText @"
+          - os: macos-15
+            target: aarch64-apple-darwin
+"@
+        Assert-ContractRejects `
             -Root $root `
-            -Scenario "six-target workflow fixture" `
-            -RequireSixTargets
+            -ExpectedText "macos-14" `
+            -Scenario "wrong macOS arm64 runner"
     }
 
-    Invoke-Scenario -Name "six-target fixed host cannot run on both Windows targets" -Test {
+    Invoke-Scenario -Name "fixed host self-test cannot run on both Windows targets" -Test {
         $root = New-ContractFixture
-        Add-WindowsArm64Targets -Root $root
+        Edit-Workflow `
+            -Root $root `
+            -OldText @"
+      - name: Self-test fixed Windows test host
+        if: runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc'
+"@ `
+            -NewText @"
+      - name: Self-test fixed Windows test host
+        if: runner.os == 'Windows'
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "self-test" `
+            -Scenario "over-wide fixed host self-test condition"
+    }
+
+    Invoke-Scenario -Name "fixed host cannot run on both Windows targets" -Test {
+        $root = New-ContractFixture
+        Set-FixedHostCondition `
+            -Root $root `
+            -Condition "runner.os == 'Windows'"
         Assert-ContractRejects `
             -Root $root `
             -ExpectedText "Windows x64 target" `
-            -Scenario "over-wide six-target fixed host condition" `
-            -RequireSixTargets
+            -Scenario "over-wide fixed host condition"
     }
 
-    Invoke-Scenario -Name "six-target fixed host cannot run on Windows arm64" -Test {
+    Invoke-Scenario -Name "fixed host cannot run on Windows arm64" -Test {
         $root = New-ContractFixture
-        Add-WindowsArm64Targets -Root $root
         Set-FixedHostCondition `
             -Root $root `
             -Condition "runner.os == 'Windows' && matrix.target == 'aarch64-pc-windows-msvc'"
         Assert-ContractRejects `
             -Root $root `
             -ExpectedText "Windows x64 target" `
-            -Scenario "Windows arm64 fixed host condition" `
-            -RequireSixTargets
+            -Scenario "Windows arm64 fixed host condition"
     }
 
-    Invoke-Scenario -Name "six-target fixed host cannot name another target" -Test {
+    Invoke-Scenario -Name "fixed host cannot name another target" -Test {
         $root = New-ContractFixture
-        Add-WindowsArm64Targets -Root $root
         Set-FixedHostCondition `
             -Root $root `
             -Condition "runner.os == 'Windows' && matrix.target == 'x86_64-unknown-linux-gnu'"
         Assert-ContractRejects `
             -Root $root `
             -ExpectedText "Windows x64 target" `
-            -Scenario "non-Windows target fixed host condition" `
-            -RequireSixTargets
-    }
-
-    Invoke-Scenario -Name "five-target fixed host remains Windows-wide" -Test {
-        $root = New-ContractFixture
-        Set-FixedHostCondition `
-            -Root $root `
-            -Condition "runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc'"
-        Assert-ContractRejects `
-            -Root $root `
-            -ExpectedText "only on Windows" `
-            -Scenario "over-narrow five-target fixed host condition"
+            -Scenario "non-Windows target fixed host condition"
     }
 
     Invoke-Scenario -Name "Windows fixed test host cannot be removed" -Test {
@@ -282,6 +258,39 @@ try {
             -Scenario "unguarded direct Cargo test"
     }
 
+    Invoke-Scenario -Name "an additional direct Windows Cargo test cannot be added" -Test {
+        $root = New-ContractFixture
+        Edit-Workflow `
+            -Root $root `
+            -OldText @"
+      - name: Test workspace natively
+        if: runner.os != 'Windows'
+"@ `
+            -NewText @"
+      - name: Direct Windows Cargo test
+        if: runner.os == 'Windows'
+        run: cargo test -p wokrouter-platform --locked
+      - name: Test workspace natively
+        if: runner.os != 'Windows'
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "Direct Windows Cargo tests" `
+            -Scenario "additional direct Windows Cargo test"
+    }
+
+    Invoke-Scenario -Name "Cargo hash test executables cannot run directly" -Test {
+        $root = New-ContractFixture
+        Edit-Workflow `
+            -Root $root `
+            -OldText "        run: cargo test --workspace --all-features --locked --no-run --target `${{ matrix.target }}" `
+            -NewText "        run: ./target/debug/deps/wokrouter-0123456789abcdef.exe"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "hash test executables" `
+            -Scenario "direct Cargo hash test executable"
+    }
+
     Invoke-Scenario -Name "provider credentials must remain empty" -Test {
         $root = New-ContractFixture
         Edit-Workflow `
@@ -292,6 +301,42 @@ try {
             -Root $root `
             -ExpectedText "OPENAI_API_KEY" `
             -Scenario "non-empty provider environment"
+    }
+
+    Invoke-Scenario -Name "provider credentials must be cleared before the fixed host" -Test {
+        $root = New-ContractFixture
+        Edit-Workflow `
+            -Root $root `
+            -OldText '          $env:GEMINI_API_KEY = ""' `
+            -NewText '          $env:GEMINI_API_KEY = "inherited"'
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "all four Provider keys" `
+            -Scenario "missing fixed-host Provider clearing"
+    }
+
+    Invoke-Scenario -Name "Windows arm64 tests cannot execute" -Test {
+        $root = New-ContractFixture
+        Edit-Workflow `
+            -Root $root `
+            -OldText " --no-run --target `${{ matrix.target }}" `
+            -NewText " --target `${{ matrix.target }}"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "compile without running" `
+            -Scenario "Windows arm64 Cargo tests without no-run"
+    }
+
+    Invoke-Scenario -Name "Windows arm64 tools cannot be removed" -Test {
+        $root = New-ContractFixture
+        Edit-Workflow `
+            -Root $root `
+            -OldText "Microsoft.VisualStudio.Component.VC.Tools.ARM64" `
+            -NewText "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "Visual C++ ARM64 tools" `
+            -Scenario "missing Windows arm64 tool installation"
     }
 
     Invoke-Scenario -Name "public hygiene gate cannot be removed" -Test {
@@ -328,7 +373,6 @@ try {
 
     Invoke-Scenario -Name "six-target matrix cannot lose Windows arm64" -Test {
         $root = New-ContractFixture
-        Add-WindowsArm64Targets -Root $root
         Edit-Workflow `
             -Root $root `
             -OldText @"
@@ -339,8 +383,7 @@ try {
         Assert-ContractRejects `
             -Root $root `
             -ExpectedText "aarch64-pc-windows-msvc" `
-            -Scenario "missing Windows arm64 target" `
-            -RequireSixTargets
+            -Scenario "missing Windows arm64 target"
     }
 
     Invoke-Scenario -Name "compatibility matrix cannot lose older same-major coverage" -Test {
@@ -353,6 +396,18 @@ try {
             -Root $root `
             -ExpectedText "legacy_same_major" `
             -Scenario "missing older same-major compatibility"
+    }
+
+    Invoke-Scenario -Name "compatibility matrix cannot lose WokCore v2 preference coverage" -Test {
+        $root = New-ContractFixture
+        Edit-Workflow `
+            -Root $root `
+            -OldText "wokcore_install_prefers_a_valid_signed_v2_release_without_requesting_v1" `
+            -NewText "redirects_are_not_followed"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "wokcore_install_prefers_a_valid_signed_v2_release_without_requesting_v1" `
+            -Scenario "missing WokCore v2 preference compatibility"
     }
 
     Invoke-Scenario -Name "platform aggregator cannot omit target checks" -Test {
