@@ -676,12 +676,25 @@ if ($jobs.ContainsKey("native-test-matrix")) {
         Add-ContractFailure `
             -Message "Windows native tests must execute the workspace through the fixed test host."
     }
-    elseif (
-        -not $fixedHostSteps[0].Fields.ContainsKey("if") -or
-        $fixedHostSteps[0].Fields["if"] -ne "runner.os == 'Windows'"
-    ) {
-        Add-ContractFailure `
-            -Message "The fixed test host step must run only on Windows."
+    else {
+        $expectedFixedHostCondition = if ($RequireSixTargets) {
+            "runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc'"
+        }
+        else {
+            "runner.os == 'Windows'"
+        }
+        if (
+            -not $fixedHostSteps[0].Fields.ContainsKey("if") -or
+            $fixedHostSteps[0].Fields["if"] -ne $expectedFixedHostCondition
+        ) {
+            $message = if ($RequireSixTargets) {
+                "The fixed test host step must run only for the Windows x64 target."
+            }
+            else {
+                "The fixed test host step must run only on Windows."
+            }
+            Add-ContractFailure -Message $message
+        }
     }
     $nativeCargoSteps = @(
         $nativeSteps | Where-Object {

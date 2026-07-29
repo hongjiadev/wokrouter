@@ -75,6 +75,27 @@ function Add-WindowsArm64Targets {
 "@
 }
 
+function Set-FixedHostCondition {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Root,
+
+        [Parameter(Mandatory)]
+        [string]$Condition
+    )
+
+    Edit-Workflow `
+        -Root $Root `
+        -OldText @"
+      - name: Test workspace through fixed Windows host
+        if: runner.os == 'Windows'
+"@ `
+        -NewText @"
+      - name: Test workspace through fixed Windows host
+        if: $Condition
+"@
+}
+
 function Invoke-ContractCheck {
     param(
         [Parameter(Mandatory)]
@@ -181,10 +202,60 @@ try {
     Invoke-Scenario -Name "six-target matrices accept Windows arm64" -Test {
         $root = New-ContractFixture
         Add-WindowsArm64Targets -Root $root
+        Set-FixedHostCondition `
+            -Root $root `
+            -Condition "runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc'"
         Assert-ContractPasses `
             -Root $root `
             -Scenario "six-target workflow fixture" `
             -RequireSixTargets
+    }
+
+    Invoke-Scenario -Name "six-target fixed host cannot run on both Windows targets" -Test {
+        $root = New-ContractFixture
+        Add-WindowsArm64Targets -Root $root
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "Windows x64 target" `
+            -Scenario "over-wide six-target fixed host condition" `
+            -RequireSixTargets
+    }
+
+    Invoke-Scenario -Name "six-target fixed host cannot run on Windows arm64" -Test {
+        $root = New-ContractFixture
+        Add-WindowsArm64Targets -Root $root
+        Set-FixedHostCondition `
+            -Root $root `
+            -Condition "runner.os == 'Windows' && matrix.target == 'aarch64-pc-windows-msvc'"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "Windows x64 target" `
+            -Scenario "Windows arm64 fixed host condition" `
+            -RequireSixTargets
+    }
+
+    Invoke-Scenario -Name "six-target fixed host cannot name another target" -Test {
+        $root = New-ContractFixture
+        Add-WindowsArm64Targets -Root $root
+        Set-FixedHostCondition `
+            -Root $root `
+            -Condition "runner.os == 'Windows' && matrix.target == 'x86_64-unknown-linux-gnu'"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "Windows x64 target" `
+            -Scenario "non-Windows target fixed host condition" `
+            -RequireSixTargets
+    }
+
+    Invoke-Scenario -Name "five-target fixed host remains Windows-wide" -Test {
+        $root = New-ContractFixture
+        Set-FixedHostCondition `
+            -Root $root `
+            -Condition "runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc'"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "only on Windows" `
+            -Scenario "over-narrow five-target fixed host condition"
     }
 
     Invoke-Scenario -Name "Windows fixed test host cannot be removed" -Test {
