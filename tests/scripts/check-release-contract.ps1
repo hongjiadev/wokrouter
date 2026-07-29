@@ -29,6 +29,12 @@ $windowsPackagerPath = Join-Path `
 $signerPath = Join-Path $rootPath "tests/release/sign-release-bundle.ps1"
 $verifierPath = Join-Path $rootPath "tests/release/verify-release-bundle.ps1"
 $publicKeyPath = Join-Path $rootPath "release/minisign.pub"
+$cargoManifestPath = Join-Path $rootPath "Cargo.toml"
+$cargoLockPath = Join-Path $rootPath "Cargo.lock"
+$packageManifestPath = Join-Path $rootPath "apps/desktop/package.json"
+$tauriConfigurationPath = Join-Path `
+    $rootPath `
+    "apps/desktop/src-tauri/tauri.conf.json"
 $failures = [System.Collections.Generic.List[string]]::new()
 
 function Add-Failure {
@@ -64,6 +70,116 @@ function Get-SourceMatchIndex {
     return $(if ($match.Success) { $match.Index } else { -1 })
 }
 
+function Read-BoundedUtf8Text {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][long]$MaximumBytes
+    )
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -eq 0 -or $bytes.Length -gt $MaximumBytes) {
+        throw "Release source file has an invalid size: $Path"
+    }
+    return [Text.UTF8Encoding]::new($false, $true).GetString($bytes).Replace(
+        "`r`n",
+        "`n"
+    )
+}
+
+function Get-CargoWorkspaceVersion {
+    param([Parameter(Mandatory)][string]$Text)
+
+    $sections = @(
+        [regex]::Matches(
+            $Text,
+            '(?ms)^\[workspace\.package\][ \t]*\n(?<body>.*?)(?=^\[[^\r\n]+\][ \t]*$|\z)'
+        )
+    )
+    if ($sections.Count -ne 1) {
+        throw "Cargo.toml must contain exactly one [workspace.package] section."
+    }
+    $versions = @(
+        [regex]::Matches(
+            $sections[0].Groups["body"].Value,
+            '(?m)^version[ \t]*=[ \t]*"(?<value>[^"]+)"[ \t]*$'
+        )
+    )
+    if ($versions.Count -ne 1) {
+        throw "Cargo.toml workspace package must contain exactly one version."
+    }
+    return $versions[0].Groups["value"].Value
+}
+
+function Get-JsonReleaseVersion {
+    param(
+        [Parameter(Mandatory)][string]$Text,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    $members = @([regex]::Matches($Text, '(?m)"version"[ \t\r\n]*:'))
+    if ($members.Count -ne 1) {
+        throw "$Name must contain exactly one version member."
+    }
+    $document = $Text | ConvertFrom-Json
+    $properties = @(
+        $document.PSObject.Properties |
+            Where-Object { $_.Name -ieq "version" }
+    )
+    if (
+        $properties.Count -ne 1 -or
+        $properties[0].Name -cne "version" -or
+        $properties[0].Value -isnot [string]
+    ) {
+        throw "$Name must contain one exact string version member."
+    }
+    return [string]$properties[0].Value
+}
+
+function Get-WokRouterLockVersions {
+    param([Parameter(Mandatory)][string]$Text)
+
+    $wanted = @(
+        "wokrouter-cli",
+        "wokrouter-desktop",
+        "wokrouter-platform",
+        "wokrouter-storage",
+        "wokrouter-wokcore-client"
+    )
+    $blocks = @(
+        [regex]::Matches(
+            $Text,
+            '(?ms)^\[\[package\]\][ \t]*\n.*?(?=^\[\[package\]\][ \t]*$|\z)'
+        )
+    )
+    $versions = [System.Collections.Generic.List[string]]::new()
+    foreach ($packageName in $wanted) {
+        $matching = @(
+            $blocks |
+                Where-Object {
+                    $_.Value -match (
+                        '(?m)^name[ \t]*=[ \t]*"' +
+                        [regex]::Escape($packageName) +
+                        '"[ \t]*$'
+                    )
+                }
+        )
+        if ($matching.Count -ne 1) {
+            throw "Cargo.lock must contain exactly one '$packageName' package."
+        }
+        $version = @(
+            [regex]::Matches(
+                $matching[0].Value,
+                '(?m)^version[ \t]*=[ \t]*"(?<value>[^"]+)"[ \t]*$'
+            )
+        )
+        if ($version.Count -ne 1) {
+            throw "Cargo.lock package '$packageName' must contain exactly one version."
+        }
+        $versions.Add($version[0].Groups["value"].Value)
+    }
+    return $versions.ToArray()
+}
+
 foreach ($path in @(
         $releasePath,
         $ciPath,
@@ -74,7 +190,11 @@ foreach ($path in @(
         $windowsPackagerPath,
         $signerPath,
         $verifierPath,
-        $publicKeyPath
+        $publicKeyPath,
+        $cargoManifestPath,
+        $cargoLockPath,
+        $packageManifestPath,
+        $tauriConfigurationPath
     )) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         Add-Failure -Message "Required release contract file is missing: $path"
@@ -82,6 +202,40 @@ foreach ($path in @(
 }
 
 if ($failures.Count -eq 0) {
+    try {
+        $workspaceVersion = Get-CargoWorkspaceVersion -Text (
+            Read-BoundedUtf8Text -Path $cargoManifestPath -MaximumBytes 131072
+        )
+        [string[]]$sourceVersions = @(
+            $workspaceVersion
+            Get-JsonReleaseVersion `
+                -Text (
+                    Read-BoundedUtf8Text `
+                        -Path $packageManifestPath `
+                        -MaximumBytes 262144
+                ) `
+                -Name "apps/desktop/package.json"
+            Get-JsonReleaseVersion `
+                -Text (
+                    Read-BoundedUtf8Text `
+                        -Path $tauriConfigurationPath `
+                        -MaximumBytes 262144
+                ) `
+                -Name "apps/desktop/src-tauri/tauri.conf.json"
+            Get-WokRouterLockVersions -Text (
+                Read-BoundedUtf8Text -Path $cargoLockPath -MaximumBytes 8388608
+            )
+        )
+        foreach ($sourceVersion in $sourceVersions) {
+            if ($sourceVersion -cne $workspaceVersion) {
+                throw "WokRouter product source versions must match exactly."
+            }
+        }
+    }
+    catch {
+        Add-Failure -Message "WokRouter source versions are invalid: $($_.Exception.Message)"
+    }
+
     Import-Module $releaseContractPath -Force
     try {
         [string[]] $expectedTargets = @(
@@ -219,10 +373,17 @@ concurrency:
         $versionJob -notmatch "canonical WokRouter semver tag" -or
         $versionJob -notmatch [regex]::Escape('$tag.Substring(1)') -or
         -not $versionJob.Contains($tagCheckout) -or
-        $versionJob -notmatch '(?m)^          "source_sha=\$sourceSha" \|$'
+        $versionJob -notmatch '(?m)^          "source_sha=\$sourceSha" \|$' -or
+        -not $versionJob.Contains("Read-ExactUtf8File") -or
+        -not $versionJob.Contains("Get-CargoWorkspaceVersion") -or
+        -not $versionJob.Contains("Get-JsonVersion") -or
+        -not $versionJob.Contains("Get-LockPackageVersions") -or
+        -not $versionJob.Contains(
+            "WokRouter source version does not match release tag."
+        )
     ) {
         Add-Failure `
-            -Message "Release source and version must be resolved from the requested WokRouter tag commit."
+            -Message "Release source and version must be resolved from the requested WokRouter tag commit and match every product source."
     }
     if ($release -match '(?m)^\s*WOKCORE_[A-Z_]*VERSION:') {
         Add-Failure -Message "WokRouter release version must not depend on a WokCore version."
@@ -433,6 +594,30 @@ concurrency:
             --repo "$GITHUB_REPOSITORY" \
             --draft=false
 '@
+    $preMutationIdentityBlock = @'
+          begin_release_mutation() {
+            if [[ "$release_mutation_started" == "false" ]]; then
+              require_remote_tag_commit
+              release_mutation_started=true
+            fi
+          }
+'@
+    $preCreateIdentityBlock = @'
+            begin_release_mutation
+            gh release create "$RELEASE_TAG" \
+'@
+    $preDeleteIdentityBlock = @'
+            begin_release_mutation
+            gh release delete-asset "$RELEASE_TAG" "$asset" \
+'@
+    $preUploadIdentityBlock = @'
+          begin_release_mutation
+          gh release upload "$RELEASE_TAG" dist/* \
+'@
+    $prePublicationIdentityBlock = @'
+          require_remote_tag_commit
+          gh release edit "$RELEASE_TAG" \
+'@
     if (
         $publishJob -notmatch [regex]::Escape("startsWith(github.ref, 'refs/tags/')") -or
         $publishJob -notmatch '(?m)^    permissions:\n      contents: write\s*$' -or
@@ -446,6 +631,14 @@ concurrency:
         $publishJob -notmatch '--draft=false' -or
         -not $publishJob.Contains($draftCreateBlock) -or
         -not $publishJob.Contains($publishEditBlock) -or
+        -not $publishJob.Contains($preMutationIdentityBlock) -or
+        -not $publishJob.Contains($preCreateIdentityBlock) -or
+        -not $publishJob.Contains($preDeleteIdentityBlock) -or
+        -not $publishJob.Contains($preUploadIdentityBlock) -or
+        -not $publishJob.Contains($prePublicationIdentityBlock) -or
+        -not $publishJob.Contains("gh api") -or
+        -not $publishJob.Contains("SOURCE_SHA") -or
+        -not $publishJob.Contains("Remote WokRouter tag commit does not match source SHA.") -or
         $publishJob -notmatch [regex]::Escape('--repo "$GITHUB_REPOSITORY"') -or
         @([regex]::Matches($publishJob, '\bgh release (?:view|create|delete-asset|upload|download|edit)\b')).Count -ne
         @([regex]::Matches(
@@ -510,6 +703,7 @@ concurrency:
             '            echo "The WokRouter draft became public before upload\." >&2\n' +
             '            exit 1\n' +
             '          fi\n' +
+            '          begin_release_mutation\n' +
             '          gh release upload "\$RELEASE_TAG" dist/\* \\$'
         )
     $assetUpload = Get-SourceMatchIndex `

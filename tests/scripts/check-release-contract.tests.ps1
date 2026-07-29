@@ -20,12 +20,17 @@ function New-ReleaseFixture {
         "wokrouter-release-contract-" + [guid]::NewGuid()
     )
     $null = New-Item -ItemType Directory -Path (Join-Path $root ".github/workflows") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "docs/operations") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "tests/release") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "release") -Force
     foreach ($relativePath in @(
             ".github/workflows/ci.yml",
             ".github/workflows/release.yml",
+            "Cargo.toml",
+            "Cargo.lock",
+            "apps/desktop/package.json",
+            "apps/desktop/src-tauri/tauri.conf.json",
             "docs/operations/development.md",
             "tests/release/WokRouter.ReleaseContract.psm1",
             "tests/release/package-linux-assets.ps1",
@@ -129,6 +134,43 @@ try {
     Invoke-Scenario -Name "real release workflow satisfies the contract" -Test {
         $root = New-ReleaseFixture
         Assert-Passes -Root $root -Scenario "real release fixture"
+    }
+
+    Invoke-Scenario -Name "all product source versions must remain identical" -Test {
+        $mutations = @(
+            @{
+                Path = "Cargo.toml"
+                Old = "[workspace.package]`nversion = `"0.1.1`""
+                New = "[workspace.package]`nversion = `"0.1.0`""
+            },
+            @{
+                Path = "apps/desktop/package.json"
+                Old = '  "version": "0.1.1",'
+                New = '  "version": "0.1.0",'
+            },
+            @{
+                Path = "apps/desktop/src-tauri/tauri.conf.json"
+                Old = '  "version": "0.1.1",'
+                New = '  "version": "0.1.0",'
+            },
+            @{
+                Path = "Cargo.lock"
+                Old = "[[package]]`nname = `"wokrouter-cli`"`nversion = `"0.1.1`""
+                New = "[[package]]`nname = `"wokrouter-cli`"`nversion = `"0.1.0`""
+            }
+        )
+        foreach ($mutation in $mutations) {
+            $root = New-ReleaseFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath $mutation.Path `
+                -OldText $mutation.Old `
+                -NewText $mutation.New
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText "source versions" `
+                -Scenario "mismatched $($mutation.Path) version"
+        }
     }
 
     Invoke-Scenario -Name "release matrix must retain Windows arm64" -Test {
@@ -457,6 +499,32 @@ try {
             -Root $root `
             -ExpectedText "upload, re-download, verify" `
             -Scenario "missing remote draft verification"
+    }
+
+    Invoke-Scenario -Name "remote tag identity must guard the first release mutation" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText "              require_remote_tag_commit" `
+            -NewText "              # require_remote_tag_commit"
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "tag-only" `
+            -Scenario "comment replacing the pre-mutation tag identity guard"
+    }
+
+    Invoke-Scenario -Name "remote tag identity must be rechecked before publication" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText "          require_remote_tag_commit`n          gh release edit" `
+            -NewText "          # require_remote_tag_commit`n          gh release edit"
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "tag-only" `
+            -Scenario "comment replacing the pre-publication tag identity guard"
     }
 
     Invoke-Scenario -Name "draft publication cannot be removed" -Test {

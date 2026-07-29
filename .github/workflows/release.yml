@@ -45,6 +45,160 @@ jobs:
           DISPATCH_TAG: ${{ inputs.release_tag }}
           PUSH_TAG: ${{ github.ref_name }}
         run: |
+          function Read-ExactUtf8File {
+            param(
+              [Parameter(Mandatory)][string]$RelativePath,
+              [Parameter(Mandatory)][int]$MaximumBytes
+            )
+
+            $workspace = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)
+            $workspacePrefix = $workspace.TrimEnd(
+              [IO.Path]::DirectorySeparatorChar,
+              [IO.Path]::AltDirectorySeparatorChar
+            ) + [IO.Path]::DirectorySeparatorChar
+            $path = [IO.Path]::GetFullPath(
+              [IO.Path]::Combine($workspace, $RelativePath)
+            )
+            if (-not $path.StartsWith($workspacePrefix, [StringComparison]::Ordinal)) {
+              throw "Release source path escapes the checkout: $RelativePath"
+            }
+
+            $stream = [IO.File]::Open(
+              $path,
+              [IO.FileMode]::Open,
+              [IO.FileAccess]::Read,
+              [IO.FileShare]::Read
+            )
+            try {
+              if ($stream.Length -eq 0 -or $stream.Length -gt $MaximumBytes) {
+                throw "Release source file has an invalid size: $RelativePath"
+              }
+              $bytes = [byte[]]::new([int]$stream.Length)
+              $offset = 0
+              while ($offset -lt $bytes.Length) {
+                $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+                if ($read -eq 0) {
+                  throw "Release source file ended early: $RelativePath"
+                }
+                $offset += $read
+              }
+            }
+            finally {
+              $stream.Dispose()
+            }
+
+            try {
+              return [Text.UTF8Encoding]::new($false, $true).
+                GetString($bytes).
+                Replace("`r`n", "`n")
+            }
+            catch {
+              throw "Release source file is not exact UTF-8: $RelativePath"
+            }
+          }
+
+          function Get-CargoWorkspaceVersion {
+            param([Parameter(Mandatory)][string]$Text)
+
+            $sections = @(
+              [regex]::Matches(
+                $Text,
+                '(?ms)^\[workspace\.package\][ \t]*\n(?<body>.*?)(?=^\[[^\r\n]+\][ \t]*$|\z)'
+              )
+            )
+            if ($sections.Count -ne 1) {
+              throw "Cargo.toml must contain exactly one [workspace.package] section."
+            }
+            $versions = @(
+              [regex]::Matches(
+                $sections[0].Groups["body"].Value,
+                '(?m)^version[ \t]*=[ \t]*"(?<value>[^"]+)"[ \t]*$'
+              )
+            )
+            if ($versions.Count -ne 1) {
+              throw "Cargo.toml workspace package must contain exactly one version."
+            }
+            return $versions[0].Groups["value"].Value
+          }
+
+          function Get-JsonVersion {
+            param(
+              [Parameter(Mandatory)][string]$Text,
+              [Parameter(Mandatory)][string]$Name
+            )
+
+            $document = [Text.Json.JsonDocument]::Parse($Text)
+            try {
+              if (
+                $document.RootElement.ValueKind -ne
+                [Text.Json.JsonValueKind]::Object
+              ) {
+                throw "$Name must contain one JSON object."
+              }
+              $members = @(
+                $document.RootElement.EnumerateObject() |
+                  Where-Object { $_.Name -ieq "version" }
+              )
+              if (
+                $members.Count -ne 1 -or
+                $members[0].Name -cne "version" -or
+                $members[0].Value.ValueKind -ne
+                [Text.Json.JsonValueKind]::String
+              ) {
+                throw "$Name must contain one exact string version member."
+              }
+              return $members[0].Value.GetString()
+            }
+            finally {
+              $document.Dispose()
+            }
+          }
+
+          function Get-LockPackageVersions {
+            param([Parameter(Mandatory)][string]$Text)
+
+            $wanted = @(
+              "wokrouter-cli",
+              "wokrouter-desktop",
+              "wokrouter-platform",
+              "wokrouter-storage",
+              "wokrouter-wokcore-client"
+            )
+            $blocks = @(
+              [regex]::Matches(
+                $Text,
+                '(?ms)^\[\[package\]\][ \t]*\n.*?(?=^\[\[package\]\][ \t]*$|\z)'
+              )
+            )
+            $versions = [System.Collections.Generic.List[string]]::new()
+            foreach ($packageName in $wanted) {
+              $matching = @(
+                $blocks |
+                  Where-Object {
+                    $_.Value -match (
+                      '(?m)^name[ \t]*=[ \t]*"' +
+                      [regex]::Escape($packageName) +
+                      '"[ \t]*$'
+                    )
+                  }
+              )
+              if ($matching.Count -ne 1) {
+                throw "Cargo.lock must contain exactly one '$packageName' package."
+              }
+              $version = @(
+                [regex]::Matches(
+                  $matching[0].Value,
+                  '(?m)^version[ \t]*=[ \t]*"(?<value>[^"]+)"[ \t]*$'
+                )
+              )
+              if ($version.Count -ne 1) {
+                throw "Cargo.lock package '$packageName' must contain exactly one version."
+              }
+              $versions.Add($version[0].Groups["value"].Value)
+            }
+            return $versions.ToArray()
+          }
+
           $tag = if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
             $env:DISPATCH_TAG
           } else {
@@ -57,10 +211,41 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $sourceSha -notmatch '^[0-9a-f]{40}$') {
             throw "Unable to resolve the requested WokRouter tag commit."
           }
+          $tagVersion = $tag.Substring(1)
+          [string[]]$sourceVersions = @(
+            Get-CargoWorkspaceVersion -Text (
+              Read-ExactUtf8File -RelativePath "Cargo.toml" -MaximumBytes 131072
+            )
+            Get-JsonVersion `
+              -Text (
+                Read-ExactUtf8File `
+                  -RelativePath "apps/desktop/package.json" `
+                  -MaximumBytes 262144
+              ) `
+              -Name "apps/desktop/package.json"
+            Get-JsonVersion `
+              -Text (
+                Read-ExactUtf8File `
+                  -RelativePath "apps/desktop/src-tauri/tauri.conf.json" `
+                  -MaximumBytes 262144
+              ) `
+              -Name "apps/desktop/src-tauri/tauri.conf.json"
+            Get-LockPackageVersions -Text (
+              Read-ExactUtf8File -RelativePath "Cargo.lock" -MaximumBytes 8388608
+            )
+          )
+          if ($sourceVersions.Count -ne 8) {
+            throw "WokRouter release must validate exactly eight source versions."
+          }
+          foreach ($sourceVersion in $sourceVersions) {
+            if ($sourceVersion -cne $tagVersion) {
+              throw "WokRouter source version does not match release tag."
+            }
+          }
           "source_sha=$sourceSha" |
             Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "version=$($tag.Substring(1))" |
+          "version=$tagVersion" |
             Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
   release-build:
@@ -423,9 +608,73 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.release-version.outputs.tag }}
           RELEASE_VERSION: ${{ needs.release-version.outputs.version }}
+          SOURCE_SHA: ${{ needs.release-version.outputs.source_sha }}
         shell: bash
         run: |
           set -euo pipefail
+          resolve_remote_tag_commit() {
+            local response object_type object_sha depth
+            response="$(
+              gh api \
+                --method GET \
+                --header "Accept: application/vnd.github+json" \
+                "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG"
+            )"
+            object_type="$(
+              jq -er \
+                '.object.type | select(type == "string" and (. == "commit" or . == "tag"))' \
+                <<<"$response"
+            )"
+            object_sha="$(
+              jq -er \
+                '.object.sha | select(type == "string" and test("^[0-9a-f]{40}$"))' \
+                <<<"$response"
+            )"
+            depth=0
+            while [[ "$object_type" == "tag" ]]; do
+              if (( depth >= 8 )); then
+                echo "Remote WokRouter annotated tag chain is too deep." >&2
+                return 1
+              fi
+              depth=$((depth + 1))
+              response="$(
+                gh api \
+                  --method GET \
+                  --header "Accept: application/vnd.github+json" \
+                  "repos/$GITHUB_REPOSITORY/git/tags/$object_sha"
+              )"
+              object_type="$(
+                jq -er \
+                  '.object.type | select(type == "string" and (. == "commit" or . == "tag"))' \
+                  <<<"$response"
+              )"
+              object_sha="$(
+                jq -er \
+                  '.object.sha | select(type == "string" and test("^[0-9a-f]{40}$"))' \
+                  <<<"$response"
+              )"
+            done
+            if [[ "$object_type" != "commit" ]]; then
+              echo "Remote WokRouter tag does not resolve to a commit." >&2
+              return 1
+            fi
+            printf '%s\n' "$object_sha"
+          }
+          require_remote_tag_commit() {
+            local remote_sha
+            remote_sha="$(resolve_remote_tag_commit)"
+            if [[ "$remote_sha" != "$SOURCE_SHA" ]]; then
+              echo "Remote WokRouter tag commit does not match source SHA." >&2
+              return 1
+            fi
+          }
+          release_mutation_started=false
+          begin_release_mutation() {
+            if [[ "$release_mutation_started" == "false" ]]; then
+              require_remote_tag_commit
+              release_mutation_started=true
+            fi
+          }
           error_file="$RUNNER_TEMP/wokrouter-release-view-error"
           if existing="$(
             gh release view "$RELEASE_TAG" \
@@ -445,6 +694,7 @@ jobs:
               cat "$error_file" >&2
               exit 1
             fi
+            begin_release_mutation
             gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
@@ -469,6 +719,7 @@ jobs:
               echo "The WokRouter draft became public before asset cleanup." >&2
               exit 1
             fi
+            begin_release_mutation
             gh release delete-asset "$RELEASE_TAG" "$asset" \
               --repo "$GITHUB_REPOSITORY" \
               --yes
@@ -490,6 +741,7 @@ jobs:
             echo "The WokRouter draft became public before upload." >&2
             exit 1
           fi
+          begin_release_mutation
           gh release upload "$RELEASE_TAG" dist/* \
             --repo "$GITHUB_REPOSITORY"
 
@@ -507,6 +759,7 @@ jobs:
             -Version "$RELEASE_VERSION" \
             -PublicKeyPath release/minisign.pub \
             -MinisignPath "$(command -v minisign)"
+          require_remote_tag_commit
           gh release edit "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --draft=false
