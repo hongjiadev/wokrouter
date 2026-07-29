@@ -183,12 +183,14 @@ fn apply_explicit_dacl(
     if status != ERROR_SUCCESS || acl.0.is_null() {
         return Err(io::Error::from_raw_os_error(status as i32));
     }
+    let owner_security_information = if owner.is_some() {
+        OWNER_SECURITY_INFORMATION
+    } else {
+        0
+    };
     let security_information = DACL_SECURITY_INFORMATION
         | PROTECTED_DACL_SECURITY_INFORMATION
-        | owner
-            .is_some()
-            .then_some(OWNER_SECURITY_INFORMATION)
-            .unwrap_or_default();
+        | owner_security_information;
     let status = unsafe {
         SetSecurityInfo(
             file.as_raw_handle(),
