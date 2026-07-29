@@ -1,8 +1,11 @@
 import {
+  closeSync,
   copyFileSync,
   existsSync,
+  fstatSync,
   mkdirSync,
-  readFileSync,
+  openSync,
+  readSync,
   rmSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -201,20 +204,219 @@ function hasExactKeys(value, expectedKeys) {
   );
 }
 
-function parseWokCoreManifest(manifest, fileSystem) {
-  let bytes;
+function invalidWokCoreManifestJson() {
+  return new Error("WokCore manifest JSON is invalid.");
+}
+
+function scanWokCoreManifestJson(text) {
+  let index = 0;
+
+  function skipWhitespace() {
+    while (
+      text[index] === " " ||
+      text[index] === "\t" ||
+      text[index] === "\r" ||
+      text[index] === "\n"
+    ) {
+      index += 1;
+    }
+  }
+
+  function scanString(decode) {
+    const start = index;
+    if (text[index] !== '"') {
+      throw invalidWokCoreManifestJson();
+    }
+    index += 1;
+    while (index < text.length) {
+      const character = text[index];
+      index += 1;
+      if (character === '"') {
+        if (!decode) {
+          return undefined;
+        }
+        try {
+          return JSON.parse(text.slice(start, index));
+        } catch {
+          throw invalidWokCoreManifestJson();
+        }
+      }
+      if (character === "\\") {
+        if (index >= text.length) {
+          throw invalidWokCoreManifestJson();
+        }
+        index += 1;
+      } else if (character.charCodeAt(0) < 0x20) {
+        throw invalidWokCoreManifestJson();
+      }
+    }
+    throw invalidWokCoreManifestJson();
+  }
+
+  function scanValue() {
+    skipWhitespace();
+    if (text[index] === "{") {
+      scanObject();
+      return;
+    }
+    if (text[index] === "[") {
+      scanArray();
+      return;
+    }
+    if (text[index] === '"') {
+      scanString(false);
+      return;
+    }
+
+    const start = index;
+    while (
+      index < text.length &&
+      text[index] !== "," &&
+      text[index] !== "]" &&
+      text[index] !== "}" &&
+      text[index] !== " " &&
+      text[index] !== "\t" &&
+      text[index] !== "\r" &&
+      text[index] !== "\n"
+    ) {
+      index += 1;
+    }
+    if (index === start) {
+      throw invalidWokCoreManifestJson();
+    }
+  }
+
+  function scanObject() {
+    index += 1;
+    skipWhitespace();
+    if (text[index] === "}") {
+      index += 1;
+      return;
+    }
+
+    const keys = new Set();
+    while (index < text.length) {
+      skipWhitespace();
+      const key = scanString(true);
+      if (keys.has(key)) {
+        throw invalidWokCoreManifestJson();
+      }
+      keys.add(key);
+      skipWhitespace();
+      if (text[index] !== ":") {
+        throw invalidWokCoreManifestJson();
+      }
+      index += 1;
+      scanValue();
+      skipWhitespace();
+      if (text[index] === "}") {
+        index += 1;
+        return;
+      }
+      if (text[index] !== ",") {
+        throw invalidWokCoreManifestJson();
+      }
+      index += 1;
+    }
+    throw invalidWokCoreManifestJson();
+  }
+
+  function scanArray() {
+    index += 1;
+    skipWhitespace();
+    if (text[index] === "]") {
+      index += 1;
+      return;
+    }
+
+    while (index < text.length) {
+      scanValue();
+      skipWhitespace();
+      if (text[index] === "]") {
+        index += 1;
+        return;
+      }
+      if (text[index] !== ",") {
+        throw invalidWokCoreManifestJson();
+      }
+      index += 1;
+    }
+    throw invalidWokCoreManifestJson();
+  }
+
+  skipWhitespace();
+  scanValue();
+  skipWhitespace();
+  if (index !== text.length) {
+    throw invalidWokCoreManifestJson();
+  }
+}
+
+function readWokCoreManifest(manifest, fileSystem) {
+  let descriptor;
+  let failed = false;
   try {
-    bytes = fileSystem.readFileSync(manifest);
-  } catch {
+    descriptor = fileSystem.openSync(manifest, "r");
+    const status = fileSystem.fstatSync(descriptor);
+    if (!Number.isSafeInteger(status?.size) || status.size < 0) {
+      throw new Error("WokCore manifest could not be read.");
+    }
+    if (status.size > maxWokCoreManifestBytes) {
+      throw new Error("WokCore manifest is empty or oversized.");
+    }
+
+    const bytes = Buffer.allocUnsafe(maxWokCoreManifestBytes + 1);
+    let length = 0;
+    while (length < bytes.byteLength) {
+      const remaining = bytes.byteLength - length;
+      const bytesRead = fileSystem.readSync(
+        descriptor,
+        bytes,
+        length,
+        remaining,
+        null,
+      );
+      if (
+        !Number.isSafeInteger(bytesRead) ||
+        bytesRead < 0 ||
+        bytesRead > remaining
+      ) {
+        throw new Error("WokCore manifest could not be read.");
+      }
+      if (bytesRead === 0) {
+        break;
+      }
+      length += bytesRead;
+    }
+    if (length === 0 || length > maxWokCoreManifestBytes) {
+      throw new Error("WokCore manifest is empty or oversized.");
+    }
+    return bytes.subarray(0, length);
+  } catch (error) {
+    failed = true;
+    if (
+      error instanceof Error &&
+      (error.message === "WokCore manifest could not be read." ||
+        error.message === "WokCore manifest is empty or oversized.")
+    ) {
+      throw error;
+    }
     throw new Error("WokCore manifest could not be read.");
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        fileSystem.closeSync(descriptor);
+      } catch {
+        if (!failed) {
+          throw new Error("WokCore manifest could not be read.");
+        }
+      }
+    }
   }
-  if (
-    !ArrayBuffer.isView(bytes) ||
-    bytes.byteLength === 0 ||
-    bytes.byteLength > maxWokCoreManifestBytes
-  ) {
-    throw new Error("WokCore manifest is empty or oversized.");
-  }
+}
+
+function parseWokCoreManifest(manifest, fileSystem) {
+  const bytes = readWokCoreManifest(manifest, fileSystem);
 
   let text;
   try {
@@ -224,9 +426,10 @@ function parseWokCoreManifest(manifest, fileSystem) {
   }
   let document;
   try {
+    scanWokCoreManifestJson(text);
     document = JSON.parse(text);
   } catch {
-    throw new Error("WokCore manifest JSON is invalid.");
+    throw invalidWokCoreManifestJson();
   }
   return document;
 }
@@ -373,7 +576,16 @@ export function stageBundleArtifact({
   hostPlatform,
   stagedSidecars,
   offlineWokCore,
-  fileSystem = { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync },
+  fileSystem = {
+    closeSync,
+    copyFileSync,
+    existsSync,
+    fstatSync,
+    mkdirSync,
+    openSync,
+    readSync,
+    rmSync,
+  },
 }) {
   const bundleKind = resolveBundleKind(kind);
   const supportedTarget = supportedTargetTriple(targetTriple);

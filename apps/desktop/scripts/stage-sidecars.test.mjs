@@ -47,16 +47,37 @@ function canonicalManifest(document) {
 }
 
 function offlineFileSystem(manifestText) {
+  const manifestBytes = Buffer.from(manifestText);
+  let readOffset = 0;
   return {
+    closeSync: vi.fn(),
     copyFileSync: vi.fn(),
     existsSync: () => true,
+    fstatSync: vi.fn(() => ({ size: manifestBytes.byteLength })),
     mkdirSync: vi.fn(),
-    readFileSync: vi.fn(() => Buffer.from(manifestText)),
+    openSync: vi.fn(() => {
+      readOffset = 0;
+      return 17;
+    }),
+    readSync: vi.fn((_descriptor, buffer, offset, length) => {
+      const bytesRead = Math.min(length, manifestBytes.byteLength - readOffset);
+      manifestBytes.copy(
+        buffer,
+        offset,
+        readOffset,
+        readOffset + bytesRead,
+      );
+      readOffset += bytesRead;
+      return bytesRead;
+    }),
     rmSync: vi.fn(),
   };
 }
 
-function windowsArm64OfflineBundle(manifestText) {
+function windowsArm64OfflineBundle(
+  manifestText,
+  fileSystem = offlineFileSystem(manifestText),
+) {
   return {
     kind: "offline",
     targetDir: "/work/wokrouter/target",
@@ -75,7 +96,7 @@ function windowsArm64OfflineBundle(manifestText) {
       signature: "/release/wokcore-update-v2.json.minisig",
       artifact: "/release/WokCore-v1.2.3-Windows-arm64-Portable.zip",
     },
-    fileSystem: offlineFileSystem(manifestText),
+    fileSystem,
   };
 }
 
@@ -564,6 +585,124 @@ describe("sidecar staging paths", () => {
         windowsArm64OfflineBundle(" ".repeat(64 * 1024 + 1)),
       ),
     ).toThrow("WokCore manifest is empty or oversized.");
+  });
+
+  it("bounds physical manifest reads for oversized and growing files", () => {
+    const maximumBytes = 64 * 1024;
+    const oversizedFileSystem = offlineFileSystem(v2ManifestText);
+    oversizedFileSystem.fstatSync.mockReturnValue({
+      size: maximumBytes + 1,
+    });
+
+    expect(() =>
+      stageBundleArtifact(
+        windowsArm64OfflineBundle(v2ManifestText, oversizedFileSystem),
+      ),
+    ).toThrow("WokCore manifest is empty or oversized.");
+    expect(oversizedFileSystem.readSync).not.toHaveBeenCalled();
+    expect(oversizedFileSystem.closeSync).toHaveBeenCalledOnce();
+
+    const growingFileSystem = offlineFileSystem(" ".repeat(maximumBytes + 1));
+    growingFileSystem.fstatSync.mockReturnValue({ size: v2ManifestText.length });
+
+    expect(() =>
+      stageBundleArtifact(
+        windowsArm64OfflineBundle(v2ManifestText, growingFileSystem),
+      ),
+    ).toThrow("WokCore manifest is empty or oversized.");
+    expect(
+      growingFileSystem.readSync.mock.calls.reduce(
+        (total, call) => total + call[3],
+        0,
+      ),
+    ).toBe(maximumBytes + 1);
+    expect(
+      growingFileSystem.readSync.mock.calls.every(
+        (call) => call[1].byteLength === maximumBytes + 1,
+      ),
+    ).toBe(true);
+    expect(growingFileSystem.closeSync).toHaveBeenCalledOnce();
+  });
+
+  it("continues bounded manifest reads after short reads", () => {
+    const fileSystem = offlineFileSystem(v2ManifestText);
+    const readSync = fileSystem.readSync.getMockImplementation();
+    fileSystem.readSync.mockImplementation(
+      (descriptor, buffer, offset, length, position) =>
+        readSync(descriptor, buffer, offset, Math.min(length, 7), position),
+    );
+
+    const result = stageBundleArtifact(
+      windowsArm64OfflineBundle(v2ManifestText, fileSystem),
+    );
+
+    expect(result.files).toHaveLength(4);
+    expect(fileSystem.readSync.mock.calls.length).toBeGreaterThan(1);
+    expect(fileSystem.closeSync).toHaveBeenCalledExactlyOnceWith(17);
+  });
+
+  it("closes opened manifests on read errors without closing failed opens", () => {
+    const readFailure = offlineFileSystem(v2ManifestText);
+    readFailure.readSync.mockImplementation(() => {
+      throw new Error("disk failure");
+    });
+    expect(() =>
+      stageBundleArtifact(
+        windowsArm64OfflineBundle(v2ManifestText, readFailure),
+      ),
+    ).toThrow("WokCore manifest could not be read.");
+    expect(readFailure.closeSync).toHaveBeenCalledExactlyOnceWith(17);
+
+    const openFailure = offlineFileSystem(v2ManifestText);
+    openFailure.openSync.mockImplementation(() => {
+      throw new Error("open failure");
+    });
+    expect(() =>
+      stageBundleArtifact(
+        windowsArm64OfflineBundle(v2ManifestText, openFailure),
+      ),
+    ).toThrow("WokCore manifest could not be read.");
+    expect(openFailure.closeSync).not.toHaveBeenCalled();
+  });
+
+  it("surfaces close failures after otherwise successful bounded reads", () => {
+    const fileSystem = offlineFileSystem(v2ManifestText);
+    fileSystem.closeSync.mockImplementation(() => {
+      throw new Error("close failure");
+    });
+
+    expect(() =>
+      stageBundleArtifact(
+        windowsArm64OfflineBundle(v2ManifestText, fileSystem),
+      ),
+    ).toThrow("WokCore manifest could not be read.");
+    expect(fileSystem.closeSync).toHaveBeenCalledExactlyOnceWith(17);
+  });
+
+  it("decodes escaped object keys and rejects their duplicates", () => {
+    const escapedRoot = v2ManifestText.replace(
+      '"schema_version":2',
+      '"schema_\\u0076ersion":2',
+    );
+    expect(
+      stageBundleArtifact(windowsArm64OfflineBundle(escapedRoot)).files,
+    ).toHaveLength(4);
+
+    const duplicateRoot = v2ManifestText.replace(
+      '"schema_version":2',
+      '"schema_version":2,"schema_\\u0076ersion":2',
+    );
+    expect(() =>
+      stageBundleArtifact(windowsArm64OfflineBundle(duplicateRoot)),
+    ).toThrow("WokCore manifest JSON is invalid.");
+
+    const duplicateArtifact = v2ManifestText.replace(
+      '"target":"x86_64-pc-windows-msvc"',
+      '"target":"x86_64-pc-windows-msvc","ta\\u0072get":"x86_64-pc-windows-msvc"',
+    );
+    expect(() =>
+      stageBundleArtifact(windowsArm64OfflineBundle(duplicateArtifact)),
+    ).toThrow("WokCore manifest JSON is invalid.");
   });
 
   it("derives the executable extension from the target triple", () => {
