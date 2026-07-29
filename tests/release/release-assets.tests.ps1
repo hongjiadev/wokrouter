@@ -104,6 +104,12 @@ switch ($Operation) {
                 -Path (Join-Path $Destination ".DirIcon") `
                 -Target (Join-Path $root "link-target")
         }
+        if (Test-Path -LiteralPath (Join-Path $root "appimage-extra-reparse")) {
+            $null = New-Item `
+                -ItemType Junction `
+                -Path (Join-Path $Destination "usr/lib/unlisted-link") `
+                -Target (Join-Path $root "link-target")
+        }
     }
     "linux-appimage-link-inventory" {
         Get-Content `
@@ -224,6 +230,19 @@ function Write-AppImageLinkInventory {
         -Content ($Inventory | ConvertTo-Json -Compress)
 }
 
+function Read-AppImageLinkInventory {
+    param([Parameter(Mandatory)][string] $Root)
+
+    return @(
+        Get-Content `
+            -Raw `
+            -Encoding UTF8 `
+            -LiteralPath (Join-Path $Root "appimage-link-inventory.json") |
+            ConvertFrom-Json |
+            ForEach-Object { $_ }
+    )
+}
+
 function New-LinuxFixture {
     param(
         [Parameter(Mandatory)][string] $Root,
@@ -271,6 +290,24 @@ function New-LinuxFixture {
                 "usr/share/applications/WokRouter.desktop"
         ) `
         -Content "X-AppImage-Version=$version"
+    $linuxTriplet = if ($Architecture -ceq "x86_64") {
+        "x86_64-linux-gnu"
+    } else {
+        "aarch64-linux-gnu"
+    }
+    $gtkLink = "usr/lib/gtk-3.0/3.0.0/immodules/im-ibus.so"
+    Write-Utf8File `
+        -Path (
+            Join-Path `
+                $appRoot `
+                "usr/lib/$linuxTriplet/gtk-3.0/3.0.0/immodules/im-ibus.so"
+        ) `
+        -Content "gtk-im-module-$Architecture"
+    foreach ($relative in @(".DirIcon", "WokRouter.desktop", $gtkLink)) {
+        Write-Utf8File `
+            -Path (Join-Path $appRoot $relative) `
+            -Content "adapter-link-$relative"
+    }
     Write-AppImageLinkInventory -Root $Root -Inventory @(
         [pscustomobject]@{
             Relative = ".DirIcon"
@@ -281,6 +318,11 @@ function New-LinuxFixture {
             Relative = "WokRouter.desktop"
             LinkType = "SymbolicLink"
             Target = "usr/share/applications/WokRouter.desktop"
+        },
+        [pscustomobject]@{
+            Relative = $gtkLink
+            LinkType = "SymbolicLink"
+            Target = "../../../$linuxTriplet/gtk-3.0/3.0.0/immodules/im-ibus.so"
         }
     )
     foreach ($kind in @("deb", "rpm")) {
@@ -545,16 +587,29 @@ try {
         }
     }
 
-    Invoke-Scenario -Name "Linux production reads native AppImage link fields" -Test {
+    Invoke-Scenario -Name "Linux production recursively inventories AppImage links without following them" -Test {
         $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $linuxScript
+        $inventoryBlock = [regex]::Match(
+            $source,
+            '(?s)"linux-appimage-link-inventory"\s*\{(?<Body>.*?)' +
+            '(?=\r?\n\s*}\r?\n\s*"linux-deb-extract")'
+        )
+        if (-not $inventoryBlock.Success) {
+            throw "Linux production link inventory block is unavailable."
+        }
+        $body = $inventoryBlock.Groups["Body"].Value
         foreach ($required in @(
                 '$item.LinkType',
                 '$item.Target',
-                '"linux-appimage-link-inventory"'
+                '[Collections.Generic.Stack[string]]',
+                'Get-ChildItem -LiteralPath $directory -Force'
             )) {
-            if (-not $source.Contains($required)) {
+            if (-not $body.Contains($required)) {
                 throw "Linux production link inventory is missing '$required'."
             }
+        }
+        if ($body.Contains("-Recurse")) {
+            throw "Linux production link inventory must not use recursive traversal."
         }
     }
 
@@ -806,16 +861,7 @@ try {
             $root = New-FixtureRoot
             $bundle = New-LinuxFixture -Root $root
             $adapter = New-ToolAdapter -Root $root
-            [object[]] $inventory = @(
-                Get-Content `
-                    -Raw `
-                    -Encoding UTF8 `
-                    -LiteralPath (
-                        Join-Path $root "appimage-link-inventory.json"
-                    ) |
-                    ConvertFrom-Json |
-                    ForEach-Object { $_ }
-            )
+            [object[]] $inventory = @(Read-AppImageLinkInventory -Root $root)
             $expected = switch ($mutation) {
                 "missing-diricon" {
                     $inventory = @(
@@ -882,6 +928,9 @@ try {
                     [IO.Directory]::CreateDirectory(
                         (Join-Path $root "link-target")
                     ) | Out-Null
+                    Remove-Item -LiteralPath (
+                        Join-Path $root "appimage-tree/.DirIcon"
+                    )
                     Write-Utf8File `
                         -Path (Join-Path $root "appimage-junction") `
                         -Content "create junction fixture"
@@ -902,8 +951,260 @@ try {
                     Target = "x86_64-unknown-linux-gnu"
                     ToolAdapterPath = $adapter
                 } `
-                -ExpectedText $expected
+                    -ExpectedText $expected
         }
+    }
+
+    foreach ($case in @(
+            @{
+                Name = "absolute target"
+                Target = "/tmp/im-ibus.so"
+                Expected = "relative"
+            },
+            @{
+                Name = "rooted target"
+                Target = "\tmp\im-ibus.so"
+                Expected = "relative"
+            },
+            @{
+                Name = "drive target"
+                Target = "C:/tmp/im-ibus.so"
+                Expected = "relative"
+            },
+            @{
+                Name = "UNC target"
+                Target = "//server/share/im-ibus.so"
+                Expected = "relative"
+            },
+            @{
+                Name = "lexical escape"
+                Target = "../../../../../outside/im-ibus.so"
+                Expected = "escapes"
+            },
+            @{
+                Name = "broken target"
+                Target = "../../../x86_64-linux-gnu/gtk-3.0/3.0.0/immodules/missing.so"
+                Expected = "regular file"
+            },
+            @{
+                Name = "directory leaf"
+                Target = "../../../x86_64-linux-gnu/gtk-3.0/3.0.0/immodules"
+                Expected = "regular file"
+            }
+        )) {
+        Invoke-Scenario -Name "Linux rejects nested AppImage $($case.Name)" -Test {
+            $root = New-FixtureRoot
+            $bundle = New-LinuxFixture -Root $root
+            $adapter = New-ToolAdapter -Root $root
+            [object[]] $inventory = @(Read-AppImageLinkInventory -Root $root)
+            $nested = @(
+                $inventory |
+                    Where-Object Relative -CEQ (
+                        "usr/lib/gtk-3.0/3.0.0/immodules/im-ibus.so"
+                    )
+            )
+            if ($nested.Count -ne 1) {
+                throw "Nested GTK link fixture is not exact."
+            }
+            $nested[0].Target = [string] $case.Target
+            Write-AppImageLinkInventory -Root $root -Inventory $inventory
+            Assert-Rejects -Path $linuxScript -FixtureRoot $root -Arguments @{
+                BundleDirectory = $bundle
+                OutputDirectory = (Join-Path $root "output")
+                Version = $version
+                Target = "x86_64-unknown-linux-gnu"
+                ToolAdapterPath = $adapter
+            } -ExpectedText ([string] $case.Expected)
+        }
+    }
+
+    Invoke-Scenario -Name "Linux rejects nested AppImage link target chains" -Test {
+        $root = New-FixtureRoot
+        $bundle = New-LinuxFixture -Root $root
+        $adapter = New-ToolAdapter -Root $root
+        [object[]] $inventory = @(Read-AppImageLinkInventory -Root $root)
+        $targetRelative = (
+            "usr/lib/x86_64-linux-gnu/" +
+            "gtk-3.0/3.0.0/immodules/im-ibus.so"
+        )
+        Write-Utf8File `
+            -Path (
+                Join-Path `
+                    $root `
+                    (
+                        "appimage-tree/usr/lib/x86_64-linux-gnu/" +
+                        "gtk-3.0/3.0.0/immodules/im-ibus-real.so"
+                    )
+            ) `
+            -Content "real-gtk-module"
+        $inventory += [pscustomobject]@{
+            Relative = $targetRelative
+            LinkType = "SymbolicLink"
+            Target = "im-ibus-real.so"
+        }
+        Write-AppImageLinkInventory -Root $root -Inventory $inventory
+        Assert-Rejects -Path $linuxScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $bundle
+            OutputDirectory = (Join-Path $root "output")
+            Version = $version
+            Target = "x86_64-unknown-linux-gnu"
+            ToolAdapterPath = $adapter
+        } -ExpectedText "reparse component"
+    }
+
+    Invoke-Scenario -Name "Linux rejects non-symbolic nested AppImage reparse records" -Test {
+        $root = New-FixtureRoot
+        $bundle = New-LinuxFixture -Root $root
+        $adapter = New-ToolAdapter -Root $root
+        [object[]] $inventory = @(Read-AppImageLinkInventory -Root $root)
+        $inventory[2].LinkType = "Junction"
+        Write-AppImageLinkInventory -Root $root -Inventory $inventory
+        Assert-Rejects -Path $linuxScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $bundle
+            OutputDirectory = (Join-Path $root "output")
+            Version = $version
+            Target = "x86_64-unknown-linux-gnu"
+            ToolAdapterPath = $adapter
+        } -ExpectedText "symbolic link"
+    }
+
+    foreach ($case in @(
+            @{
+                Name = "rooted path"
+                Relative = "/usr/lib/im-ibus.so"
+            },
+            @{
+                Name = "backslash path"
+                Relative = "usr\lib\im-ibus.so"
+            },
+            @{
+                Name = "drive path"
+                Relative = "C:/usr/lib/im-ibus.so"
+            },
+            @{
+                Name = "empty segment"
+                Relative = "usr//lib/im-ibus.so"
+            },
+            @{
+                Name = "dot segment"
+                Relative = "usr/./lib/im-ibus.so"
+            },
+            @{
+                Name = "dot-dot segment"
+                Relative = "usr/lib/../lib/im-ibus.so"
+            },
+            @{
+                Name = "control character"
+                Relative = "usr/lib/im`nbus.so"
+            }
+        )) {
+        Invoke-Scenario -Name "Linux rejects AppImage inventory $($case.Name)" -Test {
+            $root = New-FixtureRoot
+            $bundle = New-LinuxFixture -Root $root
+            $adapter = New-ToolAdapter -Root $root
+            [object[]] $inventory = @(Read-AppImageLinkInventory -Root $root)
+            $inventory[2].Relative = [string] $case.Relative
+            Write-AppImageLinkInventory -Root $root -Inventory $inventory
+            Assert-Rejects -Path $linuxScript -FixtureRoot $root -Arguments @{
+                BundleDirectory = $bundle
+                OutputDirectory = (Join-Path $root "output")
+                Version = $version
+                Target = "x86_64-unknown-linux-gnu"
+                ToolAdapterPath = $adapter
+            } -ExpectedText "path"
+        }
+    }
+
+    foreach ($mutation in @("duplicate", "case-alternate")) {
+        Invoke-Scenario -Name "Linux rejects AppImage nested $mutation inventory" -Test {
+            $root = New-FixtureRoot
+            $bundle = New-LinuxFixture -Root $root
+            $adapter = New-ToolAdapter -Root $root
+            [object[]] $inventory = @(Read-AppImageLinkInventory -Root $root)
+            $duplicate = [pscustomobject]@{
+                Relative = [string] $inventory[2].Relative
+                LinkType = "SymbolicLink"
+                Target = [string] $inventory[2].Target
+            }
+            if ($mutation -ceq "case-alternate") {
+                $duplicate.Relative = $duplicate.Relative.Replace(
+                    "usr/",
+                    "USR/"
+                )
+            }
+            $inventory += $duplicate
+            Write-AppImageLinkInventory -Root $root -Inventory $inventory
+            Assert-Rejects -Path $linuxScript -FixtureRoot $root -Arguments @{
+                BundleDirectory = $bundle
+                OutputDirectory = (Join-Path $root "output")
+                Version = $version
+                Target = "x86_64-unknown-linux-gnu"
+                ToolAdapterPath = $adapter
+            } -ExpectedText "duplicate"
+        }
+    }
+
+    Invoke-Scenario -Name "Linux rejects forbidden AppImage link names" -Test {
+        $root = New-FixtureRoot
+        $bundle = New-LinuxFixture -Root $root
+        $adapter = New-ToolAdapter -Root $root
+        [object[]] $inventory = @(Read-AppImageLinkInventory -Root $root)
+        $forbiddenRelative = "usr/lib/wokcore-provider.so"
+        Write-Utf8File `
+            -Path (Join-Path $root "appimage-tree/$forbiddenRelative") `
+            -Content "adapter-link-forbidden"
+        $inventory += [pscustomobject]@{
+            Relative = $forbiddenRelative
+            LinkType = "SymbolicLink"
+            Target = (
+                "x86_64-linux-gnu/" +
+                "gtk-3.0/3.0.0/immodules/im-ibus.so"
+            )
+        }
+        Write-AppImageLinkInventory -Root $root -Inventory $inventory
+        Assert-Rejects -Path $linuxScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $bundle
+            OutputDirectory = (Join-Path $root "output")
+            Version = $version
+            Target = "x86_64-unknown-linux-gnu"
+            ToolAdapterPath = $adapter
+        } -ExpectedText "forbidden"
+    }
+
+    Invoke-Scenario -Name "Linux rejects AppImage reparse points omitted from adapter inventory" -Test {
+        $root = New-FixtureRoot
+        $bundle = New-LinuxFixture -Root $root
+        $adapter = New-ToolAdapter -Root $root
+        [IO.Directory]::CreateDirectory((Join-Path $root "link-target")) |
+            Out-Null
+        Write-Utf8File `
+            -Path (Join-Path $root "appimage-extra-reparse") `
+            -Content "create unlisted reparse fixture"
+        Assert-Rejects -Path $linuxScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $bundle
+            OutputDirectory = (Join-Path $root "output")
+            Version = $version
+            Target = "x86_64-unknown-linux-gnu"
+            ToolAdapterPath = $adapter
+        } -ExpectedText "reparse"
+    }
+
+    Invoke-Scenario -Name "Linux rejects AppImage inventory records absent from the extracted tree" -Test {
+        $root = New-FixtureRoot
+        $bundle = New-LinuxFixture -Root $root
+        $adapter = New-ToolAdapter -Root $root
+        Remove-Item -LiteralPath (
+            Join-Path `
+                $root `
+                "appimage-tree/usr/lib/gtk-3.0/3.0.0/immodules/im-ibus.so"
+        )
+        Assert-Rejects -Path $linuxScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $bundle
+            OutputDirectory = (Join-Path $root "output")
+            Version = $version
+            Target = "x86_64-unknown-linux-gnu"
+            ToolAdapterPath = $adapter
+        } -ExpectedText "present"
     }
 
     Invoke-Scenario -Name "Linux accepts exact arm64 Tauri AppImage links" -Test {

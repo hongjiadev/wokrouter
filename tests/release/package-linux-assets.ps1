@@ -33,15 +33,29 @@ function Assert-RegularPath {
 function Get-SafeTreeItems {
     param(
         [Parameter(Mandatory)][string] $Root,
-        [Parameter(Mandatory)][string] $Format
+        [Parameter(Mandatory)][string] $Format,
+        [Collections.Generic.Dictionary[string, object]] $AllowedLinks
     )
 
+    if ($null -eq $AllowedLinks) {
+        $AllowedLinks = [Collections.Generic.Dictionary[string, object]]::new(
+            [StringComparer]::Ordinal
+        )
+    }
     $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd(
         [IO.Path]::DirectorySeparatorChar,
         [IO.Path]::AltDirectorySeparatorChar
     )
     $rootPrefix = $fullRoot + [IO.Path]::DirectorySeparatorChar
+    $comparison = if ([IO.Path]::DirectorySeparatorChar -ceq "\") {
+        [StringComparison]::OrdinalIgnoreCase
+    } else {
+        [StringComparison]::Ordinal
+    }
     $items = [Collections.Generic.List[object]]::new()
+    $seenLinks = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
     $pending = [Collections.Generic.Stack[string]]::new()
     $pending.Push($fullRoot)
     while ($pending.Count -gt 0) {
@@ -51,26 +65,50 @@ function Get-SafeTreeItems {
             if (
                 -not $fullItem.StartsWith(
                     $rootPrefix,
-                    [StringComparison]::Ordinal
+                    $comparison
                 )
             ) {
                 throw "Extracted $Format inventory escapes its temporary root."
             }
-            if (
+            $relative = $fullItem.Substring($rootPrefix.Length).Replace(
+                [IO.Path]::DirectorySeparatorChar,
+                "/"
+            )
+            $isReparse = (
                 ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne
                 0
-            ) {
-                if (
-                    $Format -ceq "AppImage" -and
-                    $directory.Equals(
-                        $fullRoot,
-                        [StringComparison]::Ordinal
-                    ) -and
-                    @(".DirIcon", "WokRouter.desktop") -ccontains $item.Name
-                ) {
-                    continue
+            )
+            if ($isReparse) {
+                if (-not $AllowedLinks.ContainsKey($relative)) {
+                    throw "Extracted $Format inventory contains a reparse point."
                 }
-                throw "Extracted $Format inventory contains a reparse point."
+                $record = $AllowedLinks[$relative]
+                [object[]] $actualTargets = @($item.Target)
+                if (
+                    [string]::IsNullOrWhiteSpace($ToolAdapterPath) -and
+                    (
+                        [string] $item.LinkType -cne
+                        [string] $record.LinkType -or
+                        $actualTargets.Count -ne 1 -or
+                        $actualTargets[0] -isnot [string] -or
+                        [string] $actualTargets[0] -cne
+                        [string] $record.Target
+                    )
+                ) {
+                    throw "Validated AppImage link changed during traversal."
+                }
+                $null = $seenLinks.Add($relative)
+                continue
+            }
+            if ($AllowedLinks.ContainsKey($relative)) {
+                if ([string]::IsNullOrWhiteSpace($ToolAdapterPath)) {
+                    throw "Validated AppImage link changed during traversal."
+                }
+                if ($item.PSIsContainer) {
+                    throw "Adapter AppImage link contract must be a file."
+                }
+                $null = $seenLinks.Add($relative)
+                continue
             }
             $items.Add($item)
             if ($item.PSIsContainer) {
@@ -78,77 +116,139 @@ function Get-SafeTreeItems {
             }
         }
     }
+    if ($seenLinks.Count -ne $AllowedLinks.Count) {
+        throw "Every AppImage inventory link must remain present during traversal."
+    }
     return $items.ToArray()
+}
+
+function Get-CanonicalAppImageRelativeSegments {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string] $Relative
+    )
+
+    if (
+        [string]::IsNullOrWhiteSpace($Relative) -or
+        $Relative.Contains("\") -or
+        $Relative.StartsWith("/", [StringComparison]::Ordinal) -or
+        $Relative -cmatch "^[A-Za-z]:" -or
+        [IO.Path]::IsPathRooted($Relative) -or
+        [regex]::IsMatch($Relative, "[\x00-\x1F\x7F]")
+    ) {
+        throw "AppImage link inventory path must be canonical and relative."
+    }
+    $segments = [Collections.Generic.List[string]]::new()
+    foreach ($segment in $Relative.Split("/")) {
+        if (
+            [string]::IsNullOrEmpty($segment) -or
+            $segment -ceq "." -or
+            $segment -ceq ".."
+        ) {
+            throw "AppImage link inventory path must be canonical and relative."
+        }
+        $segments.Add($segment)
+    }
+    return $segments.ToArray()
+}
+
+function Get-AppImageContractItem {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string[]] $Segments,
+        [Parameter(Mandatory)][string] $Relative
+    )
+
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar
+    )
+    $current = $fullRoot
+    for ($index = 0; $index -lt $Segments.Count; $index += 1) {
+        $matches = @(
+            Get-ChildItem -LiteralPath $current -Force |
+                Where-Object Name -CEQ $Segments[$index]
+        )
+        if ($matches.Count -ne 1) {
+            throw "AppImage inventory link '$Relative' must be present."
+        }
+        $item = $matches[0]
+        $isLeaf = $index -eq ($Segments.Count - 1)
+        if (-not $isLeaf) {
+            if (
+                ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne
+                0 -or
+                -not $item.PSIsContainer
+            ) {
+                throw "AppImage inventory link '$Relative' must use regular parent directories."
+            }
+            $current = $item.FullName
+        }
+    }
+    return $item
 }
 
 function Get-AppImageLinkTarget {
     param(
         [Parameter(Mandatory)][string] $Root,
         [Parameter(Mandatory)][string] $LinkName,
+        [Parameter(Mandatory)][string[]] $LinkSegments,
         [Parameter(Mandatory)][string] $Target,
-        [Parameter(Mandatory)][string] $ExpectedTarget
+        [Parameter(Mandatory)]
+        [Collections.Generic.Dictionary[string, object]] $AllLinks
     )
 
     if (
         [string]::IsNullOrWhiteSpace($Target) -or
         $Target.Contains("\") -or
+        $Target.StartsWith("/", [StringComparison]::Ordinal) -or
         $Target -cmatch "^[A-Za-z]:" -or
-        [IO.Path]::IsPathRooted($Target)
+        [IO.Path]::IsPathRooted($Target) -or
+        [regex]::IsMatch($Target, "[\x00-\x1F\x7F]")
     ) {
         throw "AppImage link '$LinkName' target must be an unambiguous relative path."
     }
     $segments = [Collections.Generic.List[string]]::new()
+    for ($index = 0; $index -lt ($LinkSegments.Count - 1); $index += 1) {
+        $segments.Add($LinkSegments[$index])
+    }
     foreach ($segment in $Target.Split("/")) {
         if ([string]::IsNullOrEmpty($segment) -or $segment -ceq ".") {
             throw "AppImage link '$LinkName' target is ambiguous."
         }
         if ($segment -ceq "..") {
-            if ($segments.Count -eq 0) {
+            if ($segments.Count -le 1) {
                 throw "AppImage link '$LinkName' target escapes AppDir."
             }
             $segments.RemoveAt($segments.Count - 1)
             continue
         }
-        if ($segment.IndexOf([char] 0) -ge 0) {
-            throw "AppImage link '$LinkName' target is malformed."
-        }
         $segments.Add($segment)
     }
-    $normalizedTarget = [string]::Join("/", $segments)
-    if ($normalizedTarget -cne $ExpectedTarget -or $Target -cne $ExpectedTarget) {
-        throw "AppImage link '$LinkName' does not use its expected target."
+    if ($segments.Count -eq 0) {
+        throw "AppImage link '$LinkName' target escapes AppDir."
     }
 
     $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd(
         [IO.Path]::DirectorySeparatorChar,
         [IO.Path]::AltDirectorySeparatorChar
     )
-    $fullTarget = $fullRoot
-    foreach ($segment in $segments) {
-        $fullTarget = Join-Path $fullTarget $segment
-    }
-    $fullTarget = [IO.Path]::GetFullPath($fullTarget)
-    $rootPrefix = $fullRoot + [IO.Path]::DirectorySeparatorChar
-    $comparison = if ([IO.Path]::DirectorySeparatorChar -ceq "\") {
-        [StringComparison]::OrdinalIgnoreCase
-    } else {
-        [StringComparison]::Ordinal
-    }
-    if (-not $fullTarget.StartsWith($rootPrefix, $comparison)) {
-        throw "AppImage link '$LinkName' target escapes AppDir."
-    }
-
     $current = $fullRoot
     for ($index = 0; $index -lt $segments.Count; $index += 1) {
-        $current = Join-Path $current $segments[$index]
-        try {
-            $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
-        }
-        catch {
+        $matches = @(
+            Get-ChildItem -LiteralPath $current -Force |
+                Where-Object Name -CEQ $segments[$index]
+        )
+        if ($matches.Count -ne 1) {
             throw "AppImage link '$LinkName' target must be an existing regular file."
         }
+        $item = $matches[0]
+        $targetRelative = [string]::Join(
+            "/",
+            @($segments.ToArray())[0..$index]
+        )
         if (
-            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $AllLinks.ContainsKey($targetRelative)
         ) {
             throw "AppImage link '$LinkName' target contains a reparse component."
         }
@@ -157,8 +257,11 @@ function Get-AppImageLinkTarget {
             (-not $isLeaf -and -not $item.PSIsContainer)) {
             throw "AppImage link '$LinkName' target must be an existing regular file."
         }
+        if (-not $isLeaf) {
+            $current = $item.FullName
+        }
     }
-    return $fullTarget
+    return $item.FullName
 }
 
 function Get-ValidatedAppImageLinks {
@@ -176,15 +279,33 @@ function Get-ValidatedAppImageLinks {
     catch {
         throw "AppImage link inventory failed: $($_.Exception.Message)"
     }
-    if ($inventory.Count -ne 2) {
-        throw "AppImage must contain exactly two expected root links."
-    }
-
     $expected = [ordered]@{
         ".DirIcon" = "WokRouter.png"
         "WokRouter.desktop" = "usr/share/applications/WokRouter.desktop"
     }
-    $validated = [ordered]@{}
+    $rawRootLinks = @(
+        $inventory |
+            Where-Object {
+                $_.Relative -is [string] -and
+                -not ([string] $_.Relative).Contains("/") -and
+                -not ([string] $_.Relative).Contains("\")
+            }
+    )
+    if ($rawRootLinks.Count -ne 2) {
+        throw "AppImage must contain exactly two expected root links."
+    }
+    $records = [Collections.Generic.Dictionary[string, object]]::new(
+        [StringComparer]::Ordinal
+    )
+    $caseInsensitive = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    $segmentsByRelative = [Collections.Generic.Dictionary[string, string[]]]::new(
+        [StringComparer]::Ordinal
+    )
+    $forbidden = [regex]::new(
+        "(?i)(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen)"
+    )
     foreach ($record in $inventory) {
         $properties = @($record.PSObject.Properties | ForEach-Object Name)
         [Array]::Sort($properties, [StringComparer]::Ordinal)
@@ -198,9 +319,6 @@ function Get-ValidatedAppImageLinks {
             throw "AppImage link inventory is malformed."
         }
         $relative = [string] $record.Relative
-        if ($relative.Contains("/") -or $relative.Contains("\")) {
-            throw "AppImage links are allowed only at the AppDir root."
-        }
         $caseMatches = @(
             $expected.Keys |
                 Where-Object {
@@ -214,24 +332,79 @@ function Get-ValidatedAppImageLinks {
             throw "AppImage expected link names are case-sensitive."
         }
         if (
-            $caseMatches.Count -ne 1 -or
-            $validated.Contains($relative)
+            $records.ContainsKey($relative) -or
+            -not $caseInsensitive.Add($relative)
         ) {
-            throw "AppImage must contain exactly the two expected root links."
+            throw "AppImage link inventory contains a duplicate or case-alternate path."
         }
         if ([string] $record.LinkType -cne "SymbolicLink") {
-            throw "AppImage expected reparse points must be symbolic links."
+            throw "AppImage reparse points must be symbolic links."
         }
-        $validated[$relative] = Get-AppImageLinkTarget `
+        [string[]] $segments = @(
+            Get-CanonicalAppImageRelativeSegments -Relative $relative
+        )
+        if ($forbidden.IsMatch($segments[$segments.Count - 1])) {
+            throw "AppImage link inventory contains a forbidden payload."
+        }
+        $item = Get-AppImageContractItem `
+            -Root $Root `
+            -Segments $segments `
+            -Relative $relative
+        if ([string]::IsNullOrWhiteSpace($ToolAdapterPath)) {
+            [object[]] $actualTargets = @($item.Target)
+            if (
+                ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq
+                0 -or
+                [string] $item.LinkType -cne "SymbolicLink" -or
+                $actualTargets.Count -ne 1 -or
+                $actualTargets[0] -isnot [string] -or
+                [string] $actualTargets[0] -cne [string] $record.Target
+            ) {
+                throw "Native AppImage link metadata does not match its inventory."
+            }
+        }
+        elseif ($item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Adapter AppImage link contract must be a regular file."
+        }
+        $records.Add($relative, $record)
+        $segmentsByRelative.Add($relative, $segments)
+    }
+
+    [string[]] $rootLinks = @(
+        $records.Keys | Where-Object { -not $_.Contains("/") }
+    )
+    if (
+        $rootLinks.Count -ne 2 -or
+        -not $records.ContainsKey(".DirIcon") -or
+        -not $records.ContainsKey("WokRouter.desktop")
+    ) {
+        throw "AppImage must contain exactly two expected root links."
+    }
+
+    $targets = [Collections.Generic.Dictionary[string, string]]::new(
+        [StringComparer]::Ordinal
+    )
+    foreach ($relative in $records.Keys) {
+        $record = $records[$relative]
+        $targetPath = Get-AppImageLinkTarget `
             -Root $Root `
             -LinkName $relative `
+            -LinkSegments $segmentsByRelative[$relative] `
             -Target ([string] $record.Target) `
-            -ExpectedTarget ([string] $expected[$relative])
+            -AllLinks $records
+        if (
+            $expected.Contains($relative) -and
+            [string] $record.Target -cne [string] $expected[$relative]
+        ) {
+            throw "AppImage link '$relative' does not use its expected target."
+        }
+        $targets.Add($relative, $targetPath)
     }
-    if ($validated.Count -ne 2) {
-        throw "AppImage must contain exactly the two expected root links."
+    return [pscustomobject]@{
+        Records = $records
+        Targets = $targets
     }
-    return $validated
 }
 
 function Remove-TemporaryTree {
@@ -319,14 +492,20 @@ function Get-ValidatedPayloadFiles {
     param(
         [Parameter(Mandatory)][string] $Root,
         [Parameter(Mandatory)][string] $Format,
-        [Parameter(Mandatory)][string] $ExpectedArchitecture
+        [Parameter(Mandatory)][string] $ExpectedArchitecture,
+        [Collections.Generic.Dictionary[string, object]] $AllowedLinks
     )
 
     $null = Assert-RegularPath `
         -Path $Root `
         -Kind Directory `
         -Description "Extracted $Format"
-    $items = @(Get-SafeTreeItems -Root $Root -Format $Format)
+    $items = @(
+        Get-SafeTreeItems `
+            -Root $Root `
+            -Format $Format `
+            -AllowedLinks $AllowedLinks
+    )
     Assert-NoForbiddenPayload -Items $items -Format $Format
     $payloads = Get-RequiredPayloadFiles -Items $items -Format $Format
     foreach ($name in @("wokrouter-desktop", "wokrouter")) {
@@ -407,22 +586,55 @@ function Invoke-Adapter {
         }
         "linux-appimage-link-inventory" {
             $records = [Collections.Generic.List[object]]::new()
-            foreach (
-                $item in Get-ChildItem -LiteralPath $Source -Force |
-                    Where-Object {
-                        ($_.Attributes -band
-                            [IO.FileAttributes]::ReparsePoint) -ne 0
+            $fullSource = [IO.Path]::GetFullPath($Source).TrimEnd(
+                [IO.Path]::DirectorySeparatorChar,
+                [IO.Path]::AltDirectorySeparatorChar
+            )
+            $sourcePrefix = $fullSource + [IO.Path]::DirectorySeparatorChar
+            $pending = [Collections.Generic.Stack[string]]::new()
+            $pending.Push($fullSource)
+            while ($pending.Count -gt 0) {
+                $directory = $pending.Pop()
+                foreach (
+                    $item in Get-ChildItem -LiteralPath $directory -Force
+                ) {
+                    $fullItem = [IO.Path]::GetFullPath($item.FullName)
+                    if (
+                        -not $fullItem.StartsWith(
+                            $sourcePrefix,
+                            [StringComparison]::Ordinal
+                        )
+                    ) {
+                        throw "AppImage link inventory escapes AppDir."
                     }
-            ) {
-                [object[]] $targets = @($item.Target)
-                if ($targets.Count -ne 1 -or $targets[0] -isnot [string]) {
-                    throw "Could not read AppImage symbolic-link target."
+                    if (
+                        ($item.Attributes -band
+                            [IO.FileAttributes]::ReparsePoint) -ne 0
+                    ) {
+                        [object[]] $targets = @($item.Target)
+                        if (
+                            $targets.Count -ne 1 -or
+                            $targets[0] -isnot [string]
+                        ) {
+                            throw "Could not read AppImage symbolic-link target."
+                        }
+                        $records.Add([pscustomobject]@{
+                            Relative = (
+                                $fullItem.Substring($sourcePrefix.Length).
+                                    Replace(
+                                        [IO.Path]::DirectorySeparatorChar,
+                                        "/"
+                                    )
+                            )
+                            LinkType = [string] $item.LinkType
+                            Target = [string] $targets[0]
+                        })
+                        continue
+                    }
+                    if ($item.PSIsContainer) {
+                        $pending.Push($item.FullName)
+                    }
                 }
-                $records.Add([pscustomobject]@{
-                    Relative = $item.Name
-                    LinkType = [string] $item.LinkType
-                    Target = [string] $targets[0]
-                })
             }
             return ConvertTo-Json `
                 -Compress `
@@ -600,7 +812,8 @@ try {
         AppImage = Get-ValidatedPayloadFiles `
             -Root $appDir `
             -Format "AppImage" `
-            -ExpectedArchitecture $architecture
+            -ExpectedArchitecture $architecture `
+            -AllowedLinks $appImageLinks.Records
         deb = Get-ValidatedPayloadFiles `
             -Root $debDir `
             -Format "deb" `
@@ -637,7 +850,7 @@ try {
     $desktopEntry = Get-Content `
         -Raw `
         -Encoding UTF8 `
-        -LiteralPath $appImageLinks["WokRouter.desktop"]
+        -LiteralPath $appImageLinks.Targets["WokRouter.desktop"]
     if ($desktopEntry -notmatch (
             "(?m)^X-AppImage-Version=" + [regex]::Escape($Version) + "$"
         )) {
