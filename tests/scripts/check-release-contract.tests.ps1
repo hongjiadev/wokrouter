@@ -21,10 +21,15 @@ function New-ReleaseFixture {
     )
     $null = New-Item -ItemType Directory -Path (Join-Path $root ".github/workflows") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "docs/operations") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "tests/release") -Force
     foreach ($relativePath in @(
             ".github/workflows/ci.yml",
             ".github/workflows/release.yml",
-            "docs/operations/development.md"
+            "docs/operations/development.md",
+            "tests/release/WokRouter.ReleaseContract.psm1",
+            "tests/release/package-linux-assets.ps1",
+            "tests/release/package-macos-assets.ps1",
+            "tests/release/package-windows-assets.ps1"
         )) {
         Copy-Item `
             -LiteralPath (Join-Path $repositoryRoot $relativePath) `
@@ -175,6 +180,30 @@ try {
             -ExpectedText "aarch64-pc-windows-msvc" `
             -Scenario "missing Windows arm64 target" `
             -RequireSixTargets
+    }
+
+    Invoke-Scenario -Name "friendly asset contract module must remain complete" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/WokRouter.ReleaseContract.psm1" `
+            -OldText '"WokRouter-v$Version-$($contract.System)-"' `
+            -NewText '"WokRouter-v$Version-$($contract.Target)-"'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "exact 16 friendly payload names" `
+            -Scenario "public names exposing target triples"
+    }
+
+    Invoke-Scenario -Name "all platform packagers must remain present" -Test {
+        $root = New-ReleaseFixture
+        Remove-Item -LiteralPath (
+            Join-Path $root "tests/release/package-macos-assets.ps1"
+        )
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "Required release contract file is missing" `
+            -Scenario "missing macOS packager"
     }
 
     Invoke-Scenario -Name "release matrix must retain Linux arm64" -Test {

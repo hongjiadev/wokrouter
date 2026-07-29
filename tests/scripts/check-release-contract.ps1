@@ -16,6 +16,18 @@ $rootPath = (Resolve-Path -LiteralPath $Root).Path
 $releasePath = Join-Path $rootPath ".github/workflows/release.yml"
 $ciPath = Join-Path $rootPath ".github/workflows/ci.yml"
 $developmentPath = Join-Path $rootPath "docs/operations/development.md"
+$releaseContractPath = Join-Path `
+    $rootPath `
+    "tests/release/WokRouter.ReleaseContract.psm1"
+$linuxPackagerPath = Join-Path `
+    $rootPath `
+    "tests/release/package-linux-assets.ps1"
+$macPackagerPath = Join-Path `
+    $rootPath `
+    "tests/release/package-macos-assets.ps1"
+$windowsPackagerPath = Join-Path `
+    $rootPath `
+    "tests/release/package-windows-assets.ps1"
 $failures = [System.Collections.Generic.List[string]]::new()
 
 function Add-Failure {
@@ -41,13 +53,95 @@ function Get-JobBlock {
     return $matches[0].Value
 }
 
-foreach ($path in @($releasePath, $ciPath, $developmentPath)) {
+foreach ($path in @(
+        $releasePath,
+        $ciPath,
+        $developmentPath,
+        $releaseContractPath,
+        $linuxPackagerPath,
+        $macPackagerPath,
+        $windowsPackagerPath
+    )) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         Add-Failure -Message "Required release contract file is missing: $path"
     }
 }
 
 if ($failures.Count -eq 0) {
+    Import-Module $releaseContractPath -Force
+    try {
+        [string[]] $expectedTargets = @(
+            "aarch64-apple-darwin",
+            "aarch64-pc-windows-msvc",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-apple-darwin",
+            "x86_64-pc-windows-msvc",
+            "x86_64-unknown-linux-gnu"
+        )
+        [string[]] $expectedPayloads = @(
+            "WokRouter-v0.1.1-Linux-arm64.AppImage",
+            "WokRouter-v0.1.1-Linux-arm64.deb",
+            "WokRouter-v0.1.1-Linux-arm64.rpm",
+            "WokRouter-v0.1.1-Linux-x86_64.AppImage",
+            "WokRouter-v0.1.1-Linux-x86_64.deb",
+            "WokRouter-v0.1.1-Linux-x86_64.rpm",
+            "WokRouter-v0.1.1-Windows-arm64-Portable.zip",
+            "WokRouter-v0.1.1-Windows-arm64.msi",
+            "WokRouter-v0.1.1-Windows-x86_64-Portable.zip",
+            "WokRouter-v0.1.1-Windows-x86_64.msi",
+            "WokRouter-v0.1.1-macOS-arm64.dmg",
+            "WokRouter-v0.1.1-macOS-arm64.tar.gz",
+            "WokRouter-v0.1.1-macOS-arm64.zip",
+            "WokRouter-v0.1.1-macOS-x86_64.dmg",
+            "WokRouter-v0.1.1-macOS-x86_64.tar.gz",
+            "WokRouter-v0.1.1-macOS-x86_64.zip"
+        )
+        [string[]] $actualTargets = @(
+            Get-WokRouterTargetContracts -Version "0.1.1" |
+                ForEach-Object Target
+        )
+        [string[]] $actualPayloads = @(
+            Get-WokRouterPayloadNames -Version "0.1.1"
+        )
+        if (
+            [string]::Join("`n", $actualTargets) -cne
+            [string]::Join("`n", $expectedTargets)
+        ) {
+            Add-Failure `
+                -Message "Release contract must return the exact 6 ordinal target names."
+        }
+        if (
+            [string]::Join("`n", $actualPayloads) -cne
+            [string]::Join("`n", $expectedPayloads) -or
+            $actualPayloads -match "unknown|pc-windows|apple-darwin"
+        ) {
+            Add-Failure `
+                -Message "Release contract must return the exact 16 friendly payload names."
+        }
+    }
+    catch {
+        Add-Failure `
+            -Message "Release asset contract could not be evaluated: $($_.Exception.Message)"
+    }
+    finally {
+        Remove-Module WokRouter.ReleaseContract -ErrorAction SilentlyContinue
+    }
+
+    foreach ($packagerPath in @(
+            $linuxPackagerPath,
+            $macPackagerPath,
+            $windowsPackagerPath
+        )) {
+        $packagerSource = Get-Content `
+            -LiteralPath $packagerPath `
+            -Raw `
+            -Encoding UTF8
+        if ($packagerSource -match "(?i)\b(?:skip|bypass)\b") {
+            Add-Failure `
+                -Message "Release packagers must not contain Skip or Bypass production paths."
+        }
+    }
+
     $release = (Get-Content -LiteralPath $releasePath -Raw -Encoding UTF8).Replace("`r`n", "`n")
     $ci = (Get-Content -LiteralPath $ciPath -Raw -Encoding UTF8).Replace("`r`n", "`n")
     $development = Get-Content -LiteralPath $developmentPath -Raw -Encoding UTF8
