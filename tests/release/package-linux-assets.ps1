@@ -30,27 +30,153 @@ function Assert-RegularPath {
     return $item
 }
 
-function Assert-TreeSafe {
-    param([Parameter(Mandatory)][string] $Root)
+function Get-SafeTreeItems {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $Format
+    )
 
-    foreach ($item in Get-ChildItem -LiteralPath $Root -Force -Recurse) {
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Extracted AppImage inventory contains a reparse point."
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar
+    )
+    $rootPrefix = $fullRoot + [IO.Path]::DirectorySeparatorChar
+    $items = [Collections.Generic.List[object]]::new()
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $pending.Push($fullRoot)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($item in Get-ChildItem -LiteralPath $directory -Force) {
+            $fullItem = [IO.Path]::GetFullPath($item.FullName)
+            if (
+                -not $fullItem.StartsWith(
+                    $rootPrefix,
+                    [StringComparison]::Ordinal
+                )
+            ) {
+                throw "Extracted $Format inventory escapes its temporary root."
+            }
+            if (
+                ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne
+                0
+            ) {
+                throw "Extracted $Format inventory contains a reparse point."
+            }
+            $items.Add($item)
+            if ($item.PSIsContainer) {
+                $pending.Push($item.FullName)
+            }
         }
     }
+    return $items.ToArray()
+}
+
+function Remove-TemporaryTree {
+    param([Parameter(Mandatory)][string] $Root)
+
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $pending.Push($Root)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($item in Get-ChildItem -LiteralPath $directory -Force) {
+            if (
+                ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne
+                0
+            ) {
+                if ($item.PSIsContainer) {
+                    [IO.Directory]::Delete($item.FullName, $false)
+                }
+                else {
+                    [IO.File]::Delete($item.FullName)
+                }
+            }
+            elseif ($item.PSIsContainer) {
+                $pending.Push($item.FullName)
+            }
+        }
+    }
+    [IO.Directory]::Delete($Root, $true)
 }
 
 function Assert-NoForbiddenPayload {
-    param([Parameter(Mandatory)][string] $Root)
+    param(
+        [Parameter(Mandatory)][object[]] $Items,
+        [Parameter(Mandatory)][string] $Format
+    )
 
     $forbidden = [regex]::new(
         "(?i)(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen)"
     )
-    foreach ($item in Get-ChildItem -LiteralPath $Root -Force -Recurse) {
+    foreach ($item in $Items) {
         if ($forbidden.IsMatch($item.Name)) {
-            throw "Extracted AppImage contains a forbidden payload."
+            throw "Extracted $Format contains a forbidden payload."
         }
     }
+}
+
+function Get-RequiredPayloadFiles {
+    param(
+        [Parameter(Mandatory)][object[]] $Items,
+        [Parameter(Mandatory)][string] $Format
+    )
+
+    $payloads = [ordered]@{}
+    foreach ($name in @(
+            "wokrouter-desktop",
+            "wokrouter",
+            "LICENSE-APACHE",
+            "LICENSE-MIT",
+            "NOTICE.md",
+            "README.md"
+        )) {
+        $matching = @(
+            $Items |
+                Where-Object {
+                    -not $_.PSIsContainer -and
+                    $_.Name.Equals(
+                        $name,
+                        [StringComparison]::OrdinalIgnoreCase
+                    )
+                }
+        )
+        if (
+            $matching.Count -ne 1 -or
+            ($matching[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne
+            0 -or
+            $matching[0].Name -cne $name
+        ) {
+            throw "Extracted $Format required payload inventory is invalid for '$name'."
+        }
+        $payloads[$name] = $matching[0].FullName
+    }
+    return $payloads
+}
+
+function Get-ValidatedPayloadFiles {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $Format,
+        [Parameter(Mandatory)][string] $ExpectedArchitecture
+    )
+
+    $null = Assert-RegularPath `
+        -Path $Root `
+        -Kind Directory `
+        -Description "Extracted $Format"
+    $items = @(Get-SafeTreeItems -Root $Root -Format $Format)
+    Assert-NoForbiddenPayload -Items $items -Format $Format
+    $payloads = Get-RequiredPayloadFiles -Items $items -Format $Format
+    foreach ($name in @("wokrouter-desktop", "wokrouter")) {
+        $actualArchitecture = (
+            Invoke-Adapter `
+                -Operation "binary-architecture" `
+                -Source $payloads[$name]
+        ).Trim()
+        if ($actualArchitecture -cne $ExpectedArchitecture) {
+            throw "$Format binary architecture does not match '$ExpectedArchitecture'."
+        }
+    }
+    return $payloads
 }
 
 function Invoke-Adapter {
@@ -114,6 +240,34 @@ function Invoke-Adapter {
                 -Kind Directory `
                 -Description "Extracted AppImage"
             Move-Item -LiteralPath $nativeRoot -Destination $Destination
+            return
+        }
+        "linux-deb-extract" {
+            & dpkg-deb --extract $Source $Destination
+            if ($LASTEXITCODE -ne 0) {
+                throw "Could not extract deb."
+            }
+            return
+        }
+        "linux-rpm-extract" {
+            [IO.Directory]::CreateDirectory($Destination) | Out-Null
+            $bash = (Get-Command bash -ErrorAction Stop).Source
+            & $bash `
+                -o pipefail `
+                -c @'
+set -euo pipefail
+package=$1
+destination=$2
+cd -- "$destination"
+rpm2cpio "$package" |
+  cpio --extract --make-directories --no-absolute-filenames --quiet
+'@ `
+                "wokrouter-rpm-extract" `
+                $Source `
+                $Destination
+            if ($LASTEXITCODE -ne 0) {
+                throw "Could not extract rpm."
+            }
             return
         }
         "binary-architecture" {
@@ -234,6 +388,8 @@ $temporary = Join-Path $temporaryParent (
 [IO.Directory]::CreateDirectory($temporary) | Out-Null
 try {
     $appDir = Join-Path $temporary "AppDir"
+    $debDir = Join-Path $temporary "deb-root"
+    $rpmDir = Join-Path $temporary "rpm-root"
     Push-Location -LiteralPath $temporary
     try {
         $null = Invoke-Adapter `
@@ -244,25 +400,51 @@ try {
     finally {
         Pop-Location
     }
-    $null = Assert-RegularPath `
-        -Path $appDir `
-        -Kind Directory `
-        -Description "Extracted AppImage"
-    Assert-TreeSafe -Root $appDir
-    Assert-NoForbiddenPayload -Root $appDir
+    $null = Invoke-Adapter `
+        -Operation "linux-deb-extract" `
+        -Source $deb `
+        -Destination $debDir
+    $null = Invoke-Adapter `
+        -Operation "linux-rpm-extract" `
+        -Source $rpm `
+        -Destination $rpmDir
 
-    $desktop = Join-Path $appDir "usr/bin/wokrouter-desktop"
-    $sidecar = Join-Path $appDir "usr/bin/wokrouter"
-    foreach ($binary in @($desktop, $sidecar)) {
-        $null = Assert-RegularPath `
-            -Path $binary `
-            -Kind File `
-            -Description "AppImage binary"
-        $actualArchitecture = (
-            Invoke-Adapter -Operation "binary-architecture" -Source $binary
-        ).Trim()
-        if ($actualArchitecture -cne $architecture) {
-            throw "AppImage binary architecture does not match '$architecture'."
+    $payloads = [ordered]@{
+        AppImage = Get-ValidatedPayloadFiles `
+            -Root $appDir `
+            -Format "AppImage" `
+            -ExpectedArchitecture $architecture
+        deb = Get-ValidatedPayloadFiles `
+            -Root $debDir `
+            -Format "deb" `
+            -ExpectedArchitecture $architecture
+        rpm = Get-ValidatedPayloadFiles `
+            -Root $rpmDir `
+            -Format "rpm" `
+            -ExpectedArchitecture $architecture
+    }
+    foreach ($name in @(
+            "wokrouter-desktop",
+            "wokrouter",
+            "LICENSE-APACHE",
+            "LICENSE-MIT",
+            "NOTICE.md",
+            "README.md"
+        )) {
+        $expectedHash = (
+            Get-FileHash `
+                -Algorithm SHA256 `
+                -LiteralPath $payloads.AppImage[$name]
+        ).Hash
+        foreach ($format in @("deb", "rpm")) {
+            $actualHash = (
+                Get-FileHash `
+                    -Algorithm SHA256 `
+                    -LiteralPath $payloads[$format][$name]
+            ).Hash
+            if ($actualHash -cne $expectedHash) {
+                throw "Linux payload '$name' must be byte-identical across formats."
+            }
         }
     }
     $desktopEntry = Get-Content `
@@ -287,7 +469,7 @@ finally {
         ) -and
         [IO.Directory]::Exists($fullTemporary)
     ) {
-        [IO.Directory]::Delete($fullTemporary, $true)
+        Remove-TemporaryTree -Root $fullTemporary
     }
 }
 

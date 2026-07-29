@@ -99,6 +99,26 @@ switch ($Operation) {
         Copy-Item -LiteralPath (Join-Path $root "appimage-tree") `
             -Destination $Destination -Recurse
     }
+    "linux-deb-extract" {
+        Copy-Item -LiteralPath (Join-Path $root "deb-tree") `
+            -Destination $Destination -Recurse
+        if (Test-Path -LiteralPath (Join-Path $root "deb-reparse")) {
+            $null = New-Item `
+                -ItemType Junction `
+                -Path (Join-Path $Destination "unsafe-link") `
+                -Target (Join-Path $root "link-target")
+        }
+    }
+    "linux-rpm-extract" {
+        Copy-Item -LiteralPath (Join-Path $root "rpm-tree") `
+            -Destination $Destination -Recurse
+        if (Test-Path -LiteralPath (Join-Path $root "rpm-reparse")) {
+            $null = New-Item `
+                -ItemType Junction `
+                -Path (Join-Path $Destination "unsafe-link") `
+                -Target (Join-Path $root "link-target")
+        }
+    }
     "binary-architecture" {
         $text = Get-Content -Raw -Encoding UTF8 $Source
         if ($text.Contains("arm64")) { "arm64" } else { "x86_64" }
@@ -217,9 +237,21 @@ function New-LinuxFixture {
     Write-Utf8File `
         -Path (Join-Path $appRoot "usr/bin/wokrouter") `
         -Content "sidecar-$Architecture"
+    Copy-ReleaseDocuments -Destination (Join-Path $appRoot "usr/share/wokrouter")
     Write-Utf8File `
         -Path (Join-Path $appRoot "WokRouter.desktop") `
         -Content "X-AppImage-Version=$version"
+    foreach ($kind in @("deb", "rpm")) {
+        $payloadRoot = Join-Path $Root "$kind-tree"
+        Write-Utf8File `
+            -Path (Join-Path $payloadRoot "usr/bin/wokrouter-desktop") `
+            -Content "desktop-$Architecture"
+        Write-Utf8File `
+            -Path (Join-Path $payloadRoot "usr/bin/wokrouter") `
+            -Content "sidecar-$Architecture"
+        Copy-ReleaseDocuments `
+            -Destination (Join-Path $payloadRoot "usr/share/wokrouter")
+    }
     return $bundle
 }
 
@@ -530,6 +562,24 @@ try {
         ) {
             throw "Linux extraction did not run in its validated temporary root."
         }
+        foreach ($operation in @("linux-deb-extract", "linux-rpm-extract")) {
+            if (
+                @(
+                    Get-Content -Encoding UTF8 (Join-Path $root "adapter.log") |
+                        Where-Object {
+                            $_.StartsWith(
+                                "$operation|",
+                                [StringComparison]::Ordinal
+                            )
+                        }
+                ).Count -ne 1
+            ) {
+                throw "$operation was not called exactly once."
+            }
+        }
+        if (Test-Path -LiteralPath $extractWorkingDirectory) {
+            throw "Linux temporary extraction root was not cleaned after success."
+        }
     }
 
     Invoke-Scenario -Name "Linux rejects missing duplicate extra and directory sources" -Test {
@@ -607,6 +657,100 @@ try {
             Target = "x86_64-unknown-linux-gnu"
             ToolAdapterPath = $adapter
         } -ExpectedText "forbidden"
+    }
+
+    foreach ($kind in @("deb", "rpm")) {
+        foreach ($mutation in @(
+                "missing-sidecar",
+                "wrong-architecture",
+                "forbidden",
+                "missing-document",
+                "wrong-document",
+                "case-alternate",
+                "reparse"
+            )) {
+            Invoke-Scenario -Name "Linux rejects $kind $mutation content" -Test {
+                $root = New-FixtureRoot
+                $bundle = New-LinuxFixture -Root $root
+                $adapter = New-ToolAdapter -Root $root
+                $tree = Join-Path $root "$kind-tree"
+                $expected = switch ($mutation) {
+                    "missing-sidecar" {
+                        Remove-Item -LiteralPath (Join-Path $tree "usr/bin/wokrouter")
+                        "inventory"
+                    }
+                    "wrong-architecture" {
+                        Write-Utf8File `
+                            -Path (Join-Path $tree "usr/bin/wokrouter") `
+                            -Content "sidecar-arm64"
+                        "architecture"
+                    }
+                    "forbidden" {
+                        Write-Utf8File `
+                            -Path (Join-Path $tree "usr/bin/wokcore") `
+                            -Content "forbidden"
+                        "forbidden"
+                    }
+                    "missing-document" {
+                        Remove-Item -LiteralPath (
+                            Join-Path $tree "usr/share/wokrouter/README.md"
+                        )
+                        "inventory"
+                    }
+                    "wrong-document" {
+                        Write-Utf8File `
+                            -Path (Join-Path $tree "usr/share/wokrouter/NOTICE.md") `
+                            -Content "wrong document"
+                        "byte-identical"
+                    }
+                    "case-alternate" {
+                        Write-Utf8File `
+                            -Path (Join-Path $tree "alternate/README.MD") `
+                            -Content "alternate"
+                        "inventory"
+                    }
+                    "reparse" {
+                        [IO.Directory]::CreateDirectory(
+                            (Join-Path $root "link-target")
+                        ) | Out-Null
+                        Write-Utf8File `
+                            -Path (Join-Path $root "$kind-reparse") `
+                            -Content "create reparse fixture"
+                        "reparse"
+                    }
+                }
+                Assert-Rejects `
+                    -Path $linuxScript `
+                    -FixtureRoot $root `
+                    -Arguments @{
+                        BundleDirectory = $bundle
+                        OutputDirectory = (Join-Path $root "output")
+                        Version = $version
+                        Target = "x86_64-unknown-linux-gnu"
+                        ToolAdapterPath = $adapter
+                    } `
+                    -ExpectedText $expected
+            }
+        }
+    }
+
+    Invoke-Scenario -Name "Linux accepts exact arm64 AppImage deb and rpm payloads" -Test {
+        $root = New-FixtureRoot
+        $bundle = New-LinuxFixture -Root $root -Architecture arm64
+        $adapter = New-ToolAdapter -Root $root
+        $actual = Invoke-Packager `
+            -Path $linuxScript `
+            -FixtureRoot $root `
+            -Arguments @{
+                BundleDirectory = $bundle
+                OutputDirectory = (Join-Path $root "output")
+                Version = $version
+                Target = "aarch64-unknown-linux-gnu"
+                ToolAdapterPath = $adapter
+            }
+        if ($actual.Count -ne 3) {
+            throw "Linux arm64 packager returned the wrong output count."
+        }
     }
 
     Invoke-Scenario -Name "macOS packages one app into exact three formats" -Test {
