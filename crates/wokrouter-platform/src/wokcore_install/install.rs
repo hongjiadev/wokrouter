@@ -21,7 +21,7 @@ use super::{
     WokCoreInstallError, WokCoreInstallOutcome, WokCoreInstallSource,
     manifest::{
         MAX_ARTIFACT_BYTES, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, ReleaseArtifact,
-        ReleaseCandidate, current_target, verify_manifest,
+        ReleaseCandidate, current_target, is_release_file, verify_manifest,
     },
 };
 
@@ -128,6 +128,34 @@ async fn fetch_release(
 ) -> Result<ReleaseCandidate, WokCoreInstallError> {
     let manifest_url = source
         .origin
+        .join("wokcore-update-v2.json")
+        .map_err(|_| WokCoreInstallError::InvalidSource)?;
+    match fetch_document(client, source, manifest_url, MAX_MANIFEST_BYTES).await? {
+        FetchDocument::Found(manifest) => {
+            let signature_url = source
+                .origin
+                .join("wokcore-update-v2.json.minisig")
+                .map_err(|_| WokCoreInstallError::InvalidSource)?;
+            let signature =
+                fetch_bounded(client, source, signature_url, MAX_SIGNATURE_BYTES).await?;
+            verify_manifest(
+                &manifest,
+                &signature,
+                &source.public_key,
+                current_target(),
+                2,
+            )
+        }
+        FetchDocument::NotFound => fetch_v1_release(client, source).await,
+    }
+}
+
+async fn fetch_v1_release(
+    client: &reqwest::Client,
+    source: &WokCoreInstallSource,
+) -> Result<ReleaseCandidate, WokCoreInstallError> {
+    let manifest_url = source
+        .origin
         .join("wokcore-update-v1.json")
         .map_err(|_| WokCoreInstallError::InvalidSource)?;
     let signature_url = source
@@ -136,7 +164,18 @@ async fn fetch_release(
         .map_err(|_| WokCoreInstallError::InvalidSource)?;
     let manifest = fetch_bounded(client, source, manifest_url, MAX_MANIFEST_BYTES).await?;
     let signature = fetch_bounded(client, source, signature_url, MAX_SIGNATURE_BYTES).await?;
-    verify_manifest(&manifest, &signature, &source.public_key, current_target())
+    verify_manifest(
+        &manifest,
+        &signature,
+        &source.public_key,
+        current_target(),
+        1,
+    )
+}
+
+enum FetchDocument {
+    Found(Vec<u8>),
+    NotFound,
 }
 
 async fn fetch_bounded(
@@ -145,7 +184,22 @@ async fn fetch_bounded(
     url: Url,
     maximum_bytes: usize,
 ) -> Result<Vec<u8>, WokCoreInstallError> {
+    match fetch_document(client, source, url, maximum_bytes).await? {
+        FetchDocument::Found(body) => Ok(body),
+        FetchDocument::NotFound => Err(WokCoreInstallError::DownloadFailed),
+    }
+}
+
+async fn fetch_document(
+    client: &reqwest::Client,
+    source: &WokCoreInstallSource,
+    url: Url,
+    maximum_bytes: usize,
+) -> Result<FetchDocument, WokCoreInstallError> {
     let mut response = send_release_request(client, source, url).await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(FetchDocument::NotFound);
+    }
     if !response.status().is_success()
         || response
             .content_length()
@@ -173,7 +227,7 @@ async fn fetch_bounded(
         }
         body.extend_from_slice(&chunk);
     }
-    Ok(body)
+    Ok(FetchDocument::Found(body))
 }
 
 async fn download_artifact(
@@ -327,6 +381,8 @@ fn validate_initial_url(
         url.path(),
         "/hongjiadev/wokcore/releases/latest/download/wokcore-update-v1.json"
             | "/hongjiadev/wokcore/releases/latest/download/wokcore-update-v1.json.minisig"
+            | "/hongjiadev/wokcore/releases/latest/download/wokcore-update-v2.json"
+            | "/hongjiadev/wokcore/releases/latest/download/wokcore-update-v2.json.minisig"
     );
     (url.scheme() == "https"
         && url.host_str() == Some("github.com")
@@ -358,8 +414,7 @@ fn validate_versioned_release_url(url: &Url) -> Result<(), WokCoreInstallError> 
         && url.query().is_none()
         && url.fragment().is_none()
         && parsed.to_string() == version
-        && !file.is_empty()
-        && !file.contains('/'))
+        && is_release_file(version, file))
     .then_some(())
     .ok_or(WokCoreInstallError::InvalidSource)
 }
@@ -879,7 +934,8 @@ mod tests {
     use super::{
         RecordCommitError, ReleaseArtifact, WokCoreInstallError, extract_executable,
         finish_record_commit, publish_candidate_with_sync, validate_latest_release_redirect,
-        validate_release_asset_redirect, write_install_record_with_sync,
+        validate_release_asset_redirect, validate_versioned_release_url,
+        write_install_record_with_sync,
     };
 
     #[test]
@@ -897,6 +953,38 @@ mod tests {
                 .unwrap()
             )
             .is_ok()
+        );
+        let latest_v2 = Url::parse(
+            "https://github.com/hongjiadev/wokcore/releases/latest/download/wokcore-update-v2.json",
+        )
+        .unwrap();
+        assert!(
+            validate_latest_release_redirect(
+                &latest_v2,
+                &Url::parse(
+                    "https://github.com/hongjiadev/wokcore/releases/download/v1.2.3/wokcore-update-v2.json"
+                )
+                .unwrap()
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_versioned_release_url(
+                &Url::parse(
+                    "https://github.com/hongjiadev/wokcore/releases/download/v1.2.3/WokCore-v1.2.3-Windows-arm64-Portable.zip"
+                )
+                .unwrap()
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_versioned_release_url(
+                &Url::parse(
+                    "https://github.com/hongjiadev/wokcore/releases/download/v1.2.3/arbitrary.zip"
+                )
+                .unwrap()
+            )
+            .is_err()
         );
         for rejected in [
             "https://github.com/hongjiadev/other/releases/download/v1.2.3/wokcore-update-v1.json",

@@ -13,6 +13,7 @@ const {
   stageBundleArtifact,
   stageBuiltSidecars,
   tauriTargetTriple,
+  wokCoreArtifactName,
 } = sidecars;
 
 const supportedTauriTargets = [
@@ -181,6 +182,51 @@ describe("target environment resolution", () => {
 });
 
 describe("sidecar staging paths", () => {
+  it("derives exact WokCore v1 and v2 portable artifact names", () => {
+    expect(
+      wokCoreArtifactName({
+        schemaVersion: 1,
+        targetTriple: "x86_64-pc-windows-msvc",
+        version: "1.2.3",
+      }),
+    ).toBe("wokcore-v1.2.3-x86_64-pc-windows-msvc.zip");
+    expect(
+      wokCoreArtifactName({
+        schemaVersion: 2,
+        targetTriple: "aarch64-pc-windows-msvc",
+        version: "1.2.3",
+      }),
+    ).toBe("WokCore-v1.2.3-Windows-arm64-Portable.zip");
+    expect(
+      wokCoreArtifactName({
+        schemaVersion: 2,
+        targetTriple: "aarch64-unknown-linux-gnu",
+        version: "1.2.3",
+      }),
+    ).toBe("WokCore-v1.2.3-Linux-arm64.tar.gz");
+    expect(
+      wokCoreArtifactName({
+        schemaVersion: 2,
+        targetTriple: "x86_64-apple-darwin",
+        version: "1.2.3-1a+build.7",
+      }),
+    ).toBe("WokCore-v1.2.3-1a+build.7-macOS-x86_64.tar.gz");
+    expect(() =>
+      wokCoreArtifactName({
+        schemaVersion: 2,
+        targetTriple: "x86_64-apple-darwin",
+        version: "01.2.3",
+      }),
+    ).toThrow("Invalid WokCore version.");
+    expect(() =>
+      wokCoreArtifactName({
+        schemaVersion: 1,
+        targetTriple: "aarch64-pc-windows-msvc",
+        version: "1.2.3",
+      }),
+    ).toThrow("WokCore v1 does not support this target.");
+  });
+
   it("uses distinct target-specific online and offline artifact names", () => {
     expect(resolveBundleKind(undefined)).toBe("online");
     expect(
@@ -282,6 +328,69 @@ describe("sidecar staging paths", () => {
       "/work/wokrouter/target/wokrouter-bundles/wokrouter-offline-aarch64-apple-darwin/wokcore-v1.2.3-aarch64-apple-darwin.tar.gz",
     ]);
     expect(copyFileSync).toHaveBeenCalledTimes(4);
+  });
+
+  it("stages a complete v2 WokCore set and rejects mixed manifest versions", () => {
+    const fileSystem = {
+      copyFileSync: vi.fn(),
+      existsSync: () => true,
+      mkdirSync: vi.fn(),
+      rmSync: vi.fn(),
+    };
+    const common = {
+      kind: "offline",
+      targetDir: "/work/wokrouter/target",
+      targetTriple: "aarch64-pc-windows-msvc",
+      hostPlatform: "linux",
+      stagedSidecars: [
+        {
+          source:
+            "/work/wokrouter/target/aarch64-pc-windows-msvc/release/wokrouter.exe",
+          destination:
+            "/work/wokrouter/apps/desktop/src-tauri/binaries/wokrouter-aarch64-pc-windows-msvc.exe",
+        },
+      ],
+      fileSystem,
+    };
+
+    const result = stageBundleArtifact({
+      ...common,
+      offlineWokCore: {
+        manifest: "/release/wokcore-update-v2.json",
+        signature: "/release/wokcore-update-v2.json.minisig",
+        artifact: "/release/WokCore-v1.2.3-Windows-arm64-Portable.zip",
+      },
+    });
+
+    expect(result.files.map(({ destination }) => destination)).toEqual([
+      "/work/wokrouter/target/wokrouter-bundles/wokrouter-offline-aarch64-pc-windows-msvc/wokrouter-aarch64-pc-windows-msvc.exe",
+      "/work/wokrouter/target/wokrouter-bundles/wokrouter-offline-aarch64-pc-windows-msvc/wokcore-update-v2.json",
+      "/work/wokrouter/target/wokrouter-bundles/wokrouter-offline-aarch64-pc-windows-msvc/wokcore-update-v2.json.minisig",
+      "/work/wokrouter/target/wokrouter-bundles/wokrouter-offline-aarch64-pc-windows-msvc/WokCore-v1.2.3-Windows-arm64-Portable.zip",
+    ]);
+
+    expect(() =>
+      stageBundleArtifact({
+        ...common,
+        offlineWokCore: {
+          manifest: "/release/wokcore-update-v2.json",
+          signature: "/release/wokcore-update-v1.json.minisig",
+          artifact:
+            "/release/WokCore-v1.2.3-Windows-arm64-Portable.zip",
+        },
+      }),
+    ).toThrow("WokCore manifest and signature versions do not match.");
+    expect(() =>
+      stageBundleArtifact({
+        ...common,
+        offlineWokCore: {
+          manifest: "/release/wokcore-update-v2.json",
+          signature: "/release/wokcore-update-v2.json.minisig",
+          artifact:
+            "/release/wokcore-v1.2.3-aarch64-pc-windows-msvc.zip",
+        },
+      }),
+    ).toThrow("WokCore manifest and artifact versions do not match.");
   });
 
   it("derives the executable extension from the target triple", () => {

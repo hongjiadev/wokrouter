@@ -18,6 +18,9 @@ use wokrouter_platform::{
 const PUBLIC_KEY: &str = include_str!("fixtures/wokcore-install/minisign.pub");
 const MANIFEST: &[u8] = include_bytes!("fixtures/wokcore-install/wokcore-update-v1.json");
 const SIGNATURE: &[u8] = include_bytes!("fixtures/wokcore-install/wokcore-update-v1.json.minisig");
+const V2_MANIFEST: &[u8] = include_bytes!("fixtures/wokcore-install/wokcore-update-v2.json");
+const V2_SIGNATURE: &[u8] =
+    include_bytes!("fixtures/wokcore-install/wokcore-update-v2.json.minisig");
 const WINDOWS_ARCHIVE: &[u8] = &[
     80, 75, 3, 4, 20, 0, 0, 0, 0, 0, 0, 0, 33, 0, 248, 159, 107, 102, 14, 0, 0, 0, 14, 0, 0, 0, 11,
     0, 0, 0, 119, 111, 107, 99, 111, 114, 101, 46, 101, 120, 101, 110, 101, 119, 32, 101, 120, 101,
@@ -45,17 +48,27 @@ fn archive_fixtures_do_not_drift_from_signed_manifest() {
     assert_eq!(MANIFEST.len(), 1701);
     assert_eq!(
         format!("{:x}", Sha256::digest(MANIFEST)),
-        "c9e61b63a38067d3e8ceed3bc3cd051cc2562175502856f5a341fa6012d930b5"
+        "eaee3c283f5ed4c797aeaab8740220a607757ada4c2fb8c47887201947973a4c"
     );
-    assert_eq!(SIGNATURE.len(), 292);
+    assert_eq!(SIGNATURE.len(), 293);
     assert_eq!(
         format!("{:x}", Sha256::digest(SIGNATURE)),
-        "fbf1193e515298b3163b72e9c6bf547d0b611ab3d60bd51fd3c48806c333c7a8"
+        "bec7a76ca9e2acc62062bd3bb0cca006365e2fda7453a56bada3c3cb6ff56a59"
+    );
+    assert_eq!(V2_MANIFEST.len(), 1934);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(V2_MANIFEST)),
+        "2cacdcbe85345250dacc649bf019ce855e25b6c11aa70eff4ad4c75a90ba385b"
+    );
+    assert_eq!(V2_SIGNATURE.len(), 293);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(V2_SIGNATURE)),
+        "36e9c83a7b8f7e71997a91c0184da21f17af5749d77e3a773c1df5203fb96afd"
     );
     assert_eq!(PUBLIC_KEY.len(), 113);
     assert_eq!(
         format!("{:x}", Sha256::digest(PUBLIC_KEY.as_bytes())),
-        "380eb1a56f24a4ac61acf7441d45e53f213a654f046247c295436bfceced4ab2"
+        "1dc2696979ab17a3c92c6934f9120c5e3a456fbe67c28df68a7cb3ee28586a61"
     );
     assert_eq!(WINDOWS_ARCHIVE.len(), 134);
     assert_eq!(
@@ -148,6 +161,148 @@ async fn signed_release_is_downloaded_and_atomically_registered() {
                 .into_owned(),
         ]
     );
+}
+
+#[tokio::test]
+async fn wokcore_install_prefers_a_valid_signed_v2_release_without_requesting_v1() {
+    let server = signed_v2_release_server(ARCHIVE).await;
+    let fixture = tempdir().unwrap();
+    let paths = app_paths(fixture.path());
+    let source = WokCoreInstallSource::loopback(
+        Url::parse(&format!("{}/releases/", server.uri())).unwrap(),
+        PUBLIC_KEY,
+    )
+    .unwrap();
+
+    let outcome = install_missing_wokcore(&paths, &source).await.unwrap();
+
+    assert!(matches!(
+        outcome,
+        WokCoreInstallOutcome::Installed {
+            version,
+            ..
+        } if version == Version::new(1, 2, 3)
+    ));
+}
+
+#[tokio::test]
+async fn wokcore_install_missing_v2_manifest_falls_back_to_the_signed_v1_release() {
+    let server = signed_release_server(ARCHIVE).await;
+    Mock::given(method("GET"))
+        .and(path("/releases/wokcore-update-v2.json"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let fixture = tempdir().unwrap();
+    let paths = app_paths(fixture.path());
+    let source = WokCoreInstallSource::loopback(
+        Url::parse(&format!("{}/releases/", server.uri())).unwrap(),
+        PUBLIC_KEY,
+    )
+    .unwrap();
+
+    let outcome = install_missing_wokcore(&paths, &source).await.unwrap();
+
+    assert!(matches!(
+        outcome,
+        WokCoreInstallOutcome::Installed {
+            version,
+            ..
+        } if version == Version::new(1, 2, 3)
+    ));
+}
+
+#[tokio::test]
+async fn wokcore_install_present_invalid_v2_manifest_never_downgrades_to_v1() {
+    let server = MockServer::start().await;
+    let mut corrupt_signature = SIGNATURE.to_vec();
+    let payload = corrupt_signature
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map(|index| index + 1)
+        .unwrap();
+    corrupt_signature[payload] = if corrupt_signature[payload] == b'A' {
+        b'B'
+    } else {
+        b'A'
+    };
+    for (path, body) in [
+        ("/releases/wokcore-update-v2.json", V2_MANIFEST),
+        (
+            "/releases/wokcore-update-v2.json.minisig",
+            corrupt_signature.as_slice(),
+        ),
+    ] {
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    for path in [
+        "/releases/wokcore-update-v1.json",
+        "/releases/wokcore-update-v1.json.minisig",
+    ] {
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+    }
+    let fixture = tempdir().unwrap();
+    let paths = app_paths(fixture.path());
+    let source = WokCoreInstallSource::loopback(
+        Url::parse(&format!("{}/releases/", server.uri())).unwrap(),
+        PUBLIC_KEY,
+    )
+    .unwrap();
+
+    let error = install_missing_wokcore(&paths, &source).await.unwrap_err();
+
+    assert_eq!(error, WokCoreInstallError::InvalidSignature);
+    assert!(!paths.wokcore_install_record.exists());
+}
+
+#[tokio::test]
+async fn wokcore_install_rejects_a_signed_v1_schema_at_the_v2_endpoint_without_downgrading() {
+    let server = MockServer::start().await;
+    for (path, body) in [
+        ("/releases/wokcore-update-v2.json", MANIFEST),
+        ("/releases/wokcore-update-v2.json.minisig", SIGNATURE),
+    ] {
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    for path in [
+        "/releases/wokcore-update-v1.json",
+        "/releases/wokcore-update-v1.json.minisig",
+    ] {
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+    }
+    let fixture = tempdir().unwrap();
+    let paths = app_paths(fixture.path());
+    let source = WokCoreInstallSource::loopback(
+        Url::parse(&format!("{}/releases/", server.uri())).unwrap(),
+        PUBLIC_KEY,
+    )
+    .unwrap();
+
+    let error = install_missing_wokcore(&paths, &source).await.unwrap_err();
+
+    assert_eq!(error, WokCoreInstallError::IncompatibleManifest);
+    assert!(!paths.wokcore_install_record.exists());
 }
 
 #[tokio::test]
@@ -352,6 +507,60 @@ async fn signed_release_server(archive: &[u8]) -> MockServer {
         .mount(&server)
         .await;
     server
+}
+
+async fn signed_v2_release_server(archive: &[u8]) -> MockServer {
+    let server = MockServer::start().await;
+    for (path, body) in [
+        ("/releases/wokcore-update-v2.json", V2_MANIFEST),
+        ("/releases/wokcore-update-v2.json.minisig", V2_SIGNATURE),
+    ] {
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    for path in [
+        "/releases/wokcore-update-v1.json",
+        "/releases/wokcore-update-v1.json.minisig",
+    ] {
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path(format!(
+            "/releases/{}",
+            v2_artifact_name()
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(archive))
+        .expect(1)
+        .mount(&server)
+        .await;
+    server
+}
+
+fn v2_artifact_name() -> &'static str {
+    if cfg!(all(target_arch = "x86_64", target_os = "windows")) {
+        "WokCore-v1.2.3-Windows-x86_64-Portable.zip"
+    } else if cfg!(all(target_arch = "aarch64", target_os = "windows")) {
+        "WokCore-v1.2.3-Windows-arm64-Portable.zip"
+    } else if cfg!(all(target_arch = "x86_64", target_os = "macos")) {
+        "WokCore-v1.2.3-macOS-x86_64.tar.gz"
+    } else if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
+        "WokCore-v1.2.3-macOS-arm64.tar.gz"
+    } else if cfg!(all(target_arch = "x86_64", target_os = "linux")) {
+        "WokCore-v1.2.3-Linux-x86_64.tar.gz"
+    } else if cfg!(all(target_arch = "aarch64", target_os = "linux")) {
+        "WokCore-v1.2.3-Linux-arm64.tar.gz"
+    } else {
+        panic!("unsupported test target")
+    }
 }
 
 fn current_target() -> &'static str {

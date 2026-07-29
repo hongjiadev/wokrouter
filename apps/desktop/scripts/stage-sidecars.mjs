@@ -32,6 +32,16 @@ const tauriTargets = new Map([
   ["linux/x86_64", "x86_64-unknown-linux-gnu"],
   ["linux/aarch64", "aarch64-unknown-linux-gnu"],
 ]);
+const wokCoreOfflineContracts = new Map([
+  ["x86_64-pc-windows-msvc", ["Windows", "x86_64", "zip", true]],
+  ["aarch64-pc-windows-msvc", ["Windows", "arm64", "zip", false]],
+  ["x86_64-apple-darwin", ["macOS", "x86_64", "tar.gz", true]],
+  ["aarch64-apple-darwin", ["macOS", "arm64", "tar.gz", true]],
+  ["x86_64-unknown-linux-gnu", ["Linux", "x86_64", "tar.gz", true]],
+  ["aarch64-unknown-linux-gnu", ["Linux", "arm64", "tar.gz", true]],
+]);
+const canonicalSemver =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 function normalized(value) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -128,6 +138,37 @@ export function cargoBuildArguments(targetTriple) {
 
 function executableSuffix(targetTriple) {
   return targetTriple.endsWith("-pc-windows-msvc") ? ".exe" : "";
+}
+
+export function wokCoreArtifactName({
+  schemaVersion,
+  targetTriple,
+  version,
+}) {
+  const contract = wokCoreOfflineContracts.get(targetTriple);
+  if (!contract) {
+    throw new Error(`Unsupported target triple: ${targetTriple}`);
+  }
+  if (
+    typeof version !== "string" ||
+    version.length > 128 ||
+    !canonicalSemver.test(version)
+  ) {
+    throw new Error("Invalid WokCore version.");
+  }
+  const [system, architecture, extension, legacyV1] = contract;
+  if (schemaVersion === 1) {
+    if (!legacyV1) {
+      throw new Error("WokCore v1 does not support this target.");
+    }
+    return `wokcore-v${version}-${targetTriple}.${extension}`;
+  }
+  if (schemaVersion !== 2) {
+    throw new Error("Unsupported WokCore schema version.");
+  }
+  return system === "Windows"
+    ? `WokCore-v${version}-${system}-${architecture}-Portable.zip`
+    : `WokCore-v${version}-${system}-${architecture}.${extension}`;
 }
 
 export function sidecarFileName(binaryName, targetTriple) {
@@ -237,38 +278,56 @@ export function stageBundleArtifact({
       throw new Error("Offline WokCore inputs are required");
     }
 
-    const archiveExtension =
-      supportedTarget === "x86_64-pc-windows-msvc" ? "zip" : "tar.gz";
+    const manifestName = path.basename(manifest);
+    const schemaVersion =
+      manifestName === "wokcore-update-v2.json"
+        ? 2
+        : manifestName === "wokcore-update-v1.json"
+          ? 1
+          : null;
+    if (schemaVersion === null) {
+      throw new Error(`Unsupported WokCore manifest: ${manifestName}`);
+    }
+    if (path.basename(signature) !== `${manifestName}.minisig`) {
+      throw new Error("WokCore manifest and signature versions do not match.");
+    }
+
     const archiveName = path.basename(artifact);
-    const escapedTarget = supportedTarget.replace(
-      /[.*+?^${}()|[\]\\]/g,
-      "\\$&",
-    );
-    const archivePattern = new RegExp(
-      `^wokcore-v[^/\\\\]+-${escapedTarget}\\.${archiveExtension.replace(".", "\\.")}$`,
-    );
-    if (
-      path.basename(manifest) !== "wokcore-update-v1.json" ||
-      path.basename(signature) !== "wokcore-update-v1.json.minisig" ||
-      !archivePattern.test(archiveName)
-    ) {
-      throw new Error("Offline WokCore inputs do not match the target contract");
+    const contract = wokCoreOfflineContracts.get(supportedTarget);
+    const [system, architecture, extension] = contract;
+    const prefix = schemaVersion === 1 ? "wokcore-v" : "WokCore-v";
+    const suffix =
+      schemaVersion === 1
+        ? `-${supportedTarget}.${extension}`
+        : system === "Windows"
+          ? `-${system}-${architecture}-Portable.zip`
+          : `-${system}-${architecture}.${extension}`;
+    if (!archiveName.startsWith(prefix) || !archiveName.endsWith(suffix)) {
+      throw new Error("WokCore manifest and artifact versions do not match.");
+    }
+    const version = archiveName.slice(prefix.length, -suffix.length);
+    let expectedArtifact;
+    try {
+      expectedArtifact = wokCoreArtifactName({
+        schemaVersion,
+        targetTriple: supportedTarget,
+        version,
+      });
+    } catch {
+      throw new Error("WokCore manifest and artifact versions do not match.");
+    }
+    if (archiveName !== expectedArtifact) {
+      throw new Error("WokCore manifest and artifact versions do not match.");
     }
 
     files.push(
       {
         source: manifest,
-        destination: path.join(
-          artifactDirectory,
-          "wokcore-update-v1.json",
-        ),
+        destination: path.join(artifactDirectory, manifestName),
       },
       {
         source: signature,
-        destination: path.join(
-          artifactDirectory,
-          "wokcore-update-v1.json.minisig",
-        ),
+        destination: path.join(artifactDirectory, `${manifestName}.minisig`),
       },
       {
         source: artifact,
