@@ -60,6 +60,16 @@ function Get-SafeTreeItems {
                 ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne
                 0
             ) {
+                if (
+                    $Format -ceq "AppImage" -and
+                    $directory.Equals(
+                        $fullRoot,
+                        [StringComparison]::Ordinal
+                    ) -and
+                    @(".DirIcon", "WokRouter.desktop") -ccontains $item.Name
+                ) {
+                    continue
+                }
                 throw "Extracted $Format inventory contains a reparse point."
             }
             $items.Add($item)
@@ -69,6 +79,159 @@ function Get-SafeTreeItems {
         }
     }
     return $items.ToArray()
+}
+
+function Get-AppImageLinkTarget {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $LinkName,
+        [Parameter(Mandatory)][string] $Target,
+        [Parameter(Mandatory)][string] $ExpectedTarget
+    )
+
+    if (
+        [string]::IsNullOrWhiteSpace($Target) -or
+        $Target.Contains("\") -or
+        $Target -cmatch "^[A-Za-z]:" -or
+        [IO.Path]::IsPathRooted($Target)
+    ) {
+        throw "AppImage link '$LinkName' target must be an unambiguous relative path."
+    }
+    $segments = [Collections.Generic.List[string]]::new()
+    foreach ($segment in $Target.Split("/")) {
+        if ([string]::IsNullOrEmpty($segment) -or $segment -ceq ".") {
+            throw "AppImage link '$LinkName' target is ambiguous."
+        }
+        if ($segment -ceq "..") {
+            if ($segments.Count -eq 0) {
+                throw "AppImage link '$LinkName' target escapes AppDir."
+            }
+            $segments.RemoveAt($segments.Count - 1)
+            continue
+        }
+        if ($segment.IndexOf([char] 0) -ge 0) {
+            throw "AppImage link '$LinkName' target is malformed."
+        }
+        $segments.Add($segment)
+    }
+    $normalizedTarget = [string]::Join("/", $segments)
+    if ($normalizedTarget -cne $ExpectedTarget -or $Target -cne $ExpectedTarget) {
+        throw "AppImage link '$LinkName' does not use its expected target."
+    }
+
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar
+    )
+    $fullTarget = $fullRoot
+    foreach ($segment in $segments) {
+        $fullTarget = Join-Path $fullTarget $segment
+    }
+    $fullTarget = [IO.Path]::GetFullPath($fullTarget)
+    $rootPrefix = $fullRoot + [IO.Path]::DirectorySeparatorChar
+    $comparison = if ([IO.Path]::DirectorySeparatorChar -ceq "\") {
+        [StringComparison]::OrdinalIgnoreCase
+    } else {
+        [StringComparison]::Ordinal
+    }
+    if (-not $fullTarget.StartsWith($rootPrefix, $comparison)) {
+        throw "AppImage link '$LinkName' target escapes AppDir."
+    }
+
+    $current = $fullRoot
+    for ($index = 0; $index -lt $segments.Count; $index += 1) {
+        $current = Join-Path $current $segments[$index]
+        try {
+            $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+        }
+        catch {
+            throw "AppImage link '$LinkName' target must be an existing regular file."
+        }
+        if (
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+        ) {
+            throw "AppImage link '$LinkName' target contains a reparse component."
+        }
+        $isLeaf = $index -eq ($segments.Count - 1)
+        if (($isLeaf -and $item.PSIsContainer) -or
+            (-not $isLeaf -and -not $item.PSIsContainer)) {
+            throw "AppImage link '$LinkName' target must be an existing regular file."
+        }
+    }
+    return $fullTarget
+}
+
+function Get-ValidatedAppImageLinks {
+    param([Parameter(Mandatory)][string] $Root)
+
+    try {
+        [object[]] $inventory = @(
+            Invoke-Adapter `
+                -Operation "linux-appimage-link-inventory" `
+                -Source $Root |
+                ConvertFrom-Json |
+                ForEach-Object { $_ }
+        )
+    }
+    catch {
+        throw "AppImage link inventory failed: $($_.Exception.Message)"
+    }
+    if ($inventory.Count -ne 2) {
+        throw "AppImage must contain exactly two expected root links."
+    }
+
+    $expected = [ordered]@{
+        ".DirIcon" = "WokRouter.png"
+        "WokRouter.desktop" = "usr/share/applications/WokRouter.desktop"
+    }
+    $validated = [ordered]@{}
+    foreach ($record in $inventory) {
+        $properties = @($record.PSObject.Properties | ForEach-Object Name)
+        [Array]::Sort($properties, [StringComparer]::Ordinal)
+        if (
+            [string]::Join("|", $properties) -cne
+            "LinkType|Relative|Target" -or
+            $record.Relative -isnot [string] -or
+            $record.LinkType -isnot [string] -or
+            $record.Target -isnot [string]
+        ) {
+            throw "AppImage link inventory is malformed."
+        }
+        $relative = [string] $record.Relative
+        if ($relative.Contains("/") -or $relative.Contains("\")) {
+            throw "AppImage links are allowed only at the AppDir root."
+        }
+        $caseMatches = @(
+            $expected.Keys |
+                Where-Object {
+                    $_.Equals(
+                        $relative,
+                        [StringComparison]::OrdinalIgnoreCase
+                    )
+                }
+        )
+        if ($caseMatches.Count -eq 1 -and $caseMatches[0] -cne $relative) {
+            throw "AppImage expected link names are case-sensitive."
+        }
+        if (
+            $caseMatches.Count -ne 1 -or
+            $validated.Contains($relative)
+        ) {
+            throw "AppImage must contain exactly the two expected root links."
+        }
+        if ([string] $record.LinkType -cne "SymbolicLink") {
+            throw "AppImage expected reparse points must be symbolic links."
+        }
+        $validated[$relative] = Get-AppImageLinkTarget `
+            -Root $Root `
+            -LinkName $relative `
+            -Target ([string] $record.Target) `
+            -ExpectedTarget ([string] $expected[$relative])
+    }
+    if ($validated.Count -ne 2) {
+        throw "AppImage must contain exactly the two expected root links."
+    }
+    return $validated
 }
 
 function Remove-TemporaryTree {
@@ -242,6 +405,29 @@ function Invoke-Adapter {
             Move-Item -LiteralPath $nativeRoot -Destination $Destination
             return
         }
+        "linux-appimage-link-inventory" {
+            $records = [Collections.Generic.List[object]]::new()
+            foreach (
+                $item in Get-ChildItem -LiteralPath $Source -Force |
+                    Where-Object {
+                        ($_.Attributes -band
+                            [IO.FileAttributes]::ReparsePoint) -ne 0
+                    }
+            ) {
+                [object[]] $targets = @($item.Target)
+                if ($targets.Count -ne 1 -or $targets[0] -isnot [string]) {
+                    throw "Could not read AppImage symbolic-link target."
+                }
+                $records.Add([pscustomobject]@{
+                    Relative = $item.Name
+                    LinkType = [string] $item.LinkType
+                    Target = [string] $targets[0]
+                })
+            }
+            return ConvertTo-Json `
+                -Compress `
+                -InputObject @($records.ToArray())
+        }
         "linux-deb-extract" {
             & dpkg-deb --extract $Source $Destination
             if ($LASTEXITCODE -ne 0) {
@@ -409,6 +595,7 @@ try {
         -Source $rpm `
         -Destination $rpmDir
 
+    $appImageLinks = Get-ValidatedAppImageLinks -Root $appDir
     $payloads = [ordered]@{
         AppImage = Get-ValidatedPayloadFiles `
             -Root $appDir `
@@ -450,7 +637,7 @@ try {
     $desktopEntry = Get-Content `
         -Raw `
         -Encoding UTF8 `
-        -LiteralPath (Join-Path $appDir "WokRouter.desktop")
+        -LiteralPath $appImageLinks["WokRouter.desktop"]
     if ($desktopEntry -notmatch (
             "(?m)^X-AppImage-Version=" + [regex]::Escape($Version) + "$"
         )) {

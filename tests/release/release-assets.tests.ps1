@@ -98,6 +98,18 @@ switch ($Operation) {
     "linux-appimage-extract" {
         Copy-Item -LiteralPath (Join-Path $root "appimage-tree") `
             -Destination $Destination -Recurse
+        if (Test-Path -LiteralPath (Join-Path $root "appimage-junction")) {
+            $null = New-Item `
+                -ItemType Junction `
+                -Path (Join-Path $Destination ".DirIcon") `
+                -Target (Join-Path $root "link-target")
+        }
+    }
+    "linux-appimage-link-inventory" {
+        Get-Content `
+            -Raw `
+            -Encoding UTF8 `
+            (Join-Path $root "appimage-link-inventory.json")
     }
     "linux-deb-extract" {
         Copy-Item -LiteralPath (Join-Path $root "deb-tree") `
@@ -201,6 +213,17 @@ function Copy-ReleaseDocuments {
     }
 }
 
+function Write-AppImageLinkInventory {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][object[]] $Inventory
+    )
+
+    Write-Utf8File `
+        -Path (Join-Path $Root "appimage-link-inventory.json") `
+        -Content ($Inventory | ConvertTo-Json -Compress)
+}
+
 function New-LinuxFixture {
     param(
         [Parameter(Mandatory)][string] $Root,
@@ -239,8 +262,27 @@ function New-LinuxFixture {
         -Content "sidecar-$Architecture"
     Copy-ReleaseDocuments -Destination (Join-Path $appRoot "usr/share/wokrouter")
     Write-Utf8File `
-        -Path (Join-Path $appRoot "WokRouter.desktop") `
+        -Path (Join-Path $appRoot "WokRouter.png") `
+        -Content "icon"
+    Write-Utf8File `
+        -Path (
+            Join-Path `
+                $appRoot `
+                "usr/share/applications/WokRouter.desktop"
+        ) `
         -Content "X-AppImage-Version=$version"
+    Write-AppImageLinkInventory -Root $Root -Inventory @(
+        [pscustomobject]@{
+            Relative = ".DirIcon"
+            LinkType = "SymbolicLink"
+            Target = "WokRouter.png"
+        },
+        [pscustomobject]@{
+            Relative = "WokRouter.desktop"
+            LinkType = "SymbolicLink"
+            Target = "usr/share/applications/WokRouter.desktop"
+        }
+    )
     foreach ($kind in @("deb", "rpm")) {
         $payloadRoot = Join-Path $Root "$kind-tree"
         Write-Utf8File `
@@ -503,7 +545,20 @@ try {
         }
     }
 
-    Invoke-Scenario -Name "Linux packages exact three normalized assets" -Test {
+    Invoke-Scenario -Name "Linux production reads native AppImage link fields" -Test {
+        $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $linuxScript
+        foreach ($required in @(
+                '$item.LinkType',
+                '$item.Target',
+                '"linux-appimage-link-inventory"'
+            )) {
+            if (-not $source.Contains($required)) {
+                throw "Linux production link inventory is missing '$required'."
+            }
+        }
+    }
+
+    Invoke-Scenario -Name "Linux accepts exact x86_64 Tauri AppImage links" -Test {
         $root = New-FixtureRoot
         $bundle = New-LinuxFixture -Root $root
         $adapter = New-ToolAdapter -Root $root
@@ -734,7 +789,124 @@ try {
         }
     }
 
-    Invoke-Scenario -Name "Linux accepts exact arm64 AppImage deb and rpm payloads" -Test {
+    foreach ($mutation in @(
+            "missing-diricon",
+            "missing-desktop",
+            "absolute-target",
+            "escape-target",
+            "broken-target",
+            "wrong-in-root-target",
+            "extra-root-link",
+            "nested-link",
+            "case-alternate",
+            "duplicate",
+            "junction"
+        )) {
+        Invoke-Scenario -Name "Linux rejects AppImage link $mutation" -Test {
+            $root = New-FixtureRoot
+            $bundle = New-LinuxFixture -Root $root
+            $adapter = New-ToolAdapter -Root $root
+            [object[]] $inventory = @(
+                Get-Content `
+                    -Raw `
+                    -Encoding UTF8 `
+                    -LiteralPath (
+                        Join-Path $root "appimage-link-inventory.json"
+                    ) |
+                    ConvertFrom-Json |
+                    ForEach-Object { $_ }
+            )
+            $expected = switch ($mutation) {
+                "missing-diricon" {
+                    $inventory = @(
+                        $inventory |
+                            Where-Object Relative -CNE ".DirIcon"
+                    )
+                    "exactly"
+                }
+                "missing-desktop" {
+                    $inventory = @(
+                        $inventory |
+                            Where-Object Relative -CNE "WokRouter.desktop"
+                    )
+                    "exactly"
+                }
+                "absolute-target" {
+                    $inventory[0].Target = "/tmp/WokRouter.png"
+                    "relative"
+                }
+                "escape-target" {
+                    $inventory[0].Target = "../WokRouter.png"
+                    "escapes"
+                }
+                "broken-target" {
+                    Remove-Item -LiteralPath (
+                        Join-Path $root "appimage-tree/WokRouter.png"
+                    )
+                    "regular file"
+                }
+                "wrong-in-root-target" {
+                    Write-Utf8File `
+                        -Path (
+                            Join-Path $root "appimage-tree/Other.png"
+                        ) `
+                        -Content "wrong icon"
+                    $inventory[0].Target = "Other.png"
+                    "expected target"
+                }
+                "extra-root-link" {
+                    $inventory += [pscustomobject]@{
+                        Relative = "Unexpected"
+                        LinkType = "SymbolicLink"
+                        Target = "WokRouter.png"
+                    }
+                    "exactly"
+                }
+                "nested-link" {
+                    $inventory[0].Relative = "usr/share/.DirIcon"
+                    "root"
+                }
+                "case-alternate" {
+                    $inventory[0].Relative = ".diricon"
+                    "case-sensitive"
+                }
+                "duplicate" {
+                    $inventory += [pscustomobject]@{
+                        Relative = ".DirIcon"
+                        LinkType = "SymbolicLink"
+                        Target = "WokRouter.png"
+                    }
+                    "exactly"
+                }
+                "junction" {
+                    [IO.Directory]::CreateDirectory(
+                        (Join-Path $root "link-target")
+                    ) | Out-Null
+                    Write-Utf8File `
+                        -Path (Join-Path $root "appimage-junction") `
+                        -Content "create junction fixture"
+                    $inventory[0].LinkType = "Junction"
+                    "symbolic link"
+                }
+            }
+            Write-AppImageLinkInventory `
+                -Root $root `
+                -Inventory $inventory
+            Assert-Rejects `
+                -Path $linuxScript `
+                -FixtureRoot $root `
+                -Arguments @{
+                    BundleDirectory = $bundle
+                    OutputDirectory = (Join-Path $root "output")
+                    Version = $version
+                    Target = "x86_64-unknown-linux-gnu"
+                    ToolAdapterPath = $adapter
+                } `
+                -ExpectedText $expected
+        }
+    }
+
+    Invoke-Scenario -Name "Linux accepts exact arm64 Tauri AppImage links" -Test {
         $root = New-FixtureRoot
         $bundle = New-LinuxFixture -Root $root -Architecture arm64
         $adapter = New-ToolAdapter -Root $root
