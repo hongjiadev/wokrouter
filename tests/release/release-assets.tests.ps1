@@ -921,6 +921,8 @@ try {
                 "darwin-usr-lib",
                 "mismatch",
                 "escape",
+                "absolute-system-escape",
+                "absolute-usr-escape",
                 "absolute-denied"
             )) {
             $root = New-FixtureRoot
@@ -948,6 +950,12 @@ try {
                 "darwin-usr-lib" { "/usr/lib/libobjc.A.dylib" }
                 "mismatch" { "." }
                 "escape" { "../../../../outside" }
+                "absolute-system-escape" {
+                    "/System/Library/../../tmp/evil"
+                }
+                "absolute-usr-escape" {
+                    "/usr/lib/../../../tmp/evil"
+                }
                 "absolute-denied" { "/tmp/evil" }
             }
             $mountedTarget = if ($case -ceq "mismatch") {
@@ -994,6 +1002,8 @@ try {
                 $expected = switch ($case) {
                     "mismatch" { "does not match" }
                     "escape" { "escapes" }
+                    "absolute-system-escape" { "absolute" }
+                    "absolute-usr-escape" { "absolute" }
                     "absolute-denied" { "absolute" }
                 }
                 Assert-Rejects `

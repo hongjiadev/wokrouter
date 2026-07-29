@@ -322,6 +322,29 @@ function ConvertTo-FingerprintField {
     return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Value))
 }
 
+function Get-LexicalUnixAbsolutePath {
+    param([Parameter(Mandatory)][string] $Path)
+
+    if (-not $Path.StartsWith("/", [StringComparison]::Ordinal)) {
+        throw "macOS absolute symlink target must start with '/'."
+    }
+    $parts = [Collections.Generic.List[string]]::new()
+    foreach ($part in $Path.Split("/")) {
+        if ($part -ceq "" -or $part -ceq ".") {
+            continue
+        }
+        if ($part -ceq "..") {
+            if ($parts.Count -eq 0) {
+                throw "macOS symlink uses a forbidden absolute target '$Path'."
+            }
+            $parts.RemoveAt($parts.Count - 1)
+            continue
+        }
+        $parts.Add($part)
+    }
+    return "/" + [string]::Join("/", $parts)
+}
+
 function Resolve-InternalLinkTarget {
     param(
         [Parameter(Mandatory)][string] $Relative,
@@ -337,16 +360,20 @@ function Resolve-InternalLinkTarget {
         throw "macOS symlink target is invalid."
     }
     if ($Target.StartsWith("/", [StringComparison]::Ordinal)) {
+        $normalizedTarget = Get-LexicalUnixAbsolutePath -Path $Target
         if (
-            $Target -ceq "/System/Library" -or
-            $Target.StartsWith(
+            $normalizedTarget -ceq "/System/Library" -or
+            $normalizedTarget.StartsWith(
                 "/System/Library/",
                 [StringComparison]::Ordinal
             ) -or
-            $Target -ceq "/usr/lib" -or
-            $Target.StartsWith("/usr/lib/", [StringComparison]::Ordinal)
+            $normalizedTarget -ceq "/usr/lib" -or
+            $normalizedTarget.StartsWith(
+                "/usr/lib/",
+                [StringComparison]::Ordinal
+            )
         ) {
-            return $Target
+            return $normalizedTarget
         }
         throw "macOS symlink uses a forbidden absolute target '$Target'."
     }
