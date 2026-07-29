@@ -89,7 +89,7 @@ if ([string]::IsNullOrWhiteSpace($root)) {
 }
 [IO.File]::AppendAllText(
     (Join-Path $root "adapter.log"),
-    "$Operation|$Source|$Destination`n",
+    "$Operation|$Source|$Destination|$((Get-Location).Path)`n",
     [Text.UTF8Encoding]::new($false)
 )
 switch ($Operation) {
@@ -103,10 +103,40 @@ switch ($Operation) {
         $text = Get-Content -Raw -Encoding UTF8 $Source
         if ($text.Contains("arm64")) { "arm64" } else { "x86_64" }
     }
-    "mac-app-version" {
+    "mac-app-metadata" {
         Get-Content -Raw -Encoding UTF8 (
-            Join-Path $Source "Contents/Info.version"
+            Join-Path $Source "Contents/Info.metadata.json"
         )
+    }
+    "mac-app-inventory" {
+        $inventory = if (
+            $Source.StartsWith(
+                (Join-Path $root "dmg-mount"),
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        ) {
+            "mounted-app-inventory.json"
+        } else {
+            "source-app-inventory.json"
+        }
+        Get-Content -Raw -Encoding UTF8 (Join-Path $root $inventory)
+    }
+    "mac-dmg-root-inventory" {
+        $override = Join-Path $root "dmg-root-inventory.json"
+        if (Test-Path -LiteralPath $override -PathType Leaf) {
+            Get-Content -Raw -Encoding UTF8 $override
+            break
+        }
+        @(
+            Get-ChildItem -LiteralPath $Source -Force |
+                ForEach-Object {
+                    [pscustomobject]@{
+                        Kind = if ($_.PSIsContainer) { "Directory" } else { "File" }
+                        Name = $_.Name
+                        Target = $null
+                    }
+                }
+        ) | ConvertTo-Json -Compress
     }
     "mac-attach" { Join-Path $root "dmg-mount" }
     "mac-detach" { }
@@ -193,6 +223,49 @@ function New-LinuxFixture {
     return $bundle
 }
 
+function Get-MacFixtureInventory {
+    param([Parameter(Mandatory)][string] $App)
+
+    $records = [Collections.Generic.List[object]]::new()
+    foreach ($item in Get-ChildItem -LiteralPath $App -Force -Recurse) {
+        $relative = $item.FullName.Substring($App.Length).TrimStart(
+            [IO.Path]::DirectorySeparatorChar,
+            [IO.Path]::AltDirectorySeparatorChar
+        ).Replace([IO.Path]::DirectorySeparatorChar, "/")
+        if ($item.PSIsContainer) {
+            $records.Add([pscustomobject]@{
+                Kind = "Directory"
+                Relative = $relative
+                Target = $null
+                Sha256 = $null
+            })
+        } else {
+            $records.Add([pscustomobject]@{
+                Kind = "File"
+                Relative = $relative
+                Target = $null
+                Sha256 = (
+                    Get-FileHash -Algorithm SHA256 -LiteralPath $item.FullName
+                ).Hash
+            })
+        }
+    }
+    return $records.ToArray()
+}
+
+function Write-MacInventoryOverride {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][ValidateSet("source", "mounted")]
+        [string] $Kind,
+        [Parameter(Mandatory)][object[]] $Inventory
+    )
+
+    Write-Utf8File `
+        -Path (Join-Path $Root "$Kind-app-inventory.json") `
+        -Content ($Inventory | ConvertTo-Json -Compress -Depth 4)
+}
+
 function New-MacFixture {
     param(
         [Parameter(Mandatory)][string] $Root,
@@ -211,12 +284,25 @@ function New-MacFixture {
         -Path (Join-Path $app "Contents/MacOS/wokrouter") `
         -Content "sidecar-$Architecture"
     Write-Utf8File `
-        -Path (Join-Path $app "Contents/Info.version") `
-        -Content $version
+        -Path (Join-Path $app "Contents/Info.metadata.json") `
+        -Content (@{
+            CFBundleIdentifier = "dev.wokrouter.desktop"
+            CFBundleExecutable = "wokrouter-desktop"
+            CFBundleShortVersionString = $version
+            CFBundleName = "WokRouter"
+        } | ConvertTo-Json -Compress)
     Copy-ReleaseDocuments -Destination (Join-Path $app "Contents/Resources")
 
     $mountedApp = Join-Path $Root "dmg-mount/WokRouter.app"
     Copy-Item -LiteralPath $app -Destination $mountedApp -Recurse
+    Write-MacInventoryOverride `
+        -Root $Root `
+        -Kind source `
+        -Inventory @(Get-MacFixtureInventory -App $app)
+    Write-MacInventoryOverride `
+        -Root $Root `
+        -Kind mounted `
+        -Inventory @(Get-MacFixtureInventory -App $mountedApp)
     return $bundle
 }
 
@@ -410,6 +496,40 @@ try {
             throw "Linux output inventory is not exact."
         }
         if ($actual.Count -ne 3) { throw "Linux packager returned the wrong output count." }
+        $extractRecord = @(
+            Get-Content -Encoding UTF8 (Join-Path $root "adapter.log") |
+                Where-Object {
+                    $_.StartsWith(
+                        "linux-appimage-extract|",
+                        [StringComparison]::Ordinal
+                    )
+                }
+        )
+        if ($extractRecord.Count -ne 1) {
+            throw "Linux extraction adapter was not called exactly once."
+        }
+        $extractFields = $extractRecord[0].Split("|")
+        if ($extractFields.Count -ne 4) {
+            throw "Linux extraction adapter did not record its working directory."
+        }
+        $extractWorkingDirectory = [IO.Path]::GetFullPath($extractFields[3])
+        $extractParent = [IO.Directory]::GetParent(
+            $extractWorkingDirectory
+        ).FullName.TrimEnd(
+            [IO.Path]::DirectorySeparatorChar,
+            [IO.Path]::AltDirectorySeparatorChar
+        )
+        if (
+            -not $extractParent.Equals(
+                $temporaryRoot,
+                [StringComparison]::OrdinalIgnoreCase
+            ) -or
+            [IO.Path]::GetFileName($extractWorkingDirectory) -cnotmatch (
+                "^wokrouter-linux-package-[0-9a-f]{32}$"
+            )
+        ) {
+            throw "Linux extraction did not run in its validated temporary root."
+        }
     }
 
     Invoke-Scenario -Name "Linux rejects missing duplicate extra and directory sources" -Test {
@@ -532,9 +652,18 @@ try {
         $root = New-FixtureRoot
         $bundle = New-MacFixture -Root $root
         $adapter = New-ToolAdapter -Root $root
+        $metadataPath = Join-Path `
+            $bundle `
+            "macos/WokRouter.app/Contents/Info.metadata.json"
+        $metadata = Get-Content `
+            -Raw `
+            -Encoding UTF8 `
+            -LiteralPath $metadataPath |
+            ConvertFrom-Json
+        $metadata.CFBundleShortVersionString = "0.1.0"
         Write-Utf8File `
-            -Path (Join-Path $bundle "macos/WokRouter.app/Contents/Info.version") `
-            -Content "0.1.0"
+            -Path $metadataPath `
+            -Content ($metadata | ConvertTo-Json -Compress)
         Assert-Rejects -Path $macScript -FixtureRoot $root -Arguments @{
             BundleDirectory = $bundle
             OutputDirectory = (Join-Path $root "output")
@@ -543,9 +672,10 @@ try {
             ToolAdapterPath = $adapter
         } -ExpectedText "version"
 
+        $metadata.CFBundleShortVersionString = $version
         Write-Utf8File `
-            -Path (Join-Path $bundle "macos/WokRouter.app/Contents/Info.version") `
-            -Content $version
+            -Path $metadataPath `
+            -Content ($metadata | ConvertTo-Json -Compress)
         Write-Utf8File `
             -Path (Join-Path $root "dmg-mount/WokRouter.app/Contents/MacOS/wokrouter") `
             -Content "sidecar-arm64"
@@ -567,6 +697,13 @@ try {
         Write-Utf8File `
             -Path (Join-Path $bundle "macos/WokRouter.app/Contents/MacOS/wokrouterd") `
             -Content "forbidden"
+        Write-MacInventoryOverride `
+            -Root $root `
+            -Kind source `
+            -Inventory @(
+                Get-MacFixtureInventory `
+                    -App (Join-Path $bundle "macos/WokRouter.app")
+            )
         Assert-Rejects -Path $macScript -FixtureRoot $root -Arguments @{
             BundleDirectory = $bundle
             OutputDirectory = (Join-Path $root "output")
@@ -574,6 +711,298 @@ try {
             Target = "x86_64-apple-darwin"
             ToolAdapterPath = $adapter
         } -ExpectedText "forbidden"
+    }
+
+    Invoke-Scenario -Name "macOS requires exact app leaf and bundle identity" -Test {
+        foreach ($mutation in @(
+                "source-leaf",
+                "mounted-leaf",
+                "identifier",
+                "mounted-identifier",
+                "executable",
+                "name"
+            )) {
+            $root = New-FixtureRoot
+            $bundle = New-MacFixture -Root $root
+            $adapter = New-ToolAdapter -Root $root
+            $expected = switch ($mutation) {
+                "source-leaf" {
+                    Move-Item `
+                        -LiteralPath (Join-Path $bundle "macos/WokRouter.app") `
+                        -Destination (Join-Path $bundle "macos/Other.app")
+                    "WokRouter.app"
+                }
+                "mounted-leaf" {
+                    Move-Item `
+                        -LiteralPath (Join-Path $root "dmg-mount/WokRouter.app") `
+                        -Destination (Join-Path $root "dmg-mount/Other.app")
+                    "WokRouter.app"
+                }
+                default {
+                    $metadataPath = if ($mutation -ceq "mounted-identifier") {
+                        Join-Path `
+                            $root `
+                            "dmg-mount/WokRouter.app/Contents/Info.metadata.json"
+                    } else {
+                        Join-Path `
+                            $bundle `
+                            "macos/WokRouter.app/Contents/Info.metadata.json"
+                    }
+                    $metadata = Get-Content `
+                        -Raw `
+                        -Encoding UTF8 `
+                        -LiteralPath $metadataPath |
+                        ConvertFrom-Json
+                    switch ($mutation) {
+                        { $_ -in @("identifier", "mounted-identifier") } {
+                            $metadata.CFBundleIdentifier = "dev.other.desktop"
+                        }
+                        "executable" {
+                            $metadata.CFBundleExecutable = "Other"
+                        }
+                        "name" {
+                            $metadata.CFBundleName = "Other"
+                        }
+                    }
+                    Write-Utf8File `
+                        -Path $metadataPath `
+                        -Content ($metadata | ConvertTo-Json -Compress)
+                    $mutation.Replace("mounted-", "")
+                }
+            }
+            Assert-Rejects -Path $macScript -FixtureRoot $root -Arguments @{
+                BundleDirectory = $bundle
+                OutputDirectory = (Join-Path $root "output")
+                Version = $version
+                Target = "x86_64-apple-darwin"
+                ToolAdapterPath = $adapter
+            } -ExpectedText $expected
+        }
+    }
+
+    Invoke-Scenario -Name "macOS enforces exact DMG root inventory" -Test {
+        $root = New-FixtureRoot
+        $bundle = New-MacFixture -Root $root
+        $adapter = New-ToolAdapter -Root $root
+        Write-Utf8File `
+            -Path (Join-Path $root "dmg-mount/unexpected.txt") `
+            -Content "unexpected"
+        $output = Join-Path $root "output"
+        Assert-Rejects -Path $macScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $bundle
+            OutputDirectory = $output
+            Version = $version
+            Target = "x86_64-apple-darwin"
+            ToolAdapterPath = $adapter
+        } -ExpectedText "inventory"
+        if (
+            (Test-Path -LiteralPath $output) -and
+            @(Get-ChildItem -LiteralPath $output -Force).Count -ne 0
+        ) {
+            throw "Rejected DMG root emitted release assets."
+        }
+        $log = Get-Content -Raw -Encoding UTF8 (Join-Path $root "adapter.log")
+        if (-not $log.Contains("mac-detach")) {
+            throw "DMG root failure did not detach the mounted image."
+        }
+
+        $root = New-FixtureRoot
+        $bundle = New-MacFixture -Root $root
+        $adapter = New-ToolAdapter -Root $root
+        Write-Utf8File `
+            -Path (Join-Path $root "dmg-root-inventory.json") `
+            -Content (@(
+                @{
+                    Kind = "Directory"
+                    Name = "WokRouter.app"
+                    Target = $null
+                },
+                @{
+                    Kind = "Link"
+                    Name = "Applications"
+                    Target = "/tmp/Applications"
+                }
+            ) | ConvertTo-Json -Compress)
+        Assert-Rejects -Path $macScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $bundle
+            OutputDirectory = (Join-Path $root "output")
+            Version = $version
+            Target = "x86_64-apple-darwin"
+            ToolAdapterPath = $adapter
+        } -ExpectedText "Applications"
+
+        $root = New-FixtureRoot
+        $bundle = New-MacFixture -Root $root
+        $adapter = New-ToolAdapter -Root $root
+        Write-Utf8File `
+            -Path (Join-Path $root "dmg-root-inventory.json") `
+            -Content (@(
+                @{
+                    Kind = "Directory"
+                    Name = ".DS_Store"
+                    Target = $null
+                },
+                @{
+                    Kind = "Directory"
+                    Name = "WokRouter.app"
+                    Target = $null
+                }
+            ) | ConvertTo-Json -Compress)
+        Assert-Rejects -Path $macScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $bundle
+            OutputDirectory = (Join-Path $root "output")
+            Version = $version
+            Target = "x86_64-apple-darwin"
+            ToolAdapterPath = $adapter
+        } -ExpectedText "wrong type"
+
+        $root = New-FixtureRoot
+        $bundle = New-MacFixture -Root $root
+        $adapter = New-ToolAdapter -Root $root
+        Write-Utf8File `
+            -Path (Join-Path $root "dmg-mount/wokcore.txt") `
+            -Content "forbidden"
+        Assert-Rejects -Path $macScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $bundle
+            OutputDirectory = (Join-Path $root "output")
+            Version = $version
+            Target = "x86_64-apple-darwin"
+            ToolAdapterPath = $adapter
+        } -ExpectedText "forbidden"
+
+        $root = New-FixtureRoot
+        $bundle = New-MacFixture -Root $root
+        $adapter = New-ToolAdapter -Root $root
+        Write-Utf8File `
+            -Path (Join-Path $root "dmg-root-inventory.json") `
+            -Content (@(
+                @{
+                    Kind = "File"
+                    Name = ".DS_Store"
+                    Target = $null
+                },
+                @{
+                    Kind = "Directory"
+                    Name = ".background"
+                    Target = $null
+                },
+                @{
+                    Kind = "File"
+                    Name = ".VolumeIcon.icns"
+                    Target = $null
+                },
+                @{
+                    Kind = "Link"
+                    Name = "Applications"
+                    Target = "/Applications"
+                },
+                @{
+                    Kind = "Directory"
+                    Name = "WokRouter.app"
+                    Target = $null
+                }
+            ) | ConvertTo-Json -Compress)
+        $actual = Invoke-Packager -Path $macScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $bundle
+            OutputDirectory = (Join-Path $root "output")
+            Version = $version
+            Target = "x86_64-apple-darwin"
+            ToolAdapterPath = $adapter
+        }
+        if ($actual.Count -ne 3) {
+            throw "Known Tauri DMG metadata was not accepted."
+        }
+    }
+
+    Invoke-Scenario -Name "macOS fingerprints symlinks without following them" -Test {
+        foreach ($case in @(
+                "internal",
+                "darwin-system",
+                "darwin-usr-lib",
+                "mismatch",
+                "escape",
+                "absolute-denied"
+            )) {
+            $root = New-FixtureRoot
+            $bundle = New-MacFixture -Root $root
+            $adapter = New-ToolAdapter -Root $root
+            $sourceDocument = Get-Content `
+                -Raw `
+                -Encoding UTF8 `
+                -LiteralPath (Join-Path $root "source-app-inventory.json") |
+                ConvertFrom-Json
+            [object[]] $source = @(
+                $sourceDocument | ForEach-Object { $_ }
+            )
+            $mountedDocument = Get-Content `
+                -Raw `
+                -Encoding UTF8 `
+                -LiteralPath (Join-Path $root "mounted-app-inventory.json") |
+                ConvertFrom-Json
+            [object[]] $mounted = @(
+                $mountedDocument | ForEach-Object { $_ }
+            )
+            $sourceTarget = switch ($case) {
+                "internal" { "." }
+                "darwin-system" { "/System/Library/Frameworks/AppKit.framework" }
+                "darwin-usr-lib" { "/usr/lib/libobjc.A.dylib" }
+                "mismatch" { "." }
+                "escape" { "../../../../outside" }
+                "absolute-denied" { "/tmp/evil" }
+            }
+            $mountedTarget = if ($case -ceq "mismatch") {
+                "../MacOS"
+            } else {
+                $sourceTarget
+            }
+            $source += [pscustomobject]@{
+                Kind = "Link"
+                Relative = "Contents/Resources/current"
+                Target = $sourceTarget
+                Sha256 = $null
+            }
+            $mounted += [pscustomobject]@{
+                Kind = "Link"
+                Relative = "Contents/Resources/current"
+                Target = $mountedTarget
+                Sha256 = $null
+            }
+            Write-MacInventoryOverride `
+                -Root $root `
+                -Kind source `
+                -Inventory $source
+            Write-MacInventoryOverride `
+                -Root $root `
+                -Kind mounted `
+                -Inventory $mounted
+            $arguments = @{
+                BundleDirectory = $bundle
+                OutputDirectory = (Join-Path $root "output")
+                Version = $version
+                Target = "x86_64-apple-darwin"
+                ToolAdapterPath = $adapter
+            }
+            if ($case -in @("internal", "darwin-system", "darwin-usr-lib")) {
+                $actual = Invoke-Packager `
+                    -Path $macScript `
+                    -FixtureRoot $root `
+                    -Arguments $arguments
+                if ($actual.Count -ne 3) {
+                    throw "Allowed '$case' symlink was rejected."
+                }
+            } else {
+                $expected = switch ($case) {
+                    "mismatch" { "does not match" }
+                    "escape" { "escapes" }
+                    "absolute-denied" { "absolute" }
+                }
+                Assert-Rejects `
+                    -Path $macScript `
+                    -FixtureRoot $root `
+                    -Arguments $arguments `
+                    -ExpectedText $expected
+            }
+        }
     }
 
     Invoke-Scenario -Name "Windows packages exact MSI and flat Portable zip" -Test {

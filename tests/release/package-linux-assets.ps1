@@ -104,23 +104,16 @@ function Invoke-Adapter {
         }
         "linux-appimage-extract" {
             $extractParent = Split-Path -Parent $Destination
-            $previous = [Environment]::CurrentDirectory
-            try {
-                [Environment]::CurrentDirectory = $extractParent
-                & $Source --appimage-extract | Out-Null
-                if ($LASTEXITCODE -ne 0) {
-                    throw "Could not extract AppImage."
-                }
-                $nativeRoot = Join-Path $extractParent "squashfs-root"
-                $null = Assert-RegularPath `
-                    -Path $nativeRoot `
-                    -Kind Directory `
-                    -Description "Extracted AppImage"
-                Move-Item -LiteralPath $nativeRoot -Destination $Destination
+            & $Source --appimage-extract | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Could not extract AppImage."
             }
-            finally {
-                [Environment]::CurrentDirectory = $previous
-            }
+            $nativeRoot = Join-Path $extractParent "squashfs-root"
+            $null = Assert-RegularPath `
+                -Path $nativeRoot `
+                -Kind Directory `
+                -Description "Extracted AppImage"
+            Move-Item -LiteralPath $nativeRoot -Destination $Destination
             return
         }
         "binary-architecture" {
@@ -241,10 +234,16 @@ $temporary = Join-Path $temporaryParent (
 [IO.Directory]::CreateDirectory($temporary) | Out-Null
 try {
     $appDir = Join-Path $temporary "AppDir"
-    $null = Invoke-Adapter `
-        -Operation "linux-appimage-extract" `
-        -Source $appImage `
-        -Destination $appDir
+    Push-Location -LiteralPath $temporary
+    try {
+        $null = Invoke-Adapter `
+            -Operation "linux-appimage-extract" `
+            -Source $appImage `
+            -Destination $appDir
+    }
+    finally {
+        Pop-Location
+    }
     $null = Assert-RegularPath `
         -Path $appDir `
         -Kind Directory `
