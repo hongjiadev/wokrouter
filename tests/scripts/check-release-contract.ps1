@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [string]$Root
+    [string]$Root,
+
+    [switch]$RequireSixTargets
 )
 
 $ErrorActionPreference = "Stop"
@@ -119,13 +121,25 @@ if ($failures.Count -eq 0) {
         Add-Failure `
             -Message "Release builds must checkout the commit resolved from the requested WokRouter tag."
     }
-    $expectedPairs = @(
-        @("windows-latest", "x86_64-pc-windows-msvc", "zip"),
-        @("macos-15-intel", "x86_64-apple-darwin", "tar.gz"),
-        @("macos-15", "aarch64-apple-darwin", "tar.gz"),
-        @("ubuntu-24.04", "x86_64-unknown-linux-gnu", "tar.gz"),
-        @("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu", "tar.gz")
-    )
+    if ($RequireSixTargets) {
+        $expectedPairs = @(
+            @("windows-latest", "x86_64-pc-windows-msvc", "zip"),
+            @("windows-latest", "aarch64-pc-windows-msvc", "zip"),
+            @("macos-15-intel", "x86_64-apple-darwin", "tar.gz"),
+            @("macos-15", "aarch64-apple-darwin", "tar.gz"),
+            @("ubuntu-24.04", "x86_64-unknown-linux-gnu", "tar.gz"),
+            @("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu", "tar.gz")
+        )
+    }
+    else {
+        $expectedPairs = @(
+            @("windows-latest", "x86_64-pc-windows-msvc", "zip"),
+            @("macos-15-intel", "x86_64-apple-darwin", "tar.gz"),
+            @("macos-15", "aarch64-apple-darwin", "tar.gz"),
+            @("ubuntu-24.04", "x86_64-unknown-linux-gnu", "tar.gz"),
+            @("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu", "tar.gz")
+        )
+    }
     foreach ($pair in $expectedPairs) {
         $pattern = "(?m)^          - os: $([regex]::Escape($pair[0]))\n            target: $([regex]::Escape($pair[1]))\n            extension: $([regex]::Escape($pair[2]))$"
         if ($buildJob -notmatch $pattern) {
@@ -133,8 +147,13 @@ if ($failures.Count -eq 0) {
                 -Message "Release matrix is missing '$($pair[1])' on '$($pair[0])'."
         }
     }
-    if (@([regex]::Matches($buildJob, '(?m)^            target: ')).Count -ne 5) {
-        Add-Failure -Message "Release build matrix must contain exactly five targets."
+    $expectedTargetCount = if ($RequireSixTargets) { 6 } else { 5 }
+    if (
+        @([regex]::Matches($buildJob, '(?m)^            target: ')).Count -ne
+        $expectedTargetCount
+    ) {
+        Add-Failure `
+            -Message "Release build matrix must contain exactly $expectedTargetCount targets."
     }
     foreach ($requiredText in @(
             "WOKROUTER_BUNDLE_KIND: online",
@@ -197,6 +216,7 @@ if ($failures.Count -eq 0) {
     foreach ($requiredFact in @(
             "wokrouter-test-host.exe",
             "x86_64-pc-windows-msvc",
+            "aarch64-pc-windows-msvc",
             "aarch64-apple-darwin",
             "aarch64-unknown-linux-gnu",
             "online WokRouter",

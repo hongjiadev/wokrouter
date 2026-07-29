@@ -71,14 +71,20 @@ pnpm --dir apps/desktop build
 cargo deny --all-features check
 ```
 
-On Windows, never execute Cargo's hashed test programs directly. Run the
-self-test and the full workspace through the stable
-`wokrouter-test-host.exe` name:
+On Windows, never execute Cargo's hashed test programs directly. Compile Rust
+tests with Cargo, then execute every test binary only through
+`tests/scripts/run-fixed-test-host.ps1`, which copies each artifact to the
+stable `wokrouter-test-host.exe` filename. Run the wrapper self-test and the
+full workspace as follows:
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -File tests/scripts/run-fixed-test-host.tests.ps1
 
+$env:OPENAI_API_KEY = ""
+$env:ANTHROPIC_API_KEY = ""
+$env:GEMINI_API_KEY = ""
+$env:GOOGLE_API_KEY = ""
 $repositoryRoot = (Get-Location).Path
 $targetDirectory = Join-Path $repositoryRoot 'target'
 $command = @"
@@ -121,19 +127,24 @@ different job without failing the gate.
 
 The stable branch-protection checks are `rust`, `frontend`, and
 `platform-check`. The last check aggregates native tests, compatibility
-coverage, and target checks for Windows x64, macOS x64/arm64, and Linux
+coverage, and target checks for Windows x64/arm64, macOS x64/arm64, and Linux
 x64/arm64. CI clears the OpenAI, Anthropic, Gemini, and Google provider
 environment variables before running any gate.
 
-## macOS and Linux boundaries
+## Release targets and public names
 
-CI uses native GitHub-hosted runners for these Rust targets:
+Release builds use these six Rust target triples internally:
 
 - `x86_64-pc-windows-msvc`
+- `aarch64-pc-windows-msvc`
 - `x86_64-apple-darwin`
 - `aarch64-apple-darwin`
 - `x86_64-unknown-linux-gnu`
 - `aarch64-unknown-linux-gnu`
+
+Public asset names use `Linux`, `macOS`, or `Windows` and `x86_64` or `arm64`;
+they never expose Rust vendor segments such as `unknown`, `pc-windows`, or
+`apple-darwin`.
 
 Ubuntu runners install the Tauri WebKitGTK 4.1, AppIndicator, SSL, SVG, XDO,
 and native build dependencies before compiling. A local Linux build needs the
@@ -142,11 +153,11 @@ Command Line Tools.
 
 ## Independent releases
 
-The Release workflow builds the five targets above from a WokRouter tag. Its
+The Release workflow builds the six targets above from a WokRouter tag. Its
 version is derived only from that tag and remains independent of the installed
 WokCore version. A manual dispatch accepts the WokRouter tag and performs the
 same build and verification without publishing; a tag push publishes only
-after all five archives and the compatibility matrix pass.
+after all target assets and the compatibility matrix pass.
 
 Every ordinary online WokRouter artifact contains the WokRouter desktop
 installers and lifecycle binary, but no WokCore binary, legacy daemon, provider

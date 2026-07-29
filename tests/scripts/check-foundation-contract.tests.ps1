@@ -55,10 +55,32 @@ function Edit-Workflow {
     Set-Content -LiteralPath $path -Value $content.Replace($OldText, $NewText) -Encoding UTF8
 }
 
-function Invoke-ContractCheck {
+function Add-WindowsArm64Targets {
     param(
         [Parameter(Mandatory)]
         [string]$Root
+    )
+
+    Edit-Workflow `
+        -Root $Root `
+        -OldText @"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+"@ `
+        -NewText @"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+"@
+}
+
+function Invoke-ContractCheck {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Root,
+
+        [switch]$RequireSixTargets
     )
 
     $arguments = @("-NoProfile")
@@ -66,6 +88,9 @@ function Invoke-ContractCheck {
         $arguments += @("-ExecutionPolicy", "Bypass")
     }
     $arguments += @("-File", $scriptUnderTest, "-Root", $Root)
+    if ($RequireSixTargets) {
+        $arguments += "-RequireSixTargets"
+    }
 
     $previousErrorActionPreference = $ErrorActionPreference
     try {
@@ -89,10 +114,14 @@ function Assert-ContractPasses {
         [string]$Root,
 
         [Parameter(Mandatory)]
-        [string]$Scenario
+        [string]$Scenario,
+
+        [switch]$RequireSixTargets
     )
 
-    $result = Invoke-ContractCheck -Root $Root
+    $result = Invoke-ContractCheck `
+        -Root $Root `
+        -RequireSixTargets:$RequireSixTargets
     if ($result.ExitCode -ne 0) {
         throw "$Scenario should pass, but exited $($result.ExitCode): $($result.Output)"
     }
@@ -107,10 +136,14 @@ function Assert-ContractRejects {
         [string]$ExpectedText,
 
         [Parameter(Mandatory)]
-        [string]$Scenario
+        [string]$Scenario,
+
+        [switch]$RequireSixTargets
     )
 
-    $result = Invoke-ContractCheck -Root $Root
+    $result = Invoke-ContractCheck `
+        -Root $Root `
+        -RequireSixTargets:$RequireSixTargets
     if ($result.ExitCode -ne 1) {
         throw "$Scenario should exit 1, but exited $($result.ExitCode): $($result.Output)"
     }
@@ -143,6 +176,15 @@ try {
     Invoke-Scenario -Name "real workflow satisfies the structural contract" -Test {
         $root = New-ContractFixture
         Assert-ContractPasses -Root $root -Scenario "real workflow fixture"
+    }
+
+    Invoke-Scenario -Name "six-target matrices accept Windows arm64" -Test {
+        $root = New-ContractFixture
+        Add-WindowsArm64Targets -Root $root
+        Assert-ContractPasses `
+            -Root $root `
+            -Scenario "six-target workflow fixture" `
+            -RequireSixTargets
     }
 
     Invoke-Scenario -Name "Windows fixed test host cannot be removed" -Test {
@@ -213,19 +255,21 @@ try {
             -Scenario "missing core boundary gate"
     }
 
-    Invoke-Scenario -Name "five-target matrix cannot lose Linux arm64" -Test {
+    Invoke-Scenario -Name "six-target matrix cannot lose Windows arm64" -Test {
         $root = New-ContractFixture
+        Add-WindowsArm64Targets -Root $root
         Edit-Workflow `
             -Root $root `
             -OldText @"
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
 "@ `
             -NewText ""
         Assert-ContractRejects `
             -Root $root `
-            -ExpectedText "aarch64-unknown-linux-gnu" `
-            -Scenario "missing Linux arm64 target"
+            -ExpectedText "aarch64-pc-windows-msvc" `
+            -Scenario "missing Windows arm64 target" `
+            -RequireSixTargets
     }
 
     Invoke-Scenario -Name "compatibility matrix cannot lose older same-major coverage" -Test {

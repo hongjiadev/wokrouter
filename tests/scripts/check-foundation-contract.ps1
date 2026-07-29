@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [string]$Root
+    [string]$Root,
+
+    [switch]$RequireSixTargets
 )
 
 $ErrorActionPreference = "Stop"
@@ -605,7 +607,7 @@ if ($jobs.ContainsKey("frontend")) {
     }
 }
 
-function Assert-FiveTargetMatrix {
+function Assert-TargetMatrix {
     param(
         [Parameter(Mandatory)]
         [object]$Job,
@@ -619,13 +621,25 @@ function Assert-FiveTargetMatrix {
             -Message "Workflow job '$JobName' runs-on must be '`${{ matrix.os }}'."
     }
     $jobText = $Job.Lines -join "`n"
-    $expectedPairs = @(
-        @("windows-latest", "x86_64-pc-windows-msvc"),
-        @("macos-15-intel", "x86_64-apple-darwin"),
-        @("macos-15", "aarch64-apple-darwin"),
-        @("ubuntu-24.04", "x86_64-unknown-linux-gnu"),
-        @("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu")
-    )
+    if ($RequireSixTargets) {
+        $expectedPairs = @(
+            @("windows-latest", "x86_64-pc-windows-msvc"),
+            @("windows-latest", "aarch64-pc-windows-msvc"),
+            @("macos-15-intel", "x86_64-apple-darwin"),
+            @("macos-15", "aarch64-apple-darwin"),
+            @("ubuntu-24.04", "x86_64-unknown-linux-gnu"),
+            @("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu")
+        )
+    }
+    else {
+        $expectedPairs = @(
+            @("windows-latest", "x86_64-pc-windows-msvc"),
+            @("macos-15-intel", "x86_64-apple-darwin"),
+            @("macos-15", "aarch64-apple-darwin"),
+            @("ubuntu-24.04", "x86_64-unknown-linux-gnu"),
+            @("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu")
+        )
+    }
     foreach ($pair in $expectedPairs) {
         $pattern = "(?m)^          - os: $([regex]::Escape($pair[0]))\n            target: $([regex]::Escape($pair[1]))$"
         if ($jobText -notmatch $pattern) {
@@ -636,15 +650,16 @@ function Assert-FiveTargetMatrix {
     $targetCount = @(
         $Job.Lines | Where-Object { $_ -match "^            target: " }
     ).Count
-    if ($targetCount -ne 5) {
+    $expectedTargetCount = if ($RequireSixTargets) { 6 } else { 5 }
+    if ($targetCount -ne $expectedTargetCount) {
         Add-ContractFailure `
-            -Message "Workflow job '$JobName' must contain exactly five target entries."
+            -Message "Workflow job '$JobName' must contain exactly $expectedTargetCount target entries."
     }
 }
 
 if ($jobs.ContainsKey("native-test-matrix")) {
     $nativeJob = $jobs["native-test-matrix"]
-    Assert-FiveTargetMatrix -Job $nativeJob -JobName "native-test-matrix"
+    Assert-TargetMatrix -Job $nativeJob -JobName "native-test-matrix"
     $nativeSteps = @(Get-JobSteps -Job $nativeJob)
     Assert-JobRunStep `
         -JobName "native-test-matrix" `
@@ -686,7 +701,7 @@ if ($jobs.ContainsKey("native-test-matrix")) {
 
 if ($jobs.ContainsKey("target-check-matrix")) {
     $targetJob = $jobs["target-check-matrix"]
-    Assert-FiveTargetMatrix -Job $targetJob -JobName "target-check-matrix"
+    Assert-TargetMatrix -Job $targetJob -JobName "target-check-matrix"
     $targetSteps = @(Get-JobSteps -Job $targetJob)
     Assert-JobRunStep `
         -JobName "target-check-matrix" `

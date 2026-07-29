@@ -17,6 +17,7 @@ const {
 
 const supportedTauriTargets = [
   ["windows", "x86_64", "x86_64-pc-windows-msvc"],
+  ["windows", "aarch64", "aarch64-pc-windows-msvc"],
   ["darwin", "x86_64", "x86_64-apple-darwin"],
   ["darwin", "aarch64", "aarch64-apple-darwin"],
   ["linux", "x86_64", "x86_64-unknown-linux-gnu"],
@@ -34,8 +35,17 @@ describe("target resolution", () => {
 
   it("fails fast for an unsupported Tauri platform and architecture", () => {
     expect(() =>
-      tauriTargetTriple({ platform: "windows", arch: "aarch64" }),
-    ).toThrow("Unsupported Tauri target: windows/aarch64");
+      tauriTargetTriple({ platform: "windows", arch: "armv7" }),
+    ).toThrow("Unsupported Tauri target: windows/armv7");
+  });
+
+  it("accepts Windows ARM64 as an explicit target", () => {
+    expect(
+      resolveTargetTriple({
+        explicitTarget: "aarch64-pc-windows-msvc",
+        hostTargetTriple: "x86_64-pc-windows-msvc",
+      }),
+    ).toBe("aarch64-pc-windows-msvc");
   });
 
   it("prefers explicit, Cargo, direct Tauri, and platform targets before the native fallback", () => {
@@ -93,12 +103,6 @@ describe("target resolution", () => {
   );
 
   it("rejects unsupported explicit, Cargo, direct Tauri, and native target triples", () => {
-    expect(() =>
-      resolveTargetTriple({
-        explicitTarget: "aarch64-pc-windows-msvc",
-        hostTargetTriple: "x86_64-pc-windows-msvc",
-      }),
-    ).toThrow("Unsupported target triple: aarch64-pc-windows-msvc");
     expect(() =>
       resolveTargetTriple({
         cargoBuildTarget: "wasm32-unknown-unknown",
@@ -284,6 +288,9 @@ describe("sidecar staging paths", () => {
     expect(
       sidecarFileName("wokrouter", "x86_64-pc-windows-msvc"),
     ).toBe("wokrouter-x86_64-pc-windows-msvc.exe");
+    expect(
+      sidecarFileName("wokrouter", "aarch64-pc-windows-msvc"),
+    ).toBe("wokrouter-aarch64-pc-windows-msvc.exe");
   });
 
   it("reads the target-specific Cargo release directory", () => {

@@ -52,14 +52,41 @@ function Edit-FixtureFile {
     Set-Content -LiteralPath $path -Value $content.Replace($old, $new) -Encoding UTF8
 }
 
-function Invoke-Check {
+function Add-WindowsArm64Target {
     param([Parameter(Mandatory)][string]$Root)
+
+    Edit-FixtureFile `
+        -Root $Root `
+        -RelativePath ".github/workflows/release.yml" `
+        -OldText @"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            extension: zip
+"@ `
+        -NewText @"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            extension: zip
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            extension: zip
+"@
+}
+
+function Invoke-Check {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [switch]$RequireSixTargets
+    )
 
     $arguments = @("-NoProfile")
     if ($PSVersionTable.PSEdition -eq "Desktop") {
         $arguments += @("-ExecutionPolicy", "Bypass")
     }
     $arguments += @("-File", $scriptUnderTest, "-Root", $Root)
+    if ($RequireSixTargets) {
+        $arguments += "-RequireSixTargets"
+    }
     $previous = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
@@ -73,9 +100,13 @@ function Invoke-Check {
 }
 
 function Assert-Passes {
-    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Scenario)
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Scenario,
+        [switch]$RequireSixTargets
+    )
 
-    $result = Invoke-Check -Root $Root
+    $result = Invoke-Check -Root $Root -RequireSixTargets:$RequireSixTargets
     if ($result.ExitCode -ne 0) {
         throw "$Scenario should pass, but exited $($result.ExitCode): $($result.Output)"
     }
@@ -85,10 +116,11 @@ function Assert-Rejects {
     param(
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$ExpectedText,
-        [Parameter(Mandatory)][string]$Scenario
+        [Parameter(Mandatory)][string]$Scenario,
+        [switch]$RequireSixTargets
     )
 
-    $result = Invoke-Check -Root $Root
+    $result = Invoke-Check -Root $Root -RequireSixTargets:$RequireSixTargets
     if ($result.ExitCode -ne 1) {
         throw "$Scenario should exit 1, but exited $($result.ExitCode): $($result.Output)"
     }
@@ -115,6 +147,34 @@ try {
     Invoke-Scenario -Name "real release workflow satisfies the contract" -Test {
         $root = New-ReleaseFixture
         Assert-Passes -Root $root -Scenario "real release fixture"
+    }
+
+    Invoke-Scenario -Name "six-target release matrix accepts Windows arm64" -Test {
+        $root = New-ReleaseFixture
+        Add-WindowsArm64Target -Root $root
+        Assert-Passes `
+            -Root $root `
+            -Scenario "six-target release fixture" `
+            -RequireSixTargets
+    }
+
+    Invoke-Scenario -Name "release matrix must retain Windows arm64" -Test {
+        $root = New-ReleaseFixture
+        Add-WindowsArm64Target -Root $root
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText @"
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            extension: zip
+"@ `
+            -NewText ""
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "aarch64-pc-windows-msvc" `
+            -Scenario "missing Windows arm64 target" `
+            -RequireSixTargets
     }
 
     Invoke-Scenario -Name "release matrix must retain Linux arm64" -Test {

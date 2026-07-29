@@ -18,6 +18,7 @@ const sidecarNames = ["wokrouter"];
 const bundleKinds = new Set(["online", "offline"]);
 const supportedTargetTriples = new Set([
   "x86_64-pc-windows-msvc",
+  "aarch64-pc-windows-msvc",
   "x86_64-apple-darwin",
   "aarch64-apple-darwin",
   "x86_64-unknown-linux-gnu",
@@ -25,6 +26,7 @@ const supportedTargetTriples = new Set([
 ]);
 const tauriTargets = new Map([
   ["windows/x86_64", "x86_64-pc-windows-msvc"],
+  ["windows/aarch64", "aarch64-pc-windows-msvc"],
   ["darwin/x86_64", "x86_64-apple-darwin"],
   ["darwin/aarch64", "aarch64-apple-darwin"],
   ["linux/x86_64", "x86_64-unknown-linux-gnu"],
@@ -124,12 +126,12 @@ export function cargoBuildArguments(targetTriple) {
   ];
 }
 
-function targetExtension(targetTriple) {
-  return targetTriple === "x86_64-pc-windows-msvc" ? ".exe" : "";
+function executableSuffix(targetTriple) {
+  return targetTriple.endsWith("-pc-windows-msvc") ? ".exe" : "";
 }
 
 export function sidecarFileName(binaryName, targetTriple) {
-  const extension = targetExtension(targetTriple);
+  const extension = executableSuffix(targetTriple);
   return `${binaryName}-${targetTriple}${extension}`;
 }
 
@@ -142,7 +144,7 @@ export function sidecarPaths({
   hostPlatform,
 }) {
   const path = hostPlatform === "win32" ? win32 : posix;
-  const extension = targetExtension(targetTriple);
+  const extension = executableSuffix(targetTriple);
   const buildTargetDir = targetDir ?? path.join(workspaceRoot, "target");
   return {
     source: path.join(
