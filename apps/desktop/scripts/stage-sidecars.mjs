@@ -2,6 +2,7 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  readFileSync,
   rmSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -42,6 +43,24 @@ const wokCoreOfflineContracts = new Map([
 ]);
 const canonicalSemver =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const maxWokCoreManifestBytes = 64 * 1024;
+const maxWokCoreArtifactBytes = 512 * 1024 * 1024;
+const wokCoreManifestKeys = [
+  "schema_version",
+  "product",
+  "api_major",
+  "version",
+  "signing_key_id",
+  "artifacts",
+];
+const wokCoreArtifactKeys = [
+  "target",
+  "file",
+  "executable",
+  "size",
+  "sha256",
+  "url",
+];
 
 function normalized(value) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -171,6 +190,118 @@ export function wokCoreArtifactName({
     : `WokCore-v${version}-${system}-${architecture}.${extension}`;
 }
 
+function hasExactKeys(value, expectedKeys) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const keys = Object.keys(value);
+  return (
+    keys.length === expectedKeys.length &&
+    expectedKeys.every((key) => Object.hasOwn(value, key))
+  );
+}
+
+function parseWokCoreManifest(manifest, fileSystem) {
+  let bytes;
+  try {
+    bytes = fileSystem.readFileSync(manifest);
+  } catch {
+    throw new Error("WokCore manifest could not be read.");
+  }
+  if (
+    !ArrayBuffer.isView(bytes) ||
+    bytes.byteLength === 0 ||
+    bytes.byteLength > maxWokCoreManifestBytes
+  ) {
+    throw new Error("WokCore manifest is empty or oversized.");
+  }
+
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("WokCore manifest JSON is invalid.");
+  }
+  let document;
+  try {
+    document = JSON.parse(text);
+  } catch {
+    throw new Error("WokCore manifest JSON is invalid.");
+  }
+  return document;
+}
+
+function validateWokCoreOfflineManifest({
+  document,
+  schemaVersion,
+  targetTriple,
+  archiveName,
+}) {
+  if (!hasExactKeys(document, wokCoreManifestKeys)) {
+    throw new Error("WokCore manifest contract is invalid.");
+  }
+  if (document.schema_version !== schemaVersion) {
+    throw new Error("WokCore manifest schema does not match its filename.");
+  }
+  if (
+    document.product !== "wokcore" ||
+    document.api_major !== 1 ||
+    typeof document.version !== "string" ||
+    document.version.length > 128 ||
+    !canonicalSemver.test(document.version) ||
+    typeof document.signing_key_id !== "string" ||
+    !/^[0-9A-F]{16}$/.test(document.signing_key_id) ||
+    !Array.isArray(document.artifacts)
+  ) {
+    throw new Error("WokCore manifest contract is invalid.");
+  }
+
+  const contracts = [...wokCoreOfflineContracts.entries()].filter(
+    ([, [, , , legacyV1]]) => schemaVersion === 2 || legacyV1,
+  );
+  if (document.artifacts.length !== contracts.length) {
+    throw new Error("WokCore manifest artifact contract is invalid.");
+  }
+
+  let selectedArtifact;
+  for (let index = 0; index < contracts.length; index += 1) {
+    const [target, [system]] = contracts[index];
+    const artifact = document.artifacts[index];
+    const expectedFile = wokCoreArtifactName({
+      schemaVersion,
+      targetTriple: target,
+      version: document.version,
+    });
+    const expectedExecutable = system === "Windows" ? "wokcore.exe" : "wokcore";
+    const expectedUrl =
+      `https://github.com/hongjiadev/wokcore/releases/download/` +
+      `v${document.version}/${expectedFile}`;
+    if (
+      !hasExactKeys(artifact, wokCoreArtifactKeys) ||
+      artifact.target !== target ||
+      artifact.file !== expectedFile ||
+      artifact.executable !== expectedExecutable ||
+      !Number.isSafeInteger(artifact.size) ||
+      artifact.size <= 0 ||
+      artifact.size > maxWokCoreArtifactBytes ||
+      typeof artifact.sha256 !== "string" ||
+      !/^[0-9a-f]{64}$/.test(artifact.sha256) ||
+      artifact.url !== expectedUrl
+    ) {
+      throw new Error("WokCore manifest artifact contract is invalid.");
+    }
+    if (target === targetTriple) {
+      selectedArtifact = artifact;
+    }
+  }
+  if (!selectedArtifact) {
+    throw new Error("WokCore manifest does not support this target.");
+  }
+  if (selectedArtifact.file !== archiveName) {
+    throw new Error("WokCore manifest and artifact versions do not match.");
+  }
+}
+
 export function sidecarFileName(binaryName, targetTriple) {
   const extension = executableSuffix(targetTriple);
   return `${binaryName}-${targetTriple}${extension}`;
@@ -242,7 +373,7 @@ export function stageBundleArtifact({
   hostPlatform,
   stagedSidecars,
   offlineWokCore,
-  fileSystem = { copyFileSync, existsSync, mkdirSync, rmSync },
+  fileSystem = { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync },
 }) {
   const bundleKind = resolveBundleKind(kind);
   const supportedTarget = supportedTargetTriple(targetTriple);
@@ -293,32 +424,13 @@ export function stageBundleArtifact({
     }
 
     const archiveName = path.basename(artifact);
-    const contract = wokCoreOfflineContracts.get(supportedTarget);
-    const [system, architecture, extension] = contract;
-    const prefix = schemaVersion === 1 ? "wokcore-v" : "WokCore-v";
-    const suffix =
-      schemaVersion === 1
-        ? `-${supportedTarget}.${extension}`
-        : system === "Windows"
-          ? `-${system}-${architecture}-Portable.zip`
-          : `-${system}-${architecture}.${extension}`;
-    if (!archiveName.startsWith(prefix) || !archiveName.endsWith(suffix)) {
-      throw new Error("WokCore manifest and artifact versions do not match.");
-    }
-    const version = archiveName.slice(prefix.length, -suffix.length);
-    let expectedArtifact;
-    try {
-      expectedArtifact = wokCoreArtifactName({
-        schemaVersion,
-        targetTriple: supportedTarget,
-        version,
-      });
-    } catch {
-      throw new Error("WokCore manifest and artifact versions do not match.");
-    }
-    if (archiveName !== expectedArtifact) {
-      throw new Error("WokCore manifest and artifact versions do not match.");
-    }
+    const document = parseWokCoreManifest(manifest, fileSystem);
+    validateWokCoreOfflineManifest({
+      document,
+      schemaVersion,
+      targetTriple: supportedTarget,
+      archiveName,
+    });
 
     files.push(
       {

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import * as sidecars from "./stage-sidecars.mjs";
@@ -25,6 +27,57 @@ const supportedTauriTargets = [
   ["linux", "aarch64", "aarch64-unknown-linux-gnu"],
 ];
 const supportedTargetTriples = supportedTauriTargets.map(([, , triple]) => triple);
+const v1ManifestText = readFileSync(
+  resolve(
+    process.cwd(),
+    "../../crates/wokrouter-platform/tests/fixtures/wokcore-install/wokcore-update-v1.json",
+  ),
+  "utf8",
+);
+const v2ManifestText = readFileSync(
+  resolve(
+    process.cwd(),
+    "../../crates/wokrouter-platform/tests/fixtures/wokcore-install/wokcore-update-v2.json",
+  ),
+  "utf8",
+);
+
+function canonicalManifest(document) {
+  return `${JSON.stringify(document)}\n`;
+}
+
+function offlineFileSystem(manifestText) {
+  return {
+    copyFileSync: vi.fn(),
+    existsSync: () => true,
+    mkdirSync: vi.fn(),
+    readFileSync: vi.fn(() => Buffer.from(manifestText)),
+    rmSync: vi.fn(),
+  };
+}
+
+function windowsArm64OfflineBundle(manifestText) {
+  return {
+    kind: "offline",
+    targetDir: "/work/wokrouter/target",
+    targetTriple: "aarch64-pc-windows-msvc",
+    hostPlatform: "linux",
+    stagedSidecars: [
+      {
+        source:
+          "/work/wokrouter/target/aarch64-pc-windows-msvc/release/wokrouter.exe",
+        destination:
+          "/work/wokrouter/apps/desktop/src-tauri/binaries/wokrouter-aarch64-pc-windows-msvc.exe",
+      },
+    ],
+    offlineWokCore: {
+      manifest: "/release/wokcore-update-v2.json",
+      signature: "/release/wokcore-update-v2.json.minisig",
+      artifact: "/release/WokCore-v1.2.3-Windows-arm64-Portable.zip",
+    },
+    fileSystem: offlineFileSystem(manifestText),
+  };
+}
 
 describe("target resolution", () => {
   it.each(supportedTauriTargets)(
@@ -281,13 +334,7 @@ describe("sidecar staging paths", () => {
   });
 
   it("requires and stages signed WokCore inputs only for an offline artifact", () => {
-    const copyFileSync = vi.fn();
-    const fileSystem = {
-      copyFileSync,
-      existsSync: () => true,
-      mkdirSync: vi.fn(),
-      rmSync: vi.fn(),
-    };
+    const fileSystem = offlineFileSystem(v1ManifestText);
     const common = {
       kind: "offline",
       targetDir: "/work/wokrouter/target",
@@ -327,16 +374,11 @@ describe("sidecar staging paths", () => {
       "/work/wokrouter/target/wokrouter-bundles/wokrouter-offline-aarch64-apple-darwin/wokcore-update-v1.json.minisig",
       "/work/wokrouter/target/wokrouter-bundles/wokrouter-offline-aarch64-apple-darwin/wokcore-v1.2.3-aarch64-apple-darwin.tar.gz",
     ]);
-    expect(copyFileSync).toHaveBeenCalledTimes(4);
+    expect(fileSystem.copyFileSync).toHaveBeenCalledTimes(4);
   });
 
   it("stages a complete v2 WokCore set and rejects mixed manifest versions", () => {
-    const fileSystem = {
-      copyFileSync: vi.fn(),
-      existsSync: () => true,
-      mkdirSync: vi.fn(),
-      rmSync: vi.fn(),
-    };
+    const fileSystem = offlineFileSystem(v2ManifestText);
     const common = {
       kind: "offline",
       targetDir: "/work/wokrouter/target",
@@ -391,6 +433,137 @@ describe("sidecar staging paths", () => {
         },
       }),
     ).toThrow("WokCore manifest and artifact versions do not match.");
+  });
+
+  it("rejects offline manifest body schema, version, and selected artifact mismatches", () => {
+    expect(() =>
+      stageBundleArtifact(windowsArm64OfflineBundle(v1ManifestText)),
+    ).toThrow("WokCore manifest schema does not match its filename.");
+
+    const wrongVersion = JSON.parse(v2ManifestText);
+    wrongVersion.version = "1.2.4";
+    expect(() =>
+      stageBundleArtifact(
+        windowsArm64OfflineBundle(canonicalManifest(wrongVersion)),
+      ),
+    ).toThrow("WokCore manifest artifact contract is invalid.");
+
+    const wrongFile = JSON.parse(v2ManifestText);
+    wrongFile.artifacts[1].file =
+      "WokCore-v1.2.3-Windows-x86_64-Portable.zip";
+    expect(() =>
+      stageBundleArtifact(windowsArm64OfflineBundle(canonicalManifest(wrongFile))),
+    ).toThrow("WokCore manifest artifact contract is invalid.");
+  });
+
+  it("accepts schema-valid object member reordering while keeping artifact order strict", () => {
+    const original = JSON.parse(v2ManifestText);
+    const reordered = {
+      artifacts: original.artifacts.map((artifact) => ({
+        sha256: artifact.sha256,
+        target: artifact.target,
+        url: artifact.url,
+        size: artifact.size,
+        executable: artifact.executable,
+        file: artifact.file,
+      })),
+      signing_key_id: original.signing_key_id,
+      version: original.version,
+      api_major: original.api_major,
+      product: original.product,
+      schema_version: original.schema_version,
+    };
+
+    const result = stageBundleArtifact(
+      windowsArm64OfflineBundle(canonicalManifest(reordered)),
+    );
+
+    expect(result.files).toHaveLength(4);
+  });
+
+  it("rejects missing, duplicate, extra, reordered, and unknown manifest members", () => {
+    const mutations = [
+      [
+        "missing target",
+        (document) => {
+          document.artifacts.splice(1, 1);
+        },
+      ],
+      [
+        "duplicate target",
+        (document) => {
+          document.artifacts[1] = structuredClone(document.artifacts[0]);
+        },
+      ],
+      [
+        "extra target",
+        (document) => {
+          document.artifacts.push(structuredClone(document.artifacts[0]));
+        },
+      ],
+      [
+        "wrong order",
+        (document) => {
+          [document.artifacts[0], document.artifacts[1]] = [
+            document.artifacts[1],
+            document.artifacts[0],
+          ];
+        },
+      ],
+      [
+        "unknown root member",
+        (document) => {
+          document.extra = true;
+        },
+      ],
+      [
+        "unknown artifact member",
+        (document) => {
+          document.artifacts[1].extra = true;
+        },
+      ],
+    ];
+
+    for (const [name, mutate] of mutations) {
+      const document = JSON.parse(v2ManifestText);
+      mutate(document);
+      expect(
+        () =>
+          stageBundleArtifact(
+            windowsArm64OfflineBundle(canonicalManifest(document)),
+          ),
+        name,
+      ).toThrow("WokCore manifest");
+    }
+  });
+
+  it("validates every selected artifact field and bounds manifest reads", () => {
+    const mutations = [
+      ["executable", "wokcore"],
+      ["url", "https://example.com/WokCore.zip"],
+      ["size", 0],
+      ["sha256", "A".repeat(64)],
+    ];
+    for (const [field, value] of mutations) {
+      const document = JSON.parse(v2ManifestText);
+      document.artifacts[1][field] = value;
+      expect(
+        () =>
+          stageBundleArtifact(
+            windowsArm64OfflineBundle(canonicalManifest(document)),
+          ),
+        field,
+      ).toThrow("WokCore manifest artifact contract is invalid.");
+    }
+
+    expect(() =>
+      stageBundleArtifact(windowsArm64OfflineBundle("{not-json}\n")),
+    ).toThrow("WokCore manifest JSON is invalid.");
+    expect(() =>
+      stageBundleArtifact(
+        windowsArm64OfflineBundle(" ".repeat(64 * 1024 + 1)),
+      ),
+    ).toThrow("WokCore manifest is empty or oversized.");
   });
 
   it("derives the executable extension from the target triple", () => {
