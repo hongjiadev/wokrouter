@@ -83,7 +83,8 @@ function Get-PeArchitecture {
 function Invoke-MsiRows {
     param(
         [Parameter(Mandatory)] $Database,
-        [Parameter(Mandatory)][string] $Sql
+        [Parameter(Mandatory)][string] $Sql,
+        [Parameter(Mandatory)][ValidateRange(1, 32)][int] $FieldCount
     )
 
     $view = $Database.OpenView($Sql)
@@ -92,7 +93,7 @@ function Invoke-MsiRows {
         $rows = [Collections.Generic.List[object]]::new()
         while ($record = $view.Fetch()) {
             $fields = [Collections.Generic.List[string]]::new()
-            for ($index = 1; $index -le $record.FieldCount; $index += 1) {
+            for ($index = 1; $index -le $FieldCount; $index += 1) {
                 $value = [string] $record.StringData($index)
                 if ($value.Contains("|")) {
                     $value = $value.Substring($value.IndexOf("|") + 1)
@@ -120,7 +121,8 @@ function Get-NativeMsiMetadata {
         $propertyRows = @(
             Invoke-MsiRows `
                 -Database $database `
-                -Sql "SELECT * FROM Property"
+                -Sql "SELECT ``Property``,``Value`` FROM ``Property``" `
+                -FieldCount 2
         )
         $name = @(
             $propertyRows |
@@ -141,7 +143,8 @@ function Get-NativeMsiMetadata {
         $fileRows = @(
             Invoke-MsiRows `
                 -Database $database `
-                -Sql "SELECT * FROM File"
+                -Sql "SELECT ``File``,``Component_``,``FileName`` FROM ``File``" `
+                -FieldCount 3
         )
         $files = @(
             $fileRows |

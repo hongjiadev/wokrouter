@@ -590,9 +590,11 @@ try {
     Invoke-Scenario -Name "Windows native MSI queries enumerate rows before matching fields" -Test {
         $body = Get-Content -Raw -Encoding UTF8 -LiteralPath $windowsScript
         foreach ($query in @(
-                '"SELECT * FROM Property"',
-                '"SELECT * FROM File"',
+                'SELECT ``Property``,``Value`` FROM ``Property``',
+                'SELECT ``File``,``Component_``,``FileName`` FROM ``File``',
                 'Invoke-MsiRows',
+                '-FieldCount 2',
+                '-FieldCount 3',
                 '$_.Fields[0] -ceq "ProductName"',
                 '$_.Fields[0] -ceq "ProductVersion"',
                 'ForEach-Object { [string] $_.Fields[2] }'

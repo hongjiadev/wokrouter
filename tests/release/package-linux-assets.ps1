@@ -730,7 +730,15 @@ function Get-ExactSource {
         }
     }
     if ($sources.Count -ne 1 -or $auxiliary.Count -gt 1 -or $unknown.Count -ne 0) {
-        throw "$Subdirectory must contain exactly one regular $Extension source."
+        $details = @(
+            foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force)) {
+                $kind = if ($item.PSIsContainer) { "Directory" } else { "File" }
+                $reparse = if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { "Reparse" } else { "Regular" }
+                "$($item.Name):${kind}:${reparse}"
+            }
+        )
+        [Array]::Sort($details, [StringComparer]::Ordinal)
+        throw "$Subdirectory must contain exactly one regular $Extension source (entries: $([string]::Join('|', $details)))."
     }
     return $sources[0].FullName
 }
