@@ -694,11 +694,24 @@ $bundle = (Assert-RegularPath `
     -Kind Directory `
     -Description "Bundle directory").FullName
 $rootItems = @(Get-ChildItem -LiteralPath $bundle -Force)
-$rootNames = @($rootItems | ForEach-Object Name)
+$rootNames = @(
+    $rootItems |
+        Where-Object { $_.Name -cne ".DS_Store" } |
+        ForEach-Object Name
+)
 [Array]::Sort($rootNames, [StringComparer]::Ordinal)
 if (
     [string]::Join("|", $rootNames) -cne "dmg|macos" -or
-    @($rootItems | Where-Object { -not $_.PSIsContainer }).Count -ne 0
+    @($rootItems | Where-Object {
+        $_.Name -cne ".DS_Store" -and
+        -not $_.PSIsContainer
+    }).Count -ne 0 -or
+    @($rootItems | Where-Object {
+        $_.Name -ceq ".DS_Store" -and
+        $_.PSIsContainer -or
+        $_.Name -ceq ".DS_Store" -and
+        ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+    }).Count -ne 0
 ) {
     throw "macOS bundle must contain exact dmg and macos source directories."
 }

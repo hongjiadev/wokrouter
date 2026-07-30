@@ -587,6 +587,19 @@ try {
         }
     }
 
+    Invoke-Scenario -Name "Windows native MSI queries use portable Property SQL" -Test {
+        $body = Get-Content -Raw -Encoding UTF8 -LiteralPath $windowsScript
+        foreach ($query in @(
+                "SELECT Value FROM Property WHERE Property='ProductName'",
+                "SELECT Value FROM Property WHERE Property='ProductVersion'",
+                "SELECT FileName FROM File"
+            )) {
+            if (-not $body.Contains($query)) {
+                throw "Windows native MSI query '$query' is not portable."
+            }
+        }
+    }
+
     Invoke-Scenario -Name "Linux production recursively inventories AppImage links without following them" -Test {
         $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $linuxScript
         $inventoryBlock = [regex]::Match(
@@ -616,6 +629,9 @@ try {
     Invoke-Scenario -Name "Linux accepts exact x86_64 Tauri AppImage links" -Test {
         $root = New-FixtureRoot
         $bundle = New-LinuxFixture -Root $root
+        Write-Utf8File `
+            -Path (Join-Path $bundle "appimage/WokRouter.AppImage.zsync") `
+            -Content "zsync-metadata"
         $adapter = New-ToolAdapter -Root $root
         $output = Join-Path $root "output"
         $actual = Invoke-Packager -Path $linuxScript -FixtureRoot $root -Arguments @{
@@ -1229,6 +1245,9 @@ try {
     Invoke-Scenario -Name "macOS packages one app into exact three formats" -Test {
         $root = New-FixtureRoot
         $bundle = New-MacFixture -Root $root
+        Write-Utf8File `
+            -Path (Join-Path $bundle ".DS_Store") `
+            -Content "Finder metadata"
         $adapter = New-ToolAdapter -Root $root
         $output = Join-Path $root "output"
         $actual = Invoke-Packager -Path $macScript -FixtureRoot $root -Arguments @{

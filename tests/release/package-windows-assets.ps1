@@ -116,17 +116,17 @@ function Get-NativeMsiMetadata {
         $name = @(
             Invoke-MsiQuery `
                 -Database $database `
-                -Sql "SELECT ``Value`` FROM ``Property`` WHERE ``Property``='ProductName'"
+                -Sql "SELECT Value FROM Property WHERE Property='ProductName'"
         )
         $nativeVersion = @(
             Invoke-MsiQuery `
                 -Database $database `
-                -Sql "SELECT ``Value`` FROM ``Property`` WHERE ``Property``='ProductVersion'"
+                -Sql "SELECT Value FROM Property WHERE Property='ProductVersion'"
         )
         $files = @(
             Invoke-MsiQuery `
                 -Database $database `
-                -Sql "SELECT ``FileName`` FROM ``File``"
+                -Sql "SELECT FileName FROM File"
         )
         if ($name.Count -ne 1 -or $nativeVersion.Count -ne 1) {
             throw "MSI product metadata is incomplete."

@@ -691,7 +691,8 @@ function Get-ExactSource {
     param(
         [Parameter(Mandatory)][string] $Root,
         [Parameter(Mandatory)][string] $Subdirectory,
-        [Parameter(Mandatory)][string] $Extension
+        [Parameter(Mandatory)][string] $Extension,
+        [string[]] $AllowedAuxiliaryExtensions = @()
     )
 
     $directory = Join-Path $Root $Subdirectory
@@ -700,18 +701,37 @@ function Get-ExactSource {
         -Kind Directory `
         -Description "$Subdirectory source directory"
     $items = @(Get-ChildItem -LiteralPath $directory -Force)
+    $sources = @(
+        $items | Where-Object {
+            -not $_.PSIsContainer -and
+            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and
+            $_.Name.EndsWith($Extension, [StringComparison]::OrdinalIgnoreCase)
+        }
+    )
+    $auxiliary = @($items | Where-Object {
+        $item = $_
+        $sources -notcontains $item -and
+        @(
+            $AllowedAuxiliaryExtensions | Where-Object {
+                $extension = $_
+                $item.Name.EndsWith(
+                    $extension,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+        ).Count -gt 0
+    })
     if (
-        $items.Count -ne 1 -or
-        $items[0].PSIsContainer -or
-        ($items[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-        -not $items[0].Name.EndsWith(
-            $Extension,
-            [StringComparison]::OrdinalIgnoreCase
-        )
+        $sources.Count -ne 1 -or
+        @($items | Where-Object { $sources -notcontains $_ -and $auxiliary -notcontains $_ }).Count -ne 0 -or
+        @($auxiliary | Where-Object {
+            $_.PSIsContainer -or
+            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+        }).Count -ne 0
     ) {
         throw "$Subdirectory must contain exactly one regular $Extension source."
     }
-    return $items[0].FullName
+    return $sources[0].FullName
 }
 
 function Assert-PackageMetadata {
@@ -767,7 +787,8 @@ if (
 $appImage = Get-ExactSource `
     -Root $bundle `
     -Subdirectory "appimage" `
-    -Extension ".AppImage"
+    -Extension ".AppImage" `
+    -AllowedAuxiliaryExtensions @(".zsync")
 $deb = Get-ExactSource -Root $bundle -Subdirectory "deb" -Extension ".deb"
 $rpm = Get-ExactSource -Root $bundle -Subdirectory "rpm" -Extension ".rpm"
 Assert-PackageMetadata `
