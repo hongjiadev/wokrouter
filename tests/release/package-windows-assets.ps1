@@ -80,7 +80,7 @@ function Get-PeArchitecture {
     }
 }
 
-function Invoke-MsiQuery {
+function Invoke-MsiRows {
     param(
         [Parameter(Mandatory)] $Database,
         [Parameter(Mandatory)][string] $Sql
@@ -89,15 +89,19 @@ function Invoke-MsiQuery {
     $view = $Database.OpenView($Sql)
     try {
         $view.Execute()
-        $values = [Collections.Generic.List[string]]::new()
+        $rows = [Collections.Generic.List[object]]::new()
         while ($record = $view.Fetch()) {
-            $value = [string] $record.StringData(1)
-            if ($value.Contains("|")) {
-                $value = $value.Substring($value.IndexOf("|") + 1)
+            $fields = [Collections.Generic.List[string]]::new()
+            for ($index = 1; $index -le $record.FieldCount; $index += 1) {
+                $value = [string] $record.StringData($index)
+                if ($value.Contains("|")) {
+                    $value = $value.Substring($value.IndexOf("|") + 1)
+                }
+                $fields.Add($value)
             }
-            $values.Add($value)
+            $rows.Add([pscustomobject]@{ Fields = $fields.ToArray() })
         }
-        return $values.ToArray()
+        return $rows.ToArray()
     }
     finally {
         $view.Close()
@@ -113,20 +117,36 @@ function Get-NativeMsiMetadata {
     $database = $null
     try {
         $database = $installer.OpenDatabase($Path, 0)
-        $name = @(
-            Invoke-MsiQuery `
+        $propertyRows = @(
+            Invoke-MsiRows `
                 -Database $database `
-                -Sql "SELECT Value FROM Property WHERE Property='ProductName'"
+                -Sql "SELECT * FROM Property"
+        )
+        $name = @(
+            $propertyRows |
+                Where-Object {
+                    $_.Fields.Count -ge 2 -and
+                    $_.Fields[0] -ceq "ProductName"
+                } |
+                ForEach-Object { [string] $_.Fields[1] }
         )
         $nativeVersion = @(
-            Invoke-MsiQuery `
+            $propertyRows |
+                Where-Object {
+                    $_.Fields.Count -ge 2 -and
+                    $_.Fields[0] -ceq "ProductVersion"
+                } |
+                ForEach-Object { [string] $_.Fields[1] }
+        )
+        $fileRows = @(
+            Invoke-MsiRows `
                 -Database $database `
-                -Sql "SELECT Value FROM Property WHERE Property='ProductVersion'"
+                -Sql "SELECT * FROM File"
         )
         $files = @(
-            Invoke-MsiQuery `
-                -Database $database `
-                -Sql "SELECT FileName FROM File"
+            $fileRows |
+                Where-Object { $_.Fields.Count -ge 3 } |
+                ForEach-Object { [string] $_.Fields[2] }
         )
         if ($name.Count -ne 1 -or $nativeVersion.Count -ne 1) {
             throw "MSI product metadata is incomplete."

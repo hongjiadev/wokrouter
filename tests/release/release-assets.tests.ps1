@@ -587,12 +587,15 @@ try {
         }
     }
 
-    Invoke-Scenario -Name "Windows native MSI queries use portable Property SQL" -Test {
+    Invoke-Scenario -Name "Windows native MSI queries enumerate rows before matching fields" -Test {
         $body = Get-Content -Raw -Encoding UTF8 -LiteralPath $windowsScript
         foreach ($query in @(
-                "SELECT Value FROM Property WHERE Property='ProductName'",
-                "SELECT Value FROM Property WHERE Property='ProductVersion'",
-                "SELECT FileName FROM File"
+                '"SELECT * FROM Property"',
+                '"SELECT * FROM File"',
+                'Invoke-MsiRows',
+                '$_.Fields[0] -ceq "ProductName"',
+                '$_.Fields[0] -ceq "ProductVersion"',
+                'ForEach-Object { [string] $_.Fields[2] }'
             )) {
             if (-not $body.Contains($query)) {
                 throw "Windows native MSI query '$query' is not portable."
@@ -742,6 +745,25 @@ try {
                 ToolAdapterPath = $adapter
             } -ExpectedText "exactly one regular"
         }
+    }
+
+    Invoke-Scenario -Name "Linux rejects duplicate AppImage zsync auxiliaries" -Test {
+        $root = New-FixtureRoot
+        $bundle = New-LinuxFixture -Root $root
+        Write-Utf8File `
+            -Path (Join-Path $bundle "appimage/WokRouter.AppImage.zsync") `
+            -Content "zsync-metadata"
+        Write-Utf8File `
+            -Path (Join-Path $bundle "appimage/duplicate.AppImage.zsync") `
+            -Content "zsync-metadata"
+        $adapter = New-ToolAdapter -Root $root
+        Assert-Rejects -Path $linuxScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $bundle
+            OutputDirectory = (Join-Path $root "output")
+            Version = $version
+            Target = "x86_64-unknown-linux-gnu"
+            ToolAdapterPath = $adapter
+        } -ExpectedText "appimage"
     }
 
     Invoke-Scenario -Name "Linux rejects wrong metadata architecture and forbidden AppDir" -Test {
@@ -1248,6 +1270,15 @@ try {
         Write-Utf8File `
             -Path (Join-Path $bundle ".DS_Store") `
             -Content "Finder metadata"
+        Write-Utf8File `
+            -Path (Join-Path $bundle ".localized") `
+            -Content "Finder localization metadata"
+        Write-Utf8File `
+            -Path (Join-Path $bundle "dmg/bundle_dmg.sh") `
+            -Content "#!/bin/sh"
+        Write-Utf8File `
+            -Path (Join-Path $bundle "dmg/share/create-dmg/support/template.applescript") `
+            -Content "-- create-dmg support"
         $adapter = New-ToolAdapter -Root $root
         $output = Join-Path $root "output"
         $actual = Invoke-Packager -Path $macScript -FixtureRoot $root -Arguments @{

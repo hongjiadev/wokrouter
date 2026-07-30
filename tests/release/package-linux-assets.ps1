@@ -700,35 +700,36 @@ function Get-ExactSource {
         -Path $directory `
         -Kind Directory `
         -Description "$Subdirectory source directory"
-    $items = @(Get-ChildItem -LiteralPath $directory -Force)
-    $sources = @(
-        $items | Where-Object {
-            -not $_.PSIsContainer -and
-            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and
-            $_.Name.EndsWith($Extension, [StringComparison]::OrdinalIgnoreCase)
+    $sources = [Collections.Generic.List[object]]::new()
+    $auxiliary = [Collections.Generic.List[object]]::new()
+    $unknown = [Collections.Generic.List[object]]::new()
+    foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force)) {
+        $isReparse = ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+        if ($item.PSIsContainer -or $isReparse) {
+            $unknown.Add($item)
+            continue
         }
-    )
-    $auxiliary = @($items | Where-Object {
-        $item = $_
-        $sources -notcontains $item -and
-        @(
-            $AllowedAuxiliaryExtensions | Where-Object {
-                $extension = $_
-                $item.Name.EndsWith(
-                    $extension,
+        if ($item.Name.EndsWith($Extension, [StringComparison]::OrdinalIgnoreCase)) {
+            $sources.Add($item)
+            continue
+        }
+        $isAuxiliary = $false
+        foreach ($auxiliaryExtension in $AllowedAuxiliaryExtensions) {
+            if ($item.Name.EndsWith(
+                    $auxiliaryExtension,
                     [StringComparison]::OrdinalIgnoreCase
-                )
+                )) {
+                $isAuxiliary = $true
+                break
             }
-        ).Count -gt 0
-    })
-    if (
-        $sources.Count -ne 1 -or
-        @($items | Where-Object { $sources -notcontains $_ -and $auxiliary -notcontains $_ }).Count -ne 0 -or
-        @($auxiliary | Where-Object {
-            $_.PSIsContainer -or
-            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
-        }).Count -ne 0
-    ) {
+        }
+        if ($isAuxiliary) {
+            $auxiliary.Add($item)
+        } else {
+            $unknown.Add($item)
+        }
+    }
+    if ($sources.Count -ne 1 -or $auxiliary.Count -gt 1 -or $unknown.Count -ne 0) {
         throw "$Subdirectory must contain exactly one regular $Extension source."
     }
     return $sources[0].FullName

@@ -271,7 +271,8 @@ function Get-ExactChild {
         [Parameter(Mandatory)][string] $Subdirectory,
         [Parameter(Mandatory)][string] $Suffix,
         [Parameter(Mandatory)][ValidateSet("File", "Directory")]
-        [string] $Kind
+        [string] $Kind,
+        [string[]] $AllowedAuxiliaryNames = @()
     )
 
     $directory = Join-Path $Root $Subdirectory
@@ -280,18 +281,34 @@ function Get-ExactChild {
         -Kind Directory `
         -Description "$Subdirectory source directory"
     $items = @(Get-ChildItem -LiteralPath $directory -Force)
+    $sources = @($items | Where-Object {
+        ($Kind -ceq "Directory") -eq $_.PSIsContainer -and
+        ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and
+        $_.Name.EndsWith($Suffix, [StringComparison]::Ordinal)
+    })
+    $auxiliary = @($items | Where-Object {
+        $AllowedAuxiliaryNames -contains $_.Name
+    })
+    $unknown = @($items | Where-Object {
+        $sources -notcontains $_ -and $auxiliary -notcontains $_
+    })
     if (
-        $items.Count -ne 1 -or
-        (($Kind -ceq "Directory") -ne $items[0].PSIsContainer) -or
-        ($items[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-        -not $items[0].Name.EndsWith(
-            $Suffix,
-            [StringComparison]::Ordinal
-        )
+        $sources.Count -ne 1 -or
+        $unknown.Count -ne 0 -or
+        @($auxiliary | Where-Object {
+            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+        }).Count -ne 0
     ) {
         throw "$Subdirectory must contain exactly one regular $Suffix source."
     }
-    return $items[0].FullName
+    foreach ($item in $auxiliary | Where-Object PSIsContainer) {
+        foreach ($nested in Get-ChildItem -LiteralPath $item.FullName -Force -Recurse) {
+            if (($nested.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "$Subdirectory auxiliary tree contains a reparse point."
+            }
+        }
+    }
+    return $sources[0].FullName
 }
 
 function Assert-ExactProperties {
@@ -694,32 +711,42 @@ $bundle = (Assert-RegularPath `
     -Kind Directory `
     -Description "Bundle directory").FullName
 $rootItems = @(Get-ChildItem -LiteralPath $bundle -Force)
+$allowedRootAuxiliary = @(".DS_Store", ".localized")
 $rootNames = @(
     $rootItems |
-        Where-Object { $_.Name -cne ".DS_Store" } |
+        Where-Object { $allowedRootAuxiliary -notcontains $_.Name } |
         ForEach-Object Name
 )
 [Array]::Sort($rootNames, [StringComparer]::Ordinal)
 if (
     [string]::Join("|", $rootNames) -cne "dmg|macos" -or
     @($rootItems | Where-Object {
-        $_.Name -cne ".DS_Store" -and
+        $allowedRootAuxiliary -notcontains $_.Name -and
         -not $_.PSIsContainer
     }).Count -ne 0 -or
     @($rootItems | Where-Object {
-        $_.Name -ceq ".DS_Store" -and
+        $allowedRootAuxiliary -contains $_.Name -and
         $_.PSIsContainer -or
-        $_.Name -ceq ".DS_Store" -and
+        $allowedRootAuxiliary -contains $_.Name -and
         ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
     }).Count -ne 0
 ) {
-    throw "macOS bundle must contain exact dmg and macos source directories."
+    $details = @(
+        $rootItems | ForEach-Object {
+            $kind = if ($_.PSIsContainer) { "Directory" } else { "File" }
+            $reparse = if (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { "Reparse" } else { "Regular" }
+            "$($_.Name):${kind}:${reparse}"
+        }
+    )
+    [Array]::Sort($details, [StringComparer]::Ordinal)
+    throw "macOS bundle must contain exact dmg and macos source directories (root entries: $([string]::Join('|', $details)))."
 }
 $dmg = Get-ExactChild `
     -Root $bundle `
     -Subdirectory "dmg" `
     -Suffix ".dmg" `
-    -Kind File
+    -Kind File `
+    -AllowedAuxiliaryNames @("bundle_dmg.sh", "share")
 $app = Get-ExactChild `
     -Root $bundle `
     -Subdirectory "macos" `
