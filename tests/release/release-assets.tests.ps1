@@ -743,6 +743,26 @@ try {
         }
     }
 
+    Invoke-Scenario -Name "Linux accepts Tauri desktop entries without AppImage metadata" -Test {
+        $root = New-FixtureRoot
+        $bundle = New-LinuxFixture -Root $root
+        Write-Utf8File `
+            -Path (Join-Path $root "appimage-tree/usr/share/applications/WokRouter.desktop") `
+            -Content "[Desktop Entry]`nName=WokRouter"
+        $adapter = New-ToolAdapter -Root $root
+        $output = Join-Path $root "output"
+        $actual = Invoke-Packager -Path $linuxScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $bundle
+            OutputDirectory = $output
+            Version = $version
+            Target = "x86_64-unknown-linux-gnu"
+            ToolAdapterPath = $adapter
+        }
+        if ($actual.Count -ne 3) {
+            throw "Linux packager rejected the default Tauri desktop entry."
+        }
+    }
+
     Invoke-Scenario -Name "Linux accepts an optional AppRun root link" -Test {
         $root = New-FixtureRoot
         $bundle = New-LinuxFixture -Root $root -Architecture "arm64"
