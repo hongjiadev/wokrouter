@@ -1,5 +1,17 @@
 use std::{num::NonZeroU32, path::Path};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_regular_file_without_following_symlinks(path: &Path) -> Option<std::fs::File> {
+    use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    file.metadata().ok()?.is_file().then_some(file)
+}
+
 #[cfg(windows)]
 pub(super) fn process_executable_matches(process_id: NonZeroU32, candidate: &Path) -> bool {
     use std::{
@@ -96,25 +108,12 @@ pub(super) fn process_executable_matches(process_id: NonZeroU32, candidate: &Pat
 
 #[cfg(target_os = "linux")]
 pub(super) fn process_executable_matches(process_id: NonZeroU32, candidate: &Path) -> bool {
-    use std::{
-        fs::{File, OpenOptions},
-        os::unix::fs::{MetadataExt, OpenOptionsExt},
-    };
+    use std::{fs::File, os::unix::fs::MetadataExt};
 
-    let Ok(candidate_metadata) = std::fs::symlink_metadata(candidate) else {
-        return false;
-    };
-    if !candidate_metadata.is_file() || candidate_metadata.file_type().is_symlink() {
-        return false;
-    }
     let Ok(process_image) = File::open(format!("/proc/{}/exe", process_id.get())) else {
         return false;
     };
-    let Ok(candidate) = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(candidate)
-    else {
+    let Some(candidate) = open_regular_file_without_following_symlinks(candidate) else {
         return false;
     };
     let (Ok(process_image), Ok(candidate)) = (process_image.metadata(), candidate.metadata())
@@ -129,21 +128,8 @@ pub(super) fn process_executable_matches(process_id: NonZeroU32, candidate: &Pat
 
 #[cfg(target_os = "macos")]
 pub(super) fn process_executable_matches(process_id: NonZeroU32, candidate: &Path) -> bool {
-    use std::{
-        ffi::OsStr,
-        fs::{File, OpenOptions},
-        os::unix::{
-            ffi::OsStrExt,
-            fs::{MetadataExt, OpenOptionsExt},
-        },
-    };
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 
-    let Ok(candidate_metadata) = std::fs::symlink_metadata(candidate) else {
-        return false;
-    };
-    if !candidate_metadata.is_file() || candidate_metadata.file_type().is_symlink() {
-        return false;
-    }
     let mut image = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let image_length = unsafe {
         libc::proc_pidpath(
@@ -162,14 +148,17 @@ pub(super) fn process_executable_matches(process_id: NonZeroU32, candidate: &Pat
         return false;
     }
     let image = Path::new(OsStr::from_bytes(&image[..terminator]));
-    let Ok(process_image) = File::open(image) else {
+    paths_match_file_identity_without_following_symlinks(image, candidate)
+}
+
+#[cfg(target_os = "macos")]
+fn paths_match_file_identity_without_following_symlinks(image: &Path, candidate: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Some(process_image) = open_regular_file_without_following_symlinks(image) else {
         return false;
     };
-    let Ok(candidate) = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(candidate)
-    else {
+    let Some(candidate) = open_regular_file_without_following_symlinks(candidate) else {
         return false;
     };
     let (Ok(process_image), Ok(candidate)) = (process_image.metadata(), candidate.metadata())
@@ -180,6 +169,31 @@ pub(super) fn process_executable_matches(process_id: NonZeroU32, candidate: &Pat
         && candidate.is_file()
         && process_image.dev() == candidate.dev()
         && process_image.ino() == candidate.ino()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use std::os::unix::fs::symlink;
+
+    use super::paths_match_file_identity_without_following_symlinks;
+
+    #[test]
+    fn file_identity_comparison_rejects_symlinks_on_both_sides() {
+        let temporary = tempfile::tempdir().expect("create temporary directory");
+        let executable = temporary.path().join("wokcore");
+        std::fs::write(&executable, b"wokcore").expect("write executable");
+        let alias = temporary.path().join("wokcore-alias");
+        symlink(&executable, &alias).expect("create symlink");
+
+        assert!(!paths_match_file_identity_without_following_symlinks(
+            &alias,
+            &executable
+        ));
+        assert!(!paths_match_file_identity_without_following_symlinks(
+            &executable,
+            &alias
+        ));
+    }
 }
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]

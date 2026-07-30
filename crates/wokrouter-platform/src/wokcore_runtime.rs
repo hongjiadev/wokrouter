@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+};
 
 use serde::Serialize;
 use tokio::sync::OnceCell;
@@ -6,7 +9,27 @@ use wokrouter_wokcore_client::{CoreConnection, WokCoreClient};
 
 use crate::{AppPaths, PlatformError, system::wokcore::discover_wokcore_executable};
 
-static SELECTED_RUNTIME: OnceCell<SelectedWokCoreRuntime> = OnceCell::const_new();
+static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
+
+struct RuntimeSelectorState {
+    selected: OnceCell<SelectedWokCoreRuntime>,
+}
+
+impl RuntimeSelectorState {
+    const fn new() -> Self {
+        Self {
+            selected: OnceCell::const_new(),
+        }
+    }
+
+    async fn select<F, Fut>(&self, initialize: F) -> Result<SelectedWokCoreRuntime, PlatformError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<SelectedWokCoreRuntime, PlatformError>>,
+    {
+        self.selected.get_or_try_init(initialize).await.cloned()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,10 +71,7 @@ impl SelectedWokCoreRuntime {
 pub async fn select_wokcore_runtime(
     paths: &AppPaths,
 ) -> Result<SelectedWokCoreRuntime, PlatformError> {
-    SELECTED_RUNTIME
-        .get_or_try_init(|| select_once(paths))
-        .await
-        .cloned()
+    SELECTED_RUNTIME.select(|| select_once(paths)).await
 }
 
 #[cfg(debug_assertions)]
@@ -204,9 +224,9 @@ pub(crate) mod test_support {
         sync::Arc,
     };
 
-    use tokio::sync::OnceCell;
-
-    use super::{SelectedWokCoreRuntime, development, select_with_dependencies};
+    use super::{
+        RuntimeSelectorState, SelectedWokCoreRuntime, development, select_with_dependencies,
+    };
     use crate::{AppPaths, PlatformError};
 
     type ProcessMatcher = dyn Fn(NonZeroU32, &Path) -> bool + Send + Sync;
@@ -219,7 +239,7 @@ pub(crate) mod test_support {
     }
 
     struct RuntimeSelector {
-        selected: OnceCell<SelectedWokCoreRuntime>,
+        state: RuntimeSelectorState,
         candidate: Option<PathBuf>,
         process_matches: Arc<ProcessMatcher>,
         discover: Arc<ProductionDiscoverer>,
@@ -233,7 +253,7 @@ pub(crate) mod test_support {
         ) -> Self {
             Self {
                 inner: Arc::new(RuntimeSelector {
-                    selected: OnceCell::const_new(),
+                    state: RuntimeSelectorState::new(),
                     candidate: development::candidate_from_value(candidate),
                     process_matches: Arc::new(process_matches),
                     discover: Arc::new(discover),
@@ -246,8 +266,8 @@ pub(crate) mod test_support {
             paths: &AppPaths,
         ) -> Result<SelectedWokCoreRuntime, PlatformError> {
             self.inner
-                .selected
-                .get_or_try_init(|| {
+                .state
+                .select(|| {
                     select_with_dependencies(
                         paths,
                         self.inner.candidate.clone(),
@@ -256,7 +276,6 @@ pub(crate) mod test_support {
                     )
                 })
                 .await
-                .cloned()
         }
     }
 }

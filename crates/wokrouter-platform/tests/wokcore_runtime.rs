@@ -138,14 +138,22 @@ async fn a_wrong_process_image_is_never_selected_as_development() {
 async fn a_matching_process_that_appears_before_the_deadline_selects_development() {
     let fixture = RuntimeFixture::new();
     let development = fixture.create_file("development/wokcore");
-    fixture.write_discovery(41, 1);
+    fixture.write_discovery(41, 2);
     let matches = Arc::new(AtomicUsize::new(0));
+    let matcher_arguments = Arc::new(Mutex::new(Vec::new()));
     let discoveries = Arc::new(AtomicUsize::new(0));
     let selector = RuntimeSelectorHarness::new(
         Some(development.clone().into_os_string()),
         {
             let matches = Arc::clone(&matches);
-            move |_process_id, _candidate| matches.fetch_add(1, Ordering::SeqCst) >= 1
+            let matcher_arguments = Arc::clone(&matcher_arguments);
+            move |process_id, candidate| {
+                matcher_arguments
+                    .lock()
+                    .unwrap()
+                    .push((process_id.get(), candidate.to_owned()));
+                matches.fetch_add(1, Ordering::SeqCst) >= 1
+            }
         },
         {
             let discoveries = Arc::clone(&discoveries);
@@ -161,10 +169,60 @@ async fn a_matching_process_that_appears_before_the_deadline_selects_development
 
     assert_eq!(selected.channel(), WokCoreRuntimeChannel::Development);
     assert_eq!(selected.executable(), Some(development.as_path()));
-    let elapsed = tokio::time::Instant::now() - started;
-    assert!(elapsed >= Duration::from_millis(50));
-    assert!(elapsed < Duration::from_secs(5));
+    assert_eq!(
+        tokio::time::Instant::now() - started,
+        Duration::from_millis(50)
+    );
+    assert_eq!(
+        *matcher_arguments.lock().unwrap(),
+        vec![
+            (41, development.clone()),
+            (41, development.clone()),
+            (41, development.clone())
+        ]
+    );
     assert_eq!(discoveries.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn development_selection_rechecks_the_same_process_identity_after_connection() {
+    let fixture = RuntimeFixture::new();
+    let development = fixture.create_file("development/wokcore");
+    let production = fixture.create_file("production/wokcore");
+    fixture.write_discovery(41, 2);
+    let matcher_arguments = Arc::new(Mutex::new(Vec::new()));
+    let discoveries = Arc::new(AtomicUsize::new(0));
+    let discovery_file = fixture.paths.wokcore_discovery_file.clone();
+    let selector = RuntimeSelectorHarness::new(
+        Some(development.clone().into_os_string()),
+        {
+            let matcher_arguments = Arc::clone(&matcher_arguments);
+            move |process_id, candidate| {
+                let mut arguments = matcher_arguments.lock().unwrap();
+                arguments.push((process_id.get(), candidate.to_owned()));
+                if arguments.len() == 2 {
+                    fs::remove_file(&discovery_file).unwrap();
+                }
+                arguments.len() == 1
+            }
+        },
+        {
+            let discoveries = Arc::clone(&discoveries);
+            move |_record| {
+                discoveries.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(production.clone()))
+            }
+        },
+    );
+
+    let selected = selector.select(&fixture.paths).await.unwrap();
+
+    assert_eq!(selected.channel(), WokCoreRuntimeChannel::Production);
+    assert_eq!(
+        *matcher_arguments.lock().unwrap(),
+        vec![(41, development.clone()), (41, development)]
+    );
+    assert_eq!(discoveries.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -246,7 +304,10 @@ async fn development_connection_probing_never_runs_past_the_five_second_deadline
         Some(development.into_os_string()),
         {
             let matches = Arc::clone(&matches);
-            move |_process_id, _candidate| matches.fetch_add(1, Ordering::SeqCst) >= 99
+            move |_process_id, _candidate| {
+                matches.fetch_add(1, Ordering::SeqCst);
+                true
+            }
         },
         {
             let discoveries = Arc::clone(&discoveries);
@@ -258,7 +319,27 @@ async fn development_connection_probing_never_runs_past_the_five_second_deadline
     );
     let started = tokio::time::Instant::now();
 
-    let selected = selector.select(&fixture.paths).await.unwrap();
+    let paths = fixture.paths.clone();
+    let selection = tokio::spawn(async move { selector.select(&paths).await });
+    let mut requests = Vec::new();
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+        requests = server.received_requests().await.unwrap();
+        if !requests.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(requests.len(), 1, "slow connection request never started");
+    assert_eq!(requests[0].url.path(), "/wokcore/v1/health");
+
+    let deadline = started + Duration::from_secs(5);
+    let now = tokio::time::Instant::now();
+    assert!(
+        now < deadline,
+        "slow request did not start before {deadline:?}"
+    );
+    tokio::time::advance(deadline - now).await;
+    let selected = selection.await.unwrap().unwrap();
     let elapsed = tokio::time::Instant::now() - started;
 
     assert_eq!(
@@ -267,6 +348,7 @@ async fn development_connection_probing_never_runs_past_the_five_second_deadline
         "selection completed after {elapsed:?}"
     );
     assert_eq!(elapsed, Duration::from_secs(5));
+    assert_eq!(matches.load(Ordering::SeqCst), 1);
     assert_eq!(discoveries.load(Ordering::SeqCst), 1);
 }
 
@@ -293,11 +375,11 @@ async fn concurrent_calls_share_one_selection_attempt() {
     assert_eq!(discoveries.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn a_selected_development_session_never_switches_to_production() {
     let fixture = RuntimeFixture::new();
     let development = fixture.create_file("development/wokcore");
-    fixture.write_discovery(41, 1);
+    fixture.write_discovery(41, 2);
     let discoveries = Arc::new(AtomicUsize::new(0));
     let selector = selector(
         Some(development.clone().into_os_string()),
@@ -307,11 +389,14 @@ async fn a_selected_development_session_never_switches_to_production() {
     );
     let selected = selector.select(&fixture.paths).await.unwrap();
 
-    fixture.write_discovery(42, 1);
+    let replacement = MockServer::start().await;
+    mount_running_runtime(&replacement).await;
+    fixture.write_discovery_at(42, 1, &replacement.uri());
 
     assert_eq!(selected.channel(), WokCoreRuntimeChannel::Development);
     assert_eq!(selected.executable(), Some(development.as_path()));
     assert_eq!(selected.connection().await, CoreConnection::Stopped);
+    assert!(replacement.received_requests().await.unwrap().is_empty());
     assert_eq!(discoveries.load(Ordering::SeqCst), 0);
 }
 
@@ -373,6 +458,30 @@ fn selector(
             Ok(production.clone())
         },
     )
+}
+
+async fn mount_running_runtime(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/wokcore/v1/health"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "ok",
+            "instance_id": "01234567-89ab-4cde-8fab-0123456789ab"
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/wokcore/v1/capabilities"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "wokcore_version": "0.1.0",
+            "management_api_major": 1,
+            "minimum_management_api_major": 1,
+            "maximum_management_api_major": 1,
+            "provider_protocols": ["openai_responses"],
+            "capabilities": ["discovery.v1"],
+            "instance_id": "01234567-89ab-4cde-8fab-0123456789ab"
+        })))
+        .mount(server)
+        .await;
 }
 
 struct RuntimeFixture {
