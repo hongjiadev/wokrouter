@@ -692,7 +692,8 @@ function Get-ExactSource {
         [Parameter(Mandatory)][string] $Root,
         [Parameter(Mandatory)][string] $Subdirectory,
         [Parameter(Mandatory)][string] $Extension,
-        [string[]] $AllowedAuxiliaryExtensions = @()
+        [string[]] $AllowedAuxiliaryExtensions = @(),
+        [string[]] $AllowedDirectories = @()
     )
 
     $directory = Join-Path $Root $Subdirectory
@@ -705,8 +706,20 @@ function Get-ExactSource {
     $unknown = [Collections.Generic.List[object]]::new()
     foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force)) {
         $isReparse = ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
-        if ($item.PSIsContainer -or $isReparse) {
+        $isAllowedDirectory = $false
+        if ($item.PSIsContainer -and -not $isReparse) {
+            foreach ($allowedDirectory in $AllowedDirectories) {
+                if ($item.Name.Equals($allowedDirectory, [StringComparison]::Ordinal)) {
+                    $isAllowedDirectory = $true
+                    break
+                }
+            }
+        }
+        if (($item.PSIsContainer -and -not $isAllowedDirectory) -or $isReparse) {
             $unknown.Add($item)
+            continue
+        }
+        if ($isAllowedDirectory) {
             continue
         }
         if ($item.Name.EndsWith($Extension, [StringComparison]::OrdinalIgnoreCase)) {
@@ -797,6 +810,7 @@ $appImage = Get-ExactSource `
     -Root $bundle `
     -Subdirectory "appimage" `
     -Extension ".AppImage" `
+    -AllowedDirectories @("WokRouter.AppDir") `
     -AllowedAuxiliaryExtensions @(".zsync")
 $deb = Get-ExactSource -Root $bundle -Subdirectory "deb" -Extension ".deb"
 $rpm = Get-ExactSource -Root $bundle -Subdirectory "rpm" -Extension ".rpm"

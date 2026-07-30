@@ -636,6 +636,9 @@ try {
     Invoke-Scenario -Name "Linux accepts exact x86_64 Tauri AppImage links" -Test {
         $root = New-FixtureRoot
         $bundle = New-LinuxFixture -Root $root
+        [IO.Directory]::CreateDirectory(
+            (Join-Path $bundle "appimage/WokRouter.AppDir")
+        ) | Out-Null
         Write-Utf8File `
             -Path (Join-Path $bundle "appimage/WokRouter.AppImage.zsync") `
             -Content "zsync-metadata"
