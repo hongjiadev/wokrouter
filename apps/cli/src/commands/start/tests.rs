@@ -9,6 +9,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
 use tempfile::TempDir;
 use wiremock::{
@@ -18,7 +19,9 @@ use wiremock::{
 use wokrouter_platform::{
     AppPaths, PlatformError, WokCoreInstallError, WokCoreInstallSource, WokCoreRuntimeChannel,
 };
-use wokrouter_wokcore_client::{CoreConnection, WokCoreClient};
+use wokrouter_wokcore_client::{
+    CoreConnection, ServiceError, ServicePhase, ServiceStatus, WokCoreClient,
+};
 
 use super::{
     StartCommandOutput, StartDependencies, StartOptions, StartService, StartedCore,
@@ -35,6 +38,26 @@ const V2_MANIFEST: &[u8] = include_bytes!(
 const V2_SIGNATURE: &[u8] = include_bytes!(
     "../../../../../crates/wokrouter-platform/tests/fixtures/wokcore-install/wokcore-update-v2.json.minisig"
 );
+const TEST_TOKEN: &str = "opaque-test-token";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ObservedCall {
+    Progress {
+        phase: String,
+        state: String,
+    },
+    Connection {
+        client: usize,
+    },
+    Authorize {
+        client: usize,
+    },
+    AuthenticatedStatus {
+        client: usize,
+        received_authorized_token: bool,
+    },
+    Stdout(String),
+}
 #[cfg(windows)]
 const WINDOWS_ARCHIVE: &[u8] = &[
     80, 75, 3, 4, 20, 0, 0, 0, 0, 0, 0, 0, 33, 0, 248, 159, 107, 102, 14, 0, 0, 0, 14, 0, 0, 0, 11,
@@ -71,7 +94,7 @@ async fn missing_production_runtime_installs_starts_authorizes_and_reports_struc
         CoreConnection::Running(handshake()),
     ]);
     let dependencies = dependencies(source, service.clone());
-    let mut output = CapturedOutput::default();
+    let mut output = CapturedOutput::with_calls(service.calls());
 
     assert_eq!(
         execute_with_dependencies(
@@ -89,6 +112,12 @@ async fn missing_production_runtime_installs_starts_authorizes_and_reports_struc
     assert_eq!(service.spawn_count(), 1);
     assert_eq!(service.authorization_count(), 1);
     assert_eq!(service.selected_client(), runtime.client_address());
+    assert!(
+        service
+            .connection_clients()
+            .iter()
+            .all(|client| *client == runtime.client_address())
+    );
     assert_eq!(
         service.authorized_executable(),
         Some(installed_executable(&paths))
@@ -144,6 +173,33 @@ async fn missing_production_runtime_installs_starts_authorizes_and_reports_struc
         event["bytes_completed"].as_u64() <= event["bytes_total"].as_u64()
             && event["bytes_total"] == ARCHIVE.len() as u64
     }));
+    assert_eq!(
+        service.call_suffix(6),
+        [
+            ObservedCall::Progress {
+                phase: "authorizing".to_owned(),
+                state: "running".to_owned(),
+            },
+            ObservedCall::Authorize {
+                client: runtime.client_address(),
+            },
+            ObservedCall::Progress {
+                phase: "verifying_runtime".to_owned(),
+                state: "running".to_owned(),
+            },
+            ObservedCall::AuthenticatedStatus {
+                client: runtime.client_address(),
+                received_authorized_token: true,
+            },
+            ObservedCall::Progress {
+                phase: "completed".to_owned(),
+                state: "succeeded".to_owned(),
+            },
+            ObservedCall::Stdout("{\"code\":\"running\"}\n".to_owned()),
+        ]
+    );
+    assert!(!output.stdout_text().contains(TEST_TOKEN));
+    assert!(!output.stderr.concat().contains(TEST_TOKEN));
 }
 
 #[tokio::test]
@@ -333,6 +389,117 @@ async fn structured_authorization_failure_uses_the_stable_terminal_code() {
     assert_eq!(events.last().unwrap()["error_code"], "authorization_failed");
 }
 
+#[tokio::test]
+async fn final_authenticated_non_running_statuses_fail_in_verifying_runtime() {
+    for phase in [
+        ServicePhase::Starting,
+        ServicePhase::Draining,
+        ServicePhase::AwaitingCancellation,
+        ServicePhase::Stopping,
+    ] {
+        let fixture = tempfile::tempdir().unwrap();
+        let paths = app_paths(&fixture);
+        let runtime = FakeRuntime::production(Some(fixture.path().join("wokcore.exe")), &paths);
+        let service = FakeService::new([CoreConnection::Running(handshake())]);
+        service.set_authenticated_status(Ok(ServiceStatus {
+            phase,
+            active_requests: 0,
+        }));
+        let dependencies = dependencies(unused_source().await, service.clone());
+        let mut output = CapturedOutput::with_calls(service.calls());
+
+        assert_eq!(
+            execute_with_dependencies(
+                &paths,
+                &runtime,
+                structured_options(),
+                &mut output,
+                &dependencies,
+            )
+            .await,
+            Ok(1),
+            "{phase:?}"
+        );
+
+        assert_eq!(
+            output.stdout_text(),
+            "{\"code\":\"start_failed\"}\n",
+            "{phase:?}"
+        );
+        let events = output.progress_events();
+        assert_eq!(
+            phases(&events),
+            ["authorizing", "verifying_runtime", "verifying_runtime"],
+            "{phase:?}"
+        );
+        assert_eq!(events.last().unwrap()["state"], "failed", "{phase:?}");
+        assert_eq!(
+            events.last().unwrap()["error_code"],
+            "start_failed",
+            "{phase:?}"
+        );
+        assert_eq!(
+            service.call_suffix(6),
+            verification_failure_suffix(runtime.client_address(), "{\"code\":\"start_failed\"}\n",),
+            "{phase:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn final_authenticated_service_errors_have_stable_codes() {
+    for (error, expected_code) in [
+        (ServiceError::Incompatible, "incompatible_manifest"),
+        (ServiceError::InvalidRuntime, "invalid_install_state"),
+        (ServiceError::InvalidResponse, "invalid_install_state"),
+        (ServiceError::Missing, "start_failed"),
+        (ServiceError::Stopped, "start_failed"),
+        (ServiceError::Unauthorized, "authorization_failed"),
+        (ServiceError::Forbidden, "authorization_failed"),
+    ] {
+        let fixture = tempfile::tempdir().unwrap();
+        let paths = app_paths(&fixture);
+        let runtime = FakeRuntime::production(Some(fixture.path().join("wokcore.exe")), &paths);
+        let service = FakeService::new([CoreConnection::Running(handshake())]);
+        service.set_authenticated_status(Err(error));
+        let dependencies = dependencies(unused_source().await, service.clone());
+        let mut output = CapturedOutput::with_calls(service.calls());
+
+        assert_eq!(
+            execute_with_dependencies(
+                &paths,
+                &runtime,
+                structured_options(),
+                &mut output,
+                &dependencies,
+            )
+            .await,
+            Ok(1),
+            "{error:?}"
+        );
+
+        let expected_stdout = format!("{{\"code\":\"{expected_code}\"}}\n");
+        assert_eq!(output.stdout_text(), expected_stdout, "{error:?}");
+        let events = output.progress_events();
+        assert_eq!(
+            phases(&events),
+            ["authorizing", "verifying_runtime", "verifying_runtime"],
+            "{error:?}"
+        );
+        assert_eq!(events.last().unwrap()["state"], "failed", "{error:?}");
+        assert_eq!(
+            events.last().unwrap()["error_code"],
+            expected_code,
+            "{error:?}"
+        );
+        assert_eq!(
+            service.call_suffix(6),
+            verification_failure_suffix(runtime.client_address(), &expected_stdout),
+            "{error:?}"
+        );
+    }
+}
+
 #[test]
 fn invalid_trusted_discovery_has_owned_structured_terminal_output() {
     let mut output = CapturedOutput::default();
@@ -366,16 +533,13 @@ async fn running_development_runtime_uses_the_selected_client_without_installing
         CoreConnection::Running(handshake()),
     ]);
     let dependencies = dependencies(source, service.clone());
-    let mut output = CapturedOutput::default();
+    let mut output = CapturedOutput::with_calls(service.calls());
 
     assert_eq!(
         execute_with_dependencies(
             &paths,
             &runtime,
-            StartOptions {
-                json: false,
-                progress_jsonl: false,
-            },
+            structured_options(),
             &mut output,
             &dependencies,
         )
@@ -387,9 +551,73 @@ async fn running_development_runtime_uses_the_selected_client_without_installing
     assert_eq!(service.spawn_count(), 0);
     assert_eq!(service.authorization_count(), 1);
     assert_eq!(service.selected_client(), runtime.client_address());
+    assert_eq!(service.connection_clients(), [runtime.client_address()]);
     assert_eq!(service.authorized_executable(), Some(executable));
-    assert_eq!(output.stdout_text(), "WokCore is already running.\n");
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stdout_text(), "{\"code\":\"already_running\"}\n");
+    assert_eq!(
+        service.call_suffix(6),
+        [
+            ObservedCall::Progress {
+                phase: "authorizing".to_owned(),
+                state: "running".to_owned(),
+            },
+            ObservedCall::Authorize {
+                client: runtime.client_address(),
+            },
+            ObservedCall::Progress {
+                phase: "verifying_runtime".to_owned(),
+                state: "running".to_owned(),
+            },
+            ObservedCall::AuthenticatedStatus {
+                client: runtime.client_address(),
+                received_authorized_token: true,
+            },
+            ObservedCall::Progress {
+                phase: "completed".to_owned(),
+                state: "succeeded".to_owned(),
+            },
+            ObservedCall::Stdout("{\"code\":\"already_running\"}\n".to_owned()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn development_final_unauthorized_status_has_no_install_or_spawn_side_effects() {
+    let (server, source) = source_with_no_expected_requests().await;
+    let fixture = tempfile::tempdir().unwrap();
+    let paths = app_paths(&fixture);
+    let runtime = FakeRuntime::development(fixture.path().join("wokcore.exe"), &paths);
+    let service = FakeService::new([CoreConnection::Running(handshake())]);
+    service.set_authenticated_status(Err(ServiceError::Unauthorized));
+    let dependencies = dependencies(source, service.clone());
+    let mut output = CapturedOutput::with_calls(service.calls());
+
+    assert_eq!(
+        execute_with_dependencies(
+            &paths,
+            &runtime,
+            structured_options(),
+            &mut output,
+            &dependencies,
+        )
+        .await,
+        Ok(1)
+    );
+
+    server.verify().await;
+    assert_eq!(service.spawn_count(), 0);
+    assert_eq!(service.connection_clients(), [runtime.client_address()]);
+    assert_eq!(
+        output.stdout_text(),
+        "{\"code\":\"authorization_failed\"}\n"
+    );
+    assert_eq!(
+        service.call_suffix(6),
+        verification_failure_suffix(
+            runtime.client_address(),
+            "{\"code\":\"authorization_failed\"}\n",
+        )
+    );
 }
 
 #[tokio::test]
@@ -451,6 +679,57 @@ async fn a_try_wait_error_kills_and_reaps_the_created_child() {
     assert_eq!(service.kill_count(), 1);
     assert_eq!(service.wait_count(), 1);
     assert_eq!(output.stdout_text(), "{\"code\":\"start_failed\"}\n");
+}
+
+#[tokio::test]
+async fn final_invalid_runtime_reaps_the_started_child_when_cleanup_try_wait_fails() {
+    let fixture = tempfile::tempdir().unwrap();
+    let paths = app_paths(&fixture);
+    let runtime = FakeRuntime::production(Some(fixture.path().join("wokcore.exe")), &paths);
+    let service = FakeService::new([
+        CoreConnection::Stopped,
+        CoreConnection::Running(handshake()),
+        CoreConnection::InvalidRuntime,
+    ]);
+    service.set_authenticated_status(Err(ServiceError::InvalidRuntime));
+    service.fail_try_wait();
+    let dependencies = dependencies(unused_source().await, service.clone());
+    let mut output = CapturedOutput::default();
+
+    assert_eq!(
+        execute_with_dependencies(
+            &paths,
+            &runtime,
+            structured_options(),
+            &mut output,
+            &dependencies,
+        )
+        .await,
+        Ok(1)
+    );
+
+    assert_eq!(service.spawn_count(), 1);
+    assert_eq!(service.kill_count(), 1);
+    assert_eq!(service.wait_count(), 1);
+    assert_eq!(
+        output.stdout_text(),
+        "{\"code\":\"invalid_install_state\"}\n"
+    );
+    let events = output.progress_events();
+    assert_eq!(
+        phases(&events),
+        [
+            "starting",
+            "authorizing",
+            "verifying_runtime",
+            "verifying_runtime",
+        ]
+    );
+    assert_eq!(events.last().unwrap()["state"], "failed");
+    assert_eq!(
+        events.last().unwrap()["error_code"],
+        "invalid_install_state"
+    );
 }
 
 #[test]
@@ -515,9 +794,17 @@ struct CapturedOutput {
     stderr: Vec<String>,
     stderr_attempts: usize,
     fail_stderr: bool,
+    calls: Option<Arc<Mutex<Vec<ObservedCall>>>>,
 }
 
 impl CapturedOutput {
+    fn with_calls(calls: Arc<Mutex<Vec<ObservedCall>>>) -> Self {
+        Self {
+            calls: Some(calls),
+            ..Self::default()
+        }
+    }
+
     fn stdout_text(&self) -> String {
         self.stdout.concat()
     }
@@ -533,6 +820,12 @@ impl CapturedOutput {
 
 impl StartCommandOutput for CapturedOutput {
     fn stdout(&mut self, value: &str) -> io::Result<()> {
+        if let Some(calls) = &self.calls {
+            calls
+                .lock()
+                .unwrap()
+                .push(ObservedCall::Stdout(value.to_owned()));
+        }
         self.stdout.push(value.to_owned());
         Ok(())
     }
@@ -544,6 +837,15 @@ impl StartCommandOutput for CapturedOutput {
                 io::ErrorKind::BrokenPipe,
                 "synthetic broken progress pipe",
             ));
+        }
+        if let Some(calls) = &self.calls {
+            for line in value.lines() {
+                let event: Value = serde_json::from_str(line).unwrap();
+                calls.lock().unwrap().push(ObservedCall::Progress {
+                    phase: event["phase"].as_str().unwrap().to_owned(),
+                    state: event["state"].as_str().unwrap().to_owned(),
+                });
+            }
         }
         self.stderr.push(value.to_owned());
         Ok(())
@@ -607,6 +909,10 @@ struct FakeServiceState {
     spawn_count: AtomicUsize,
     authorization_count: AtomicUsize,
     selected_client: AtomicUsize,
+    connection_clients: Mutex<Vec<usize>>,
+    authenticated_statuses: Mutex<VecDeque<Result<ServiceStatus, ServiceError>>>,
+    last_authenticated_status: Mutex<Result<ServiceStatus, ServiceError>>,
+    calls: Arc<Mutex<Vec<ObservedCall>>>,
     authorized_executable: Mutex<Option<PathBuf>>,
     fail_spawn: AtomicBool,
     fail_authorization: AtomicBool,
@@ -634,6 +940,10 @@ impl FakeService {
                 spawn_count: AtomicUsize::new(0),
                 authorization_count: AtomicUsize::new(0),
                 selected_client: AtomicUsize::new(0),
+                connection_clients: Mutex::new(Vec::new()),
+                authenticated_statuses: Mutex::new(VecDeque::new()),
+                last_authenticated_status: Mutex::new(Ok(running_status())),
+                calls: Arc::new(Mutex::new(Vec::new())),
                 authorized_executable: Mutex::new(None),
                 fail_spawn: AtomicBool::new(false),
                 fail_authorization: AtomicBool::new(false),
@@ -669,6 +979,26 @@ impl FakeService {
         self.inner.selected_client.load(Ordering::SeqCst)
     }
 
+    fn connection_clients(&self) -> Vec<usize> {
+        self.inner.connection_clients.lock().unwrap().clone()
+    }
+
+    fn calls(&self) -> Arc<Mutex<Vec<ObservedCall>>> {
+        Arc::clone(&self.inner.calls)
+    }
+
+    fn call_suffix(&self, length: usize) -> Vec<ObservedCall> {
+        let calls = self.inner.calls.lock().unwrap();
+        calls[calls.len() - length..].to_vec()
+    }
+
+    fn set_authenticated_status(&self, status: Result<ServiceStatus, ServiceError>) {
+        let mut statuses = self.inner.authenticated_statuses.lock().unwrap();
+        statuses.clear();
+        statuses.push_back(status);
+        *self.inner.last_authenticated_status.lock().unwrap() = status;
+    }
+
     fn authorized_executable(&self) -> Option<PathBuf> {
         self.inner.authorized_executable.lock().unwrap().clone()
     }
@@ -684,7 +1014,14 @@ impl FakeService {
 
 #[async_trait]
 impl StartService for FakeService {
-    async fn connection(&self, _client: &WokCoreClient) -> Result<CoreConnection, CommandError> {
+    async fn connection(&self, client: &WokCoreClient) -> Result<CoreConnection, CommandError> {
+        let client = client as *const WokCoreClient as usize;
+        self.inner.connection_clients.lock().unwrap().push(client);
+        self.inner
+            .calls
+            .lock()
+            .unwrap()
+            .push(ObservedCall::Connection { client });
         let connection = self
             .inner
             .connections
@@ -710,18 +1047,50 @@ impl StartService for FakeService {
         &self,
         client: &WokCoreClient,
         executable: &Path,
-    ) -> Result<(), CommandError> {
+    ) -> Result<SecretString, CommandError> {
         self.inner
             .authorization_count
             .fetch_add(1, Ordering::SeqCst);
         self.inner
             .selected_client
             .store(client as *const WokCoreClient as usize, Ordering::SeqCst);
+        self.inner
+            .calls
+            .lock()
+            .unwrap()
+            .push(ObservedCall::Authorize {
+                client: client as *const WokCoreClient as usize,
+            });
         *self.inner.authorized_executable.lock().unwrap() = Some(executable.to_path_buf());
         if self.inner.fail_authorization.load(Ordering::SeqCst) {
             return Err(CommandError::CoreControl);
         }
-        Ok(())
+        Ok(SecretString::from(TEST_TOKEN.to_owned()))
+    }
+
+    async fn authenticated_status(
+        &self,
+        client: &WokCoreClient,
+        token: &SecretString,
+    ) -> Result<ServiceStatus, ServiceError> {
+        let client = client as *const WokCoreClient as usize;
+        self.inner
+            .calls
+            .lock()
+            .unwrap()
+            .push(ObservedCall::AuthenticatedStatus {
+                client,
+                received_authorized_token: token.expose_secret() == TEST_TOKEN,
+            });
+        let status = self
+            .inner
+            .authenticated_statuses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(*self.inner.last_authenticated_status.lock().unwrap());
+        *self.inner.last_authenticated_status.lock().unwrap() = status;
+        status
     }
 }
 
@@ -767,6 +1136,29 @@ fn phases(events: &[Value]) -> Vec<&str> {
         .iter()
         .map(|event| event["phase"].as_str().unwrap())
         .collect()
+}
+
+fn verification_failure_suffix(client: usize, stdout: &str) -> Vec<ObservedCall> {
+    vec![
+        ObservedCall::Progress {
+            phase: "authorizing".to_owned(),
+            state: "running".to_owned(),
+        },
+        ObservedCall::Authorize { client },
+        ObservedCall::Progress {
+            phase: "verifying_runtime".to_owned(),
+            state: "running".to_owned(),
+        },
+        ObservedCall::AuthenticatedStatus {
+            client,
+            received_authorized_token: true,
+        },
+        ObservedCall::Progress {
+            phase: "verifying_runtime".to_owned(),
+            state: "failed".to_owned(),
+        },
+        ObservedCall::Stdout(stdout.to_owned()),
+    ]
 }
 
 async fn signed_source() -> (MockServer, WokCoreInstallSource) {
@@ -884,5 +1276,12 @@ fn handshake() -> wokrouter_wokcore_client::CoreHandshake {
         management_api_major: 1,
         provider_protocols: Default::default(),
         capabilities: Default::default(),
+    }
+}
+
+fn running_status() -> ServiceStatus {
+    ServiceStatus {
+        phase: ServicePhase::Running,
+        active_requests: 0,
     }
 }

@@ -174,6 +174,18 @@ mod tests {
             parse(&["start", "--json"]).unwrap_err(),
             CommandError::Usage
         );
+        assert_eq!(
+            parse(&["start", "--progress-jsonl", "--json"]).unwrap_err(),
+            CommandError::Usage
+        );
+        assert_eq!(
+            parse(&["start", "--json", "--json", "--progress-jsonl"]).unwrap_err(),
+            CommandError::Usage
+        );
+        assert_eq!(
+            parse(&["start", "--json", "--progress-jsonl", "--extra"]).unwrap_err(),
+            CommandError::Usage
+        );
     }
 
     #[test]

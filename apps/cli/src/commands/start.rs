@@ -6,12 +6,15 @@ use std::{
 };
 
 use async_trait::async_trait;
+use secrecy::SecretString;
 use tokio::time::Instant;
 use wokrouter_platform::{
     AppPaths, PlatformError, SelectedWokCoreRuntime, WokCoreInstallError, WokCoreInstallOutcome,
     WokCoreInstallSource, WokCoreRuntimeChannel, install_missing_wokcore_with_progress,
 };
-use wokrouter_wokcore_client::{CoreConnection, ServiceError, WokCoreClient};
+use wokrouter_wokcore_client::{
+    CoreConnection, ServiceError, ServicePhase, ServiceStatus, WokCoreClient,
+};
 
 use super::{CommandError, CommandRuntime, authorize, reauthorize};
 
@@ -89,7 +92,12 @@ trait StartService: Send + Sync {
         &self,
         client: &WokCoreClient,
         executable: &Path,
-    ) -> Result<(), CommandError>;
+    ) -> Result<SecretString, CommandError>;
+    async fn authenticated_status(
+        &self,
+        client: &WokCoreClient,
+        token: &SecretString,
+    ) -> Result<ServiceStatus, ServiceError>;
 }
 
 trait StartedCore: Send {
@@ -119,8 +127,16 @@ impl StartService for SystemStartService {
         &self,
         client: &WokCoreClient,
         executable: &Path,
-    ) -> Result<(), CommandError> {
+    ) -> Result<SecretString, CommandError> {
         ensure_authorized(client, executable.to_path_buf()).await
+    }
+
+    async fn authenticated_status(
+        &self,
+        client: &WokCoreClient,
+        token: &SecretString,
+    ) -> Result<ServiceStatus, ServiceError> {
+        client.service_status(token).await
     }
 }
 
@@ -283,29 +299,19 @@ async fn run_start_workflow(
     }
 
     reporter.authorizing();
-    dependencies
+    let token = dependencies
         .service
         .ensure_authorized(runtime.client(), &executable)
         .await
         .map_err(|error| StartFailure::authorization(error, "authorizing"))?;
 
     reporter.verifying_runtime();
-    match dependencies.service.connection(runtime.client()).await {
-        Ok(CoreConnection::Running(_)) => Ok(StartOutcome { already_running }),
-        Ok(CoreConnection::Incompatible(_)) => {
+    match verify_authenticated_status(dependencies.service.as_ref(), runtime.client(), &token).await
+    {
+        Ok(()) => Ok(StartOutcome { already_running }),
+        Err(failure) => {
             stop_started_core(started.as_deref_mut());
-            Err(StartFailure::incompatible("verifying_runtime"))
-        }
-        Ok(CoreConnection::InvalidRuntime) => {
-            stop_started_core(started.as_deref_mut());
-            Err(StartFailure::invalid_runtime("verifying_runtime"))
-        }
-        Ok(CoreConnection::Missing | CoreConnection::Stopped) | Err(_) => {
-            stop_started_core(started.as_deref_mut());
-            Err(StartFailure::start(
-                CommandError::StartFailed,
-                "verifying_runtime",
-            ))
+            Err(failure)
         }
     }
 }
@@ -325,31 +331,57 @@ async fn run_development_start(
                 )
             })?;
             reporter.authorizing();
-            dependencies
+            let token = dependencies
                 .service
                 .ensure_authorized(runtime.client(), executable)
                 .await
                 .map_err(|error| StartFailure::authorization(error, "authorizing"))?;
             reporter.verifying_runtime();
-            match dependencies.service.connection(runtime.client()).await {
-                Ok(CoreConnection::Running(_)) => Ok(StartOutcome {
+            match verify_authenticated_status(
+                dependencies.service.as_ref(),
+                runtime.client(),
+                &token,
+            )
+            .await
+            {
+                Ok(()) => Ok(StartOutcome {
                     already_running: true,
                 }),
-                Ok(CoreConnection::Incompatible(_)) => {
-                    Err(StartFailure::incompatible("verifying_runtime"))
-                }
-                Ok(CoreConnection::InvalidRuntime) => {
-                    Err(StartFailure::invalid_runtime("verifying_runtime"))
-                }
-                Ok(CoreConnection::Missing | CoreConnection::Stopped) | Err(_) => Err(
-                    StartFailure::start(CommandError::StartFailed, "verifying_runtime"),
-                ),
+                Err(failure) => Err(failure),
             }
         }
         CoreConnection::Incompatible(_) => Err(StartFailure::incompatible("verifying_runtime")),
         CoreConnection::InvalidRuntime => Err(StartFailure::invalid_runtime("verifying_runtime")),
         CoreConnection::Missing | CoreConnection::Stopped => Err(StartFailure::start(
             CommandError::DevelopmentRuntimeManagedByIde,
+            "verifying_runtime",
+        )),
+    }
+}
+
+async fn verify_authenticated_status(
+    service: &dyn StartService,
+    client: &WokCoreClient,
+    token: &SecretString,
+) -> Result<(), StartFailure> {
+    match service.authenticated_status(client, token).await {
+        Ok(ServiceStatus {
+            phase: ServicePhase::Running,
+            ..
+        }) => Ok(()),
+        Ok(_) => Err(StartFailure::start(
+            CommandError::StartFailed,
+            "verifying_runtime",
+        )),
+        Err(ServiceError::Incompatible) => Err(StartFailure::incompatible("verifying_runtime")),
+        Err(ServiceError::InvalidRuntime | ServiceError::InvalidResponse) => {
+            Err(StartFailure::invalid_runtime("verifying_runtime"))
+        }
+        Err(ServiceError::Unauthorized | ServiceError::Forbidden) => Err(
+            StartFailure::authorization(CommandError::AuthorizationRequired, "verifying_runtime"),
+        ),
+        Err(ServiceError::Missing | ServiceError::Stopped) => Err(StartFailure::start(
+            CommandError::StartFailed,
             "verifying_runtime",
         )),
     }
@@ -402,10 +434,11 @@ fn stop_started_core(child: Option<&mut (dyn StartedCore + '_)>) {
     let Some(child) = child else {
         return;
     };
-    if child.try_wait().is_ok_and(|exited| !exited) {
-        let _ = child.kill();
-        let _ = child.wait();
+    if matches!(child.try_wait(), Ok(true)) {
+        return;
     }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn validate_options(options: StartOptions) -> Result<bool, CommandError> {
@@ -491,14 +524,14 @@ fn install_error_code(error: WokCoreInstallError) -> &'static str {
 async fn ensure_authorized(
     client: &wokrouter_wokcore_client::WokCoreClient,
     executable: std::path::PathBuf,
-) -> Result<(), CommandError> {
+) -> Result<SecretString, CommandError> {
     let token = authorize(executable.clone()).await?;
     match client.service_status(&token).await {
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(token),
         Err(ServiceError::Unauthorized | ServiceError::Forbidden) => {
             let token = reauthorize(executable).await?;
             client.service_status(&token).await?;
-            Ok(())
+            Ok(token)
         }
         Err(error) => Err(error.into()),
     }
