@@ -351,7 +351,16 @@ if (
     [string] $metadata.Version -cne $Version -or
     [string] $metadata.Template -cne $template
 ) {
-    throw "MSI metadata does not match the release contract."
+    throw (
+        "MSI metadata does not match the release contract " +
+        "(Name='{0}', Version='{1}', Template='{2}', " +
+        "ExpectedVersion='{3}', ExpectedTemplate='{4}')." -f `
+            [string] $metadata.Name,
+            [string] $metadata.Version,
+            [string] $metadata.Template,
+            $Version,
+            $template
+    )
 }
 if (
     [string]::Join("|", $orderedMetadata) -cne

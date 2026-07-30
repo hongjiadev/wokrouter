@@ -703,23 +703,16 @@ function Get-ExactSource {
         -Description "$Subdirectory source directory"
     $sources = [Collections.Generic.List[object]]::new()
     $auxiliary = [Collections.Generic.List[object]]::new()
+    $directories = [Collections.Generic.List[object]]::new()
     $unknown = [Collections.Generic.List[object]]::new()
     foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force)) {
         $isReparse = ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
-        $isAllowedDirectory = $false
-        if ($item.PSIsContainer -and -not $isReparse) {
-            foreach ($allowedDirectory in $AllowedDirectories) {
-                if ($item.Name.Equals($allowedDirectory, [StringComparison]::Ordinal)) {
-                    $isAllowedDirectory = $true
-                    break
-                }
-            }
-        }
-        if (($item.PSIsContainer -and -not $isAllowedDirectory) -or $isReparse) {
+        if ($isReparse) {
             $unknown.Add($item)
             continue
         }
-        if ($isAllowedDirectory) {
+        if ($item.PSIsContainer) {
+            $directories.Add($item)
             continue
         }
         if ($item.Name.EndsWith($Extension, [StringComparison]::OrdinalIgnoreCase)) {
@@ -739,6 +732,27 @@ function Get-ExactSource {
         if ($isAuxiliary) {
             $auxiliary.Add($item)
         } else {
+            $unknown.Add($item)
+        }
+    }
+    foreach ($item in $directories) {
+        $isAllowedDirectory = $false
+        foreach ($allowedDirectory in $AllowedDirectories) {
+            if ($item.Name.Equals($allowedDirectory, [StringComparison]::Ordinal)) {
+                $isAllowedDirectory = $true
+                break
+            }
+        }
+        if (-not $isAllowedDirectory) {
+            foreach ($source in $sources) {
+                $sourceStem = [IO.Path]::GetFileNameWithoutExtension($source.Name)
+                if ($item.Name.Equals($sourceStem, [StringComparison]::Ordinal)) {
+                    $isAllowedDirectory = $true
+                    break
+                }
+            }
+        }
+        if (-not $isAllowedDirectory) {
             $unknown.Add($item)
         }
     }

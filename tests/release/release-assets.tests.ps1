@@ -256,6 +256,15 @@ function New-LinuxFixture {
     Write-Utf8File `
         -Path (Join-Path $bundle "appimage/WokRouter.AppImage") `
         -Content "appimage-$Architecture"
+    foreach ($stagingDirectory in @(
+            "appimage/WokRouter.AppDir",
+            "deb/WokRouter",
+            "rpm/WokRouter"
+        )) {
+        [IO.Directory]::CreateDirectory(
+            (Join-Path $bundle $stagingDirectory)
+        ) | Out-Null
+    }
     $debArchitecture = if ($Architecture -ceq "x86_64") { "amd64" } else { "arm64" }
     $rpmArchitecture = if ($Architecture -ceq "x86_64") { "x86_64" } else { "aarch64" }
     Write-Utf8File `
@@ -391,6 +400,7 @@ function New-MacFixture {
     $bundle = Join-Path $Root "bundle"
     [IO.Directory]::CreateDirectory((Join-Path $bundle "dmg")) | Out-Null
     [IO.Directory]::CreateDirectory((Join-Path $bundle "macos")) | Out-Null
+    [IO.Directory]::CreateDirectory((Join-Path $bundle "share")) | Out-Null
     Write-Utf8File -Path (Join-Path $bundle "dmg/WokRouter.dmg") -Content "dmg"
     $app = Join-Path $bundle "macos/WokRouter.app"
     Write-Utf8File `

@@ -712,24 +712,38 @@ $bundle = (Assert-RegularPath `
     -Description "Bundle directory").FullName
 $rootItems = @(Get-ChildItem -LiteralPath $bundle -Force)
 $allowedRootAuxiliary = @(".DS_Store", ".localized")
+$allowedRootDirectories = @("share")
 $rootNames = @(
     $rootItems |
-        Where-Object { $allowedRootAuxiliary -notcontains $_.Name } |
+        Where-Object {
+            $allowedRootAuxiliary -notcontains $_.Name -and
+            $allowedRootDirectories -notcontains $_.Name
+        } |
         ForEach-Object Name
 )
 [Array]::Sort($rootNames, [StringComparer]::Ordinal)
+$unexpectedFiles = @($rootItems | Where-Object {
+    $allowedRootAuxiliary -notcontains $_.Name -and
+    $allowedRootDirectories -notcontains $_.Name -and
+    -not $_.PSIsContainer
+})
+$invalidAuxiliary = @($rootItems | Where-Object {
+    $allowedRootAuxiliary -contains $_.Name -and (
+        $_.PSIsContainer -or
+        ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+    )
+})
+$invalidAllowedDirectories = @($rootItems | Where-Object {
+    $allowedRootDirectories -contains $_.Name -and (
+        -not $_.PSIsContainer -or
+        ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+    )
+})
 if (
     [string]::Join("|", $rootNames) -cne "dmg|macos" -or
-    @($rootItems | Where-Object {
-        $allowedRootAuxiliary -notcontains $_.Name -and
-        -not $_.PSIsContainer
-    }).Count -ne 0 -or
-    @($rootItems | Where-Object {
-        $allowedRootAuxiliary -contains $_.Name -and
-        $_.PSIsContainer -or
-        $allowedRootAuxiliary -contains $_.Name -and
-        ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
-    }).Count -ne 0
+    $unexpectedFiles.Count -ne 0 -or
+    $invalidAuxiliary.Count -ne 0 -or
+    $invalidAllowedDirectories.Count -ne 0
 ) {
     $details = @(
         $rootItems | ForEach-Object {
