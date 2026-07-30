@@ -299,7 +299,20 @@ function Get-ExactChild {
             ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
         }).Count -ne 0
     ) {
-        throw "$Subdirectory must contain exactly one regular $Suffix source."
+        $details = @(
+            $items | ForEach-Object {
+                $kind = if ($_.PSIsContainer) { "Directory" } else { "File" }
+                $reparse = if ((
+                        $_.Attributes -band [IO.FileAttributes]::ReparsePoint
+                    ) -ne 0) { "Reparse" } else { "Regular" }
+                "$($_.Name):${kind}:${reparse}"
+            }
+        )
+        [Array]::Sort($details, [StringComparer]::Ordinal)
+        throw (
+            "$Subdirectory must contain exactly one regular $Suffix source " +
+            "(source entries: $([string]::Join('|', $details)))."
+        )
     }
     foreach ($item in $auxiliary | Where-Object PSIsContainer) {
         foreach ($nested in Get-ChildItem -LiteralPath $item.FullName -Force -Recurse) {

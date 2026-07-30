@@ -664,8 +664,22 @@ if rpm2cpio "$package" > "$archive" 2> "$rpm_error"; then
 else
   status=$?
   cat "$rpm_error" >&2 2>/dev/null || true
-  printf 'rpm2cpio exited with status %s.\n' "$status" >&2
-  exit "$status"
+  printf 'rpm2cpio exited with status %s; trying rpm extraction.\n' "$status" >&2
+  rm -f -- "$archive"
+  rpm_db="$destination/.rpmdb"
+  rm -rf -- "$rpm_db"
+  if rpm --root "$destination" \
+    --dbpath "$rpm_db" \
+    --nodeps --noscripts --notriggers --nopre --nopost \
+    --install "$package"; then
+    rm -rf -- "$rpm_db"
+    rm -f -- "$rpm_error"
+    exit 0
+  else
+    status=$?
+    printf 'rpm extraction exited with status %s.\n' "$status" >&2
+    exit "$status"
+  fi
 fi
 if (cd -- "$destination" &&
   cpio --extract --make-directories --no-absolute-filenames --quiet < "$archive" \

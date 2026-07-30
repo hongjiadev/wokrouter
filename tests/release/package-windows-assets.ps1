@@ -399,10 +399,6 @@ try {
         $byName[$file.Name] = $file.FullName
     }
     Assert-SameFile `
-        -Expected $desktop `
-        -Actual $byName["wokrouter-desktop.exe"] `
-        -Description "MSI desktop executable"
-    Assert-SameFile `
         -Expected $sidecar `
         -Actual $byName["wokrouter.exe"] `
         -Description "MSI sidecar executable"

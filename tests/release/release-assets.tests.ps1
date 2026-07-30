@@ -1599,6 +1599,21 @@ try {
         }
     }
 
+    Invoke-Scenario -Name "macOS reports unexpected DMG source entries" -Test {
+        $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $macScript
+        $block = [regex]::Match(
+            $source,
+            '(?s)function Get-ExactChild\s*\{(?<Body>.*?)' +
+            '(?=\r?\n}\r?\n\s*function Assert-ExactProperties)'
+        )
+        if (-not $block.Success) {
+            throw "macOS exact-child helper is unavailable."
+        }
+        if (-not $block.Groups["Body"].Value.Contains("source entries:")) {
+            throw "macOS exact-child failures must include source entries."
+        }
+    }
+
     Invoke-Scenario -Name "macOS fingerprints symlinks without following them" -Test {
         foreach ($case in @(
                 "internal",
@@ -1787,6 +1802,30 @@ try {
         if (-not $body.Contains('rpm2cpio "$package" > "$archive"')) {
             throw "Linux RPM extraction must materialize the cpio archive before extraction."
         }
+        if (-not $body.Contains('rpm --root "$destination"')) {
+            throw "Linux RPM extraction must have an rpm installation fallback."
+        }
+    }
+
+    Invoke-Scenario -Name "Windows allows the bundle-patched desktop executable" -Test {
+        $root = New-FixtureRoot
+        $fixture = New-WindowsFixture -Root $root
+        Write-MinimalPe `
+            -Path (Join-Path $root "msi-payload/wokrouter-desktop.exe") `
+            -Architecture "x86_64" `
+            -Marker "bundle-patched"
+        $adapter = New-ToolAdapter -Root $root
+        $actual = Invoke-Packager -Path $windowsScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $fixture.Bundle
+            DesktopExecutable = $fixture.Desktop
+            SidecarExecutable = $fixture.Sidecar
+            RepositoryRoot = $repositoryRoot
+            OutputDirectory = (Join-Path $root "output")
+            Version = $version
+            Target = "x86_64-pc-windows-msvc"
+            ToolAdapterPath = $adapter
+        }
+        if ($actual.Count -ne 2) { throw "Windows packager returned the wrong output count." }
     }
 
     Invoke-Scenario -Name "Windows rejects wrong MSI metadata and PE architecture" -Test {
