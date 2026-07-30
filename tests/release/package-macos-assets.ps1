@@ -61,7 +61,7 @@ function Get-NativeLinkTarget {
 function Add-NativeAppInventory {
     param(
         [Parameter(Mandatory)][string] $Directory,
-        [Parameter(Mandatory)][string] $Prefix,
+        [Parameter(Mandatory)][AllowEmptyString()][string] $Prefix,
         [Parameter(Mandatory)]
         [Collections.Generic.List[object]] $Records
     )

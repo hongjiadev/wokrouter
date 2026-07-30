@@ -618,6 +618,15 @@ try {
         }
     }
 
+    Invoke-Scenario -Name "macOS native app inventory accepts the root prefix" -Test {
+        $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $macScript
+        if (-not $source.Contains(
+                '[Parameter(Mandatory)][AllowEmptyString()][string] $Prefix'
+            )) {
+            throw "macOS native app inventory must allow an empty root prefix."
+        }
+    }
+
     Invoke-Scenario -Name "Linux production recursively inventories AppImage links without following them" -Test {
         $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $linuxScript
         $inventoryBlock = [regex]::Match(
@@ -750,6 +759,36 @@ try {
             OutputDirectory = (Join-Path $root "output")
             Version = $version
             Target = "aarch64-unknown-linux-gnu"
+            ToolAdapterPath = $adapter
+        }
+        if ($actual.Count -ne 3) { throw "Linux packager returned the wrong output count." }
+    }
+
+    Invoke-Scenario -Name "Linux accepts the generated root icon link" -Test {
+        $root = New-FixtureRoot
+        $bundle = New-LinuxFixture -Root $root
+        $iconTarget = "usr/share/icons/hicolor/128x128/apps/wokrouter-desktop.png"
+        Write-Utf8File `
+            -Path (Join-Path $root "appimage-tree/wokrouter-desktop.png") `
+            -Content "root-icon"
+        Write-Utf8File `
+            -Path (Join-Path $root "appimage-tree/$iconTarget") `
+            -Content "root-icon-target"
+        $inventory = Read-AppImageLinkInventory -Root $root
+        Write-AppImageLinkInventory -Root $root -Inventory @(
+            $inventory
+            [pscustomobject]@{
+                Relative = "wokrouter-desktop.png"
+                LinkType = "SymbolicLink"
+                Target = $iconTarget
+            }
+        )
+        $adapter = New-ToolAdapter -Root $root
+        $actual = Invoke-Packager -Path $linuxScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $bundle
+            OutputDirectory = (Join-Path $root "output")
+            Version = $version
+            Target = "x86_64-unknown-linux-gnu"
             ToolAdapterPath = $adapter
         }
         if ($actual.Count -ne 3) { throw "Linux packager returned the wrong output count." }

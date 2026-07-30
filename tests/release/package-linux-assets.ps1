@@ -285,11 +285,13 @@ function Get-ValidatedAppImageLinks {
     }
     $optional = [ordered]@{
         "AppRun" = "usr/bin/wokrouter-desktop"
+        "wokrouter-desktop.png" = $null
     }
     [string[]] $allowedRootLinks = @(
         ".DirIcon",
         "WokRouter.desktop",
-        "AppRun"
+        "AppRun",
+        "wokrouter-desktop.png"
     )
     $rawRootLinks = @(
         $inventory |
@@ -306,12 +308,13 @@ function Get-ValidatedAppImageLinks {
     )
     if (
         $rawRootLinks.Count -lt 2 -or
-        $rawRootLinks.Count -gt 3 -or
+        $rawRootLinks.Count -gt 4 -or
         $rawUnexpectedRootLinks.Count -ne 0
     ) {
         throw (
             "AppImage must contain the two required root links and at most " +
-            "one AppRun link; exactly the expected root links are allowed " +
+            "the optional AppRun or icon link; exactly the expected root " +
+            "links are allowed " +
             "(root links: $([string]::Join('|', @(
                 $rawRootLinks | ForEach-Object { [string] $_.Relative }
             ))))."
@@ -402,7 +405,15 @@ function Get-ValidatedAppImageLinks {
         }
         if (
             $optional.Contains($relative) -and
-            [string] $record.Target -cne [string] $optional[$relative]
+            (
+                ($relative -ceq "AppRun" -and
+                    [string] $record.Target -cne [string] $optional[$relative]) -or
+                ($relative -ceq "wokrouter-desktop.png" -and
+                    [string] $record.Target -notmatch (
+                        "^usr/share/icons/hicolor/[0-9]+x[0-9]+/apps/" +
+                        "wokrouter-desktop\.png$"
+                    ))
+            )
         ) {
             throw "AppImage optional link '$relative' target is invalid."
         }
@@ -417,12 +428,17 @@ function Get-ValidatedAppImageLinks {
         $rootLinks | Where-Object { $allowedRootLinks -notcontains $_ }
     )
     if (
-        ($rootLinks.Count -lt 2 -or $rootLinks.Count -gt 3) -or
+        ($rootLinks.Count -lt 2 -or $rootLinks.Count -gt 4) -or
         $unexpectedRootLinks.Count -ne 0 -or
         -not $records.ContainsKey(".DirIcon") -or
         -not $records.ContainsKey("WokRouter.desktop") -or
         ($records.ContainsKey("AppRun") -and
-            [string] $records["AppRun"].Target -cne $optional["AppRun"])
+            [string] $records["AppRun"].Target -cne $optional["AppRun"]) -or
+        ($records.ContainsKey("wokrouter-desktop.png") -and
+            [string] $records["wokrouter-desktop.png"].Target -notmatch (
+                "^usr/share/icons/hicolor/[0-9]+x[0-9]+/apps/" +
+                "wokrouter-desktop\.png$"
+            ))
     ) {
         throw "AppImage root links do not match exactly the release contract."
     }
