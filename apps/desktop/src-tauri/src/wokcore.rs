@@ -54,6 +54,8 @@ impl ManagementState {
 
 pub(crate) struct DesktopManagement {
     export_dir: PathBuf,
+    #[cfg(test)]
+    test_token: Option<SecretString>,
 }
 
 impl DesktopManagement {
@@ -64,10 +66,21 @@ impl DesktopManagement {
             .parent()
             .ok_or_else(DesktopApiError::initialization)?
             .join("diagnostic-exports");
-        Ok(Self { export_dir })
+        Ok(Self {
+            export_dir,
+            #[cfg(test)]
+            test_token: None,
+        })
     }
 
     async fn token(&self) -> Result<SecretString, DesktopApiError> {
+        #[cfg(test)]
+        if let Some(token) = &self.test_token {
+            use secrecy::ExposeSecret;
+
+            return Ok(SecretString::from(token.expose_secret().to_owned()));
+        }
+
         NativeWokCoreTokenVault::new()
             .load()
             .await
@@ -245,6 +258,23 @@ impl DesktopManagement {
     }
 }
 
+#[cfg(test)]
+impl ManagementState {
+    pub(crate) fn for_test(
+        runtime: Arc<DesktopRuntimeState>,
+        export_dir: PathBuf,
+        token: &str,
+    ) -> Self {
+        Self {
+            runtime,
+            management: Ok(DesktopManagement {
+                export_dir,
+                test_token: Some(SecretString::from(token.to_owned())),
+            }),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub(crate) struct ProviderSecretCreateCommand {
     provider_id: String,
@@ -371,6 +401,12 @@ fn open_private_export(path: &Path) -> Result<File, DesktopApiError> {
 #[tauri::command]
 pub(crate) async fn provider_catalog(
     state: tauri::State<'_, ManagementState>,
+) -> Result<ProviderCatalogResponse, DesktopApiError> {
+    provider_catalog_inner(&state).await
+}
+
+pub(crate) async fn provider_catalog_inner(
+    state: &ManagementState,
 ) -> Result<ProviderCatalogResponse, DesktopApiError> {
     let (management, runtime) = state.command().await?;
     management.provider_catalog(runtime.client()).await

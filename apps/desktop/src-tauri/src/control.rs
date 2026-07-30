@@ -1,11 +1,31 @@
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use tokio::sync::{Mutex, watch};
 use wokrouter_cli::commands::{CommandError, CoreStatus, start, status::snapshot_selected, stop};
+use wokrouter_platform::SelectedWokCoreRuntime;
 
 use crate::runtime::{DesktopRuntimeError, DesktopRuntimeState};
 
 type StartResult = Result<(), DesktopControlError>;
+pub(crate) type LifecycleFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<u8, CommandError>> + Send + 'a>>;
+
+pub(crate) trait DesktopLifecycle: Send + Sync {
+    fn start<'a>(&'a self, runtime: &'a SelectedWokCoreRuntime) -> LifecycleFuture<'a>;
+    fn stop<'a>(&'a self, runtime: &'a SelectedWokCoreRuntime) -> LifecycleFuture<'a>;
+}
+
+struct SystemDesktopLifecycle;
+
+impl DesktopLifecycle for SystemDesktopLifecycle {
+    fn start<'a>(&'a self, runtime: &'a SelectedWokCoreRuntime) -> LifecycleFuture<'a> {
+        Box::pin(start::execute(runtime))
+    }
+
+    fn stop<'a>(&'a self, runtime: &'a SelectedWokCoreRuntime) -> LifecycleFuture<'a> {
+        Box::pin(stop::execute(runtime))
+    }
+}
 
 #[derive(Default)]
 struct StartGate {
@@ -15,13 +35,22 @@ struct StartGate {
 #[derive(Clone)]
 pub(crate) struct DesktopControl {
     runtime: Arc<DesktopRuntimeState>,
+    lifecycle: Arc<dyn DesktopLifecycle>,
     start_gate: Arc<Mutex<StartGate>>,
 }
 
 impl DesktopControl {
     pub(crate) fn new(runtime: Arc<DesktopRuntimeState>) -> Self {
+        Self::new_with_lifecycle(runtime, Arc::new(SystemDesktopLifecycle))
+    }
+
+    pub(crate) fn new_with_lifecycle(
+        runtime: Arc<DesktopRuntimeState>,
+        lifecycle: Arc<dyn DesktopLifecycle>,
+    ) -> Self {
         Self {
             runtime,
+            lifecycle,
             start_gate: Arc::new(Mutex::new(StartGate::default())),
         }
     }
@@ -65,7 +94,8 @@ impl DesktopControl {
 
     async fn start_once(&self) -> StartResult {
         let runtime = self.runtime.selected().await?;
-        start::execute(runtime)
+        self.lifecycle
+            .start(runtime)
             .await
             .map(|_| ())
             .map_err(map_start_error)
@@ -73,7 +103,8 @@ impl DesktopControl {
 
     pub(crate) async fn stop(&self) -> Result<(), DesktopControlError> {
         let runtime = self.runtime.selected().await?;
-        stop::execute(runtime)
+        self.lifecycle
+            .stop(runtime)
             .await
             .map(|_| ())
             .map_err(map_stop_error)
