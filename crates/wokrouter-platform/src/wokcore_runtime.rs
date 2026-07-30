@@ -81,6 +81,7 @@ async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, Platfor
         paths,
         candidate,
         &crate::system::process_executable_matches,
+        &probe_connection,
         &discover_wokcore_executable,
     )
     .await
@@ -108,10 +109,22 @@ fn select_production(
 }
 
 #[cfg(debug_assertions)]
+type ConnectionProbeFuture =
+    std::pin::Pin<Box<dyn Future<Output = CoreConnection> + Send + 'static>>;
+#[cfg(debug_assertions)]
+type ConnectionProbe = dyn Fn(WokCoreClient) -> ConnectionProbeFuture + Send + Sync;
+
+#[cfg(debug_assertions)]
+fn probe_connection(client: WokCoreClient) -> ConnectionProbeFuture {
+    Box::pin(async move { client.connection().await })
+}
+
+#[cfg(debug_assertions)]
 async fn select_with_dependencies(
     paths: &AppPaths,
     candidate: Option<PathBuf>,
     process_matches: &(dyn Fn(std::num::NonZeroU32, &Path) -> bool + Send + Sync),
+    connection_probe: &ConnectionProbe,
     discover: &(dyn Fn(&Path) -> Result<Option<PathBuf>, PlatformError> + Send + Sync),
 ) -> Result<SelectedWokCoreRuntime, PlatformError> {
     use std::time::Duration;
@@ -131,7 +144,9 @@ async fn select_with_dependencies(
             && process_matches(process_id, &candidate)
         {
             let bound = client.bound_to_process(process_id);
-            let Ok(connection) = tokio::time::timeout_at(deadline, bound.connection()).await else {
+            let Ok(connection) =
+                tokio::time::timeout_at(deadline, connection_probe(bound.clone())).await
+            else {
                 break;
             };
             if Instant::now() >= deadline {
@@ -219,15 +234,18 @@ mod development {
 pub(crate) mod test_support {
     use std::{
         ffi::OsString,
+        future::Future,
         num::NonZeroU32,
         path::{Path, PathBuf},
         sync::Arc,
     };
 
     use super::{
-        RuntimeSelectorState, SelectedWokCoreRuntime, development, select_with_dependencies,
+        ConnectionProbe, ConnectionProbeFuture, RuntimeSelectorState, SelectedWokCoreRuntime,
+        development, probe_connection, select_with_dependencies,
     };
     use crate::{AppPaths, PlatformError};
+    use wokrouter_wokcore_client::{CoreConnection, WokCoreClient};
 
     type ProcessMatcher = dyn Fn(NonZeroU32, &Path) -> bool + Send + Sync;
     type ProductionDiscoverer =
@@ -242,6 +260,7 @@ pub(crate) mod test_support {
         state: RuntimeSelectorState,
         candidate: Option<PathBuf>,
         process_matches: Arc<ProcessMatcher>,
+        connection_probe: Arc<ConnectionProbe>,
         discover: Arc<ProductionDiscoverer>,
     }
 
@@ -251,11 +270,27 @@ pub(crate) mod test_support {
             process_matches: impl Fn(NonZeroU32, &Path) -> bool + Send + Sync + 'static,
             discover: impl Fn(&Path) -> Result<Option<PathBuf>, PlatformError> + Send + Sync + 'static,
         ) -> Self {
+            Self::new_with_connection_probe(candidate, process_matches, discover, probe_connection)
+        }
+
+        pub fn new_with_connection_probe<Probe, ProbeFuture>(
+            candidate: Option<OsString>,
+            process_matches: impl Fn(NonZeroU32, &Path) -> bool + Send + Sync + 'static,
+            discover: impl Fn(&Path) -> Result<Option<PathBuf>, PlatformError> + Send + Sync + 'static,
+            connection_probe: Probe,
+        ) -> Self
+        where
+            Probe: Fn(WokCoreClient) -> ProbeFuture + Send + Sync + 'static,
+            ProbeFuture: Future<Output = CoreConnection> + Send + 'static,
+        {
+            let connection_probe =
+                move |client| -> ConnectionProbeFuture { Box::pin(connection_probe(client)) };
             Self {
                 inner: Arc::new(RuntimeSelector {
                     state: RuntimeSelectorState::new(),
                     candidate: development::candidate_from_value(candidate),
                     process_matches: Arc::new(process_matches),
+                    connection_probe: Arc::new(connection_probe),
                     discover: Arc::new(discover),
                 }),
             }
@@ -272,6 +307,7 @@ pub(crate) mod test_support {
                         paths,
                         self.inner.candidate.clone(),
                         self.inner.process_matches.as_ref(),
+                        self.inner.connection_probe.as_ref(),
                         self.inner.discover.as_ref(),
                     )
                 })

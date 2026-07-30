@@ -284,23 +284,12 @@ async fn development_connection_probing_never_runs_past_the_five_second_deadline
     let fixture = RuntimeFixture::new();
     let development = fixture.create_file("development/wokcore");
     let production = fixture.create_file("production/wokcore");
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/wokcore/v1/health"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_delay(Duration::from_secs(10))
-                .set_body_json(serde_json::json!({
-                    "status": "ok",
-                    "instance_id": "01234567-89ab-4cde-8fab-0123456789ab"
-                })),
-        )
-        .mount(&server)
-        .await;
-    fixture.write_discovery_at(41, 1, &server.uri());
+    fixture.write_discovery(41, 1);
     let matches = Arc::new(AtomicUsize::new(0));
     let discoveries = Arc::new(AtomicUsize::new(0));
-    let selector = RuntimeSelectorHarness::new(
+    let (probe_started, probe_started_receiver) = tokio::sync::oneshot::channel();
+    let probe_started = Arc::new(Mutex::new(Some(probe_started)));
+    let selector = RuntimeSelectorHarness::new_with_connection_probe(
         Some(development.into_os_string()),
         {
             let matches = Arc::clone(&matches);
@@ -316,21 +305,25 @@ async fn development_connection_probing_never_runs_past_the_five_second_deadline
                 Ok(Some(production.clone()))
             }
         },
+        move |_client| {
+            let probe_started = Arc::clone(&probe_started);
+            async move {
+                probe_started
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .unwrap();
+                std::future::pending().await
+            }
+        },
     );
     let started = tokio::time::Instant::now();
 
     let paths = fixture.paths.clone();
     let selection = tokio::spawn(async move { selector.select(&paths).await });
-    let mut requests = Vec::new();
-    for _ in 0..100 {
-        tokio::task::yield_now().await;
-        requests = server.received_requests().await.unwrap();
-        if !requests.is_empty() {
-            break;
-        }
-    }
-    assert_eq!(requests.len(), 1, "slow connection request never started");
-    assert_eq!(requests[0].url.path(), "/wokcore/v1/health");
+    probe_started_receiver.await.unwrap();
 
     let deadline = started + Duration::from_secs(5);
     let now = tokio::time::Instant::now();
