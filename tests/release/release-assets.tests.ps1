@@ -463,6 +463,7 @@ function New-WindowsFixture {
     Copy-ReleaseDocuments -Destination $payload
     [IO.File]::Copy($desktop, (Join-Path $payload "wokrouter-desktop.exe"))
     [IO.File]::Copy($sidecar, (Join-Path $payload "wokrouter.exe"))
+    [IO.File]::Copy($msi, (Join-Path $payload "WokRouter.msi"))
     return [pscustomobject]@{
         Bundle = $bundle
         Desktop = $desktop
@@ -1749,6 +1750,42 @@ try {
         }
         finally {
             $archive.Dispose()
+        }
+    }
+
+    Invoke-Scenario -Name "Windows accepts the MSI source emitted by administrative extraction" -Test {
+        $root = New-FixtureRoot
+        $fixture = New-WindowsFixture -Root $root
+        $adapter = New-ToolAdapter -Root $root
+        $actual = Invoke-Packager -Path $windowsScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $fixture.Bundle
+            DesktopExecutable = $fixture.Desktop
+            SidecarExecutable = $fixture.Sidecar
+            RepositoryRoot = $repositoryRoot
+            OutputDirectory = (Join-Path $root "output")
+            Version = $version
+            Target = "x86_64-pc-windows-msvc"
+            ToolAdapterPath = $adapter
+        }
+        if ($actual.Count -ne 2) { throw "Windows packager returned the wrong output count." }
+    }
+
+    Invoke-Scenario -Name "Linux RPM extraction captures a direct exit status" -Test {
+        $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $linuxScript
+        $block = [regex]::Match(
+            $source,
+            '(?s)"linux-rpm-extract"\s*\{(?<Body>.*?)' +
+            '(?=\r?\n\s*}\r?\n\s*"binary-architecture")'
+        )
+        if (-not $block.Success) {
+            throw "Linux RPM extraction block is unavailable."
+        }
+        $body = $block.Groups["Body"].Value
+        if (-not $body.Contains('$extractExitCode = $LASTEXITCODE')) {
+            throw "Linux RPM extraction must capture the native exit status immediately."
+        }
+        if (-not $body.Contains('rpm2cpio "$package" > "$archive"')) {
+            throw "Linux RPM extraction must materialize the cpio archive before extraction."
         }
     }
 

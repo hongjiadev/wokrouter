@@ -378,9 +378,13 @@ try {
     Assert-NoForbiddenNames -Names $extractedNames
     [string[]] $orderedExtracted = @($extractedNames)
     [Array]::Sort($orderedExtracted, [StringComparer]::Ordinal)
+    [string[]] $expectedExtracted = @(
+        $wanted + [IO.Path]::GetFileName($msi)
+    )
+    [Array]::Sort($expectedExtracted, [StringComparer]::Ordinal)
     if (
         [string]::Join("|", $orderedExtracted) -cne
-        [string]::Join("|", $wanted)
+        [string]::Join("|", $expectedExtracted)
     ) {
         throw (
             "Extracted MSI payload inventory does not match the contract: " +

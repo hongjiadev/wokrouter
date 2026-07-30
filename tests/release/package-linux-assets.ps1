@@ -656,16 +656,37 @@ function Invoke-Adapter {
 set -euo pipefail
 package=$1
 destination=$2
-cd -- "$destination"
-rpm2cpio "$package" |
-  cpio --extract --make-directories --no-absolute-filenames --quiet
+archive="${destination}.cpio"
+rpm_error="${archive}.rpm2cpio.stderr"
+cpio_error="${archive}.cpio.stderr"
+if rpm2cpio "$package" > "$archive" 2> "$rpm_error"; then
+  :
+else
+  status=$?
+  cat "$rpm_error" >&2 2>/dev/null || true
+  printf 'rpm2cpio exited with status %s.\n' "$status" >&2
+  exit "$status"
+fi
+if (cd -- "$destination" &&
+  cpio --extract --make-directories --no-absolute-filenames --quiet < "$archive" \
+    2> "$cpio_error"
+); then
+  :
+else
+  status=$?
+  cat "$cpio_error" >&2 2>/dev/null || true
+  printf 'cpio exited with status %s.\n' "$status" >&2
+  exit "$status"
+fi
+rm -f -- "$archive" "$rpm_error" "$cpio_error"
 '@ `
                 "wokrouter-rpm-extract" `
                 $Source `
                 $Destination 2>&1)
-            if ($LASTEXITCODE -ne 0) {
+            $extractExitCode = $LASTEXITCODE
+            if ($extractExitCode -ne 0) {
                 $details = [string]::Join("`n", [string[]] $extractOutput)
-                throw "Could not extract rpm. $details"
+                throw "Could not extract rpm (exit $extractExitCode). $details"
             }
             return
         }
