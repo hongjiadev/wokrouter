@@ -28,9 +28,49 @@ pub fn write_discovery_with_version(
     api_major: u32,
     extra: Option<(&str, serde_json::Value)>,
 ) {
+    write_discovery_with_version_and_pid(
+        path,
+        base_url,
+        instance_id,
+        wokcore_version,
+        std::process::id(),
+        api_major,
+        extra,
+    );
+}
+
+#[allow(dead_code)]
+pub fn write_discovery_with_pid(
+    path: &Path,
+    base_url: &str,
+    instance_id: &str,
+    pid: u32,
+    api_major: u32,
+    extra: Option<(&str, serde_json::Value)>,
+) {
+    write_discovery_with_version_and_pid(
+        path,
+        base_url,
+        instance_id,
+        "0.1.0",
+        pid,
+        api_major,
+        extra,
+    );
+}
+
+pub fn write_discovery_with_version_and_pid(
+    path: &Path,
+    base_url: &str,
+    instance_id: &str,
+    wokcore_version: &str,
+    pid: u32,
+    api_major: u32,
+    extra: Option<(&str, serde_json::Value)>,
+) {
     let mut document = json!({
         "base_url": base_url,
-        "pid": std::process::id(),
+        "pid": pid,
         "instance_id": instance_id,
         "wokcore_version": wokcore_version,
         "api_major": api_major

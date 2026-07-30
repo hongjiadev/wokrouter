@@ -79,7 +79,7 @@ impl WokCoreClient {
     }
 
     fn service_discovery(&self) -> Result<ValidatedDiscovery, ServiceError> {
-        match crate::discovery::read(&self.discovery_file) {
+        match self.read_discovery() {
             DiscoveryRead::Missing => Err(ServiceError::Missing),
             DiscoveryRead::Invalid => Err(ServiceError::InvalidRuntime),
             DiscoveryRead::Record(discovery) if discovery.api_major == SUPPORTED_API_MAJOR => {

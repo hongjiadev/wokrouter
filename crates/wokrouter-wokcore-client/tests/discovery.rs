@@ -1,12 +1,36 @@
 mod support;
 
-use std::fs;
+use std::{fs, num::NonZeroU32};
 
 use serde_json::json;
 use tempfile::tempdir;
 use wokrouter_wokcore_client::{CoreConnection, WokCoreClient};
 
-use support::{INSTANCE_ID, write_discovery};
+use support::{INSTANCE_ID, write_discovery, write_discovery_with_pid};
+
+#[tokio::test]
+async fn discovered_process_id_binds_client_to_one_runtime() {
+    let fixture = tempdir().unwrap();
+    let path = fixture.path().join("discovery.json");
+    write_discovery_with_pid(&path, "http://127.0.0.1:9", INSTANCE_ID, 41, 1, None);
+
+    let client = WokCoreClient::new(&path).unwrap();
+    assert_eq!(client.discovered_process_id(), NonZeroU32::new(41));
+
+    let bound = client.bound_to_process(NonZeroU32::new(42).unwrap());
+    assert_eq!(bound.connection().await, CoreConnection::Missing);
+}
+
+#[tokio::test]
+async fn zero_process_id_is_invalid_and_is_not_exposed() {
+    let fixture = tempdir().unwrap();
+    let path = fixture.path().join("discovery.json");
+    write_discovery_with_pid(&path, "http://127.0.0.1:9", INSTANCE_ID, 0, 1, None);
+
+    let client = WokCoreClient::new(&path).unwrap();
+    assert_eq!(client.discovered_process_id(), None);
+    assert_eq!(client.connection().await, CoreConnection::InvalidRuntime);
+}
 
 #[tokio::test]
 async fn absent_discovery_is_missing() {

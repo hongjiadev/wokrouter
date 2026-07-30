@@ -1,6 +1,6 @@
 mod support;
 
-use std::net::TcpListener;
+use std::{net::TcpListener, num::NonZeroU32};
 
 use serde_json::json;
 use tempfile::tempdir;
@@ -12,7 +12,7 @@ use wokrouter_wokcore_client::{CoreConnection, ManagementError, WokCoreClient};
 
 use support::{
     INSTANCE_ID, mount_handshake, mount_handshake_with_version, write_discovery,
-    write_discovery_with_version,
+    write_discovery_with_pid, write_discovery_with_version,
 };
 
 #[tokio::test]
@@ -33,6 +33,45 @@ async fn current_wokrouter_accepts_current_wokcore() {
     assert_eq!(handshake.management_api_major, 1);
     assert!(handshake.provider_protocols.contains("openai_responses"));
     assert!(handshake.capabilities.contains("service.status"));
+}
+
+#[tokio::test]
+async fn client_bound_to_discovered_process_keeps_running_handshake() {
+    let server = MockServer::start().await;
+    mount_handshake(&server, INSTANCE_ID).await;
+    let fixture = tempdir().unwrap();
+    let discovery = fixture.path().join("discovery.json");
+    write_discovery_with_pid(&discovery, &server.uri(), INSTANCE_ID, 41, 1, None);
+
+    assert!(matches!(
+        WokCoreClient::new(discovery)
+            .unwrap()
+            .bound_to_process(NonZeroU32::new(41).unwrap())
+            .connection()
+            .await,
+        CoreConnection::Running(_)
+    ));
+}
+
+#[tokio::test]
+async fn bound_management_client_rejects_replaced_process_before_http() {
+    let first = MockServer::start().await;
+    let second = MockServer::start().await;
+    mount_handshake(&first, INSTANCE_ID).await;
+    mount_handshake(&second, INSTANCE_ID).await;
+    let fixture = tempdir().unwrap();
+    let discovery = fixture.path().join("discovery.json");
+    write_discovery_with_pid(&discovery, &first.uri(), INSTANCE_ID, 41, 1, None);
+    let client = WokCoreClient::new(&discovery)
+        .unwrap()
+        .bound_to_process(NonZeroU32::new(41).unwrap());
+    write_discovery_with_pid(&discovery, &second.uri(), INSTANCE_ID, 42, 1, None);
+
+    assert_eq!(
+        client.integration_runtime().await,
+        Err(ManagementError::Missing)
+    );
+    assert!(second.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]

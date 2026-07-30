@@ -11,7 +11,7 @@ mod service;
 mod sessions;
 mod usage;
 
-use std::{fmt, path::PathBuf};
+use std::{fmt, num::NonZeroU32, path::PathBuf};
 
 use discovery::DiscoveryRead;
 use http::{CapabilitiesWire, HealthWire, HttpError, WokCoreHttp};
@@ -48,6 +48,7 @@ const SUPPORTED_API_MAJOR: u32 = 1;
 pub struct WokCoreClient {
     discovery_file: PathBuf,
     http: WokCoreHttp,
+    expected_process_id: Option<NonZeroU32>,
 }
 
 impl WokCoreClient {
@@ -55,11 +56,27 @@ impl WokCoreClient {
         Ok(Self {
             discovery_file: discovery_file.into(),
             http: WokCoreHttp::new()?,
+            expected_process_id: None,
         })
     }
 
+    pub fn discovered_process_id(&self) -> Option<NonZeroU32> {
+        match self.read_discovery() {
+            DiscoveryRead::Record(record) => Some(record.process_id),
+            DiscoveryRead::Missing | DiscoveryRead::Invalid => None,
+        }
+    }
+
+    pub fn bound_to_process(&self, process_id: NonZeroU32) -> Self {
+        Self {
+            discovery_file: self.discovery_file.clone(),
+            http: self.http.clone(),
+            expected_process_id: Some(process_id),
+        }
+    }
+
     pub async fn connection(&self) -> CoreConnection {
-        let discovery = match discovery::read(&self.discovery_file) {
+        let discovery = match self.read_discovery() {
             DiscoveryRead::Missing => return CoreConnection::Missing,
             DiscoveryRead::Invalid => return CoreConnection::InvalidRuntime,
             DiscoveryRead::Record(record) => record,
@@ -86,6 +103,19 @@ impl WokCoreClient {
             Err(HttpError::InvalidResponse) => return CoreConnection::InvalidRuntime,
         };
         connection_from_capabilities(discovery, capabilities)
+    }
+
+    fn read_discovery(&self) -> DiscoveryRead {
+        match discovery::read(&self.discovery_file) {
+            DiscoveryRead::Record(record)
+                if self
+                    .expected_process_id
+                    .is_some_and(|expected| expected != record.process_id) =>
+            {
+                DiscoveryRead::Missing
+            }
+            other => other,
+        }
     }
 }
 

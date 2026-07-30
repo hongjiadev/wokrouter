@@ -1,4 +1,4 @@
-use std::{fs::File, io::Read, path::Path};
+use std::{fs::File, io::Read, num::NonZeroU32, path::Path};
 
 use semver::Version;
 use serde::Deserialize;
@@ -17,6 +17,7 @@ pub(crate) enum DiscoveryRead {
 pub(crate) struct ValidatedDiscovery {
     pub base_url: Url,
     pub authority: String,
+    pub process_id: NonZeroU32,
     pub instance_id: Uuid,
     pub wokcore_version: Version,
     pub api_major: u32,
@@ -65,9 +66,10 @@ pub(crate) fn read(path: &Path) -> DiscoveryRead {
 }
 
 fn validate(wire: DiscoveryWire) -> Option<ValidatedDiscovery> {
-    if wire.pid == 0 || wire.api_major == 0 {
+    if wire.api_major == 0 {
         return None;
     }
+    let process_id = NonZeroU32::new(wire.pid)?;
     let base_url = Url::parse(&wire.base_url).ok()?;
     let port = base_url.port()?;
     let valid_url = base_url.scheme() == "http"
@@ -85,6 +87,7 @@ fn validate(wire: DiscoveryWire) -> Option<ValidatedDiscovery> {
     Some(ValidatedDiscovery {
         base_url,
         authority: format!("127.0.0.1:{port}"),
+        process_id,
         instance_id: Uuid::parse_str(&wire.instance_id).ok()?,
         wokcore_version: Version::parse(&wire.wokcore_version).ok()?,
         api_major: wire.api_major,

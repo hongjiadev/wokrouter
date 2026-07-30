@@ -6,7 +6,7 @@ use crate::{
 
 impl WokCoreClient {
     pub(crate) fn management_discovery(&self) -> Result<ValidatedDiscovery, ManagementError> {
-        match crate::discovery::read(&self.discovery_file) {
+        match self.read_discovery() {
             DiscoveryRead::Missing => Err(ManagementError::Missing),
             DiscoveryRead::Invalid => Err(ManagementError::InvalidRuntime),
             DiscoveryRead::Record(discovery) if discovery.api_major != SUPPORTED_API_MAJOR => {
