@@ -605,6 +605,118 @@ static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
             -Scenario "development candidate call retained in a normal string"
     }
 
+    Invoke-Scenario -Name "release selector cannot read the development environment literal" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+#[cfg(not(debug_assertions))]
+async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
+    select_production(paths, &discover_wokcore_executable)
+}
+"@ `
+            -NewText @"
+#[cfg(not(debug_assertions))]
+async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
+    let _ = std::env::var_os("WOKROUTER_DEV_WOKCORE_EXECUTABLE");
+    select_production(paths, &discover_wokcore_executable)
+}
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "release select_once" `
+            -Scenario "release selector directly reading the development environment literal"
+    }
+
+    Invoke-Scenario -Name "release selector cannot read an indirect development environment constant" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+#[cfg(not(debug_assertions))]
+async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
+    select_production(paths, &discover_wokcore_executable)
+}
+"@ `
+            -NewText @"
+#[cfg(not(debug_assertions))]
+async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
+    const RELEASE_EXECUTABLE_ENV: &str = "WOKROUTER_DEV_WOKCORE_EXECUTABLE";
+    let _ = std::env::var_os(RELEASE_EXECUTABLE_ENV);
+    select_production(paths, &discover_wokcore_executable)
+}
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "environment literal" `
+            -Scenario "release selector indirectly reading a duplicate development environment constant"
+    }
+
+    Invoke-Scenario -Name "release selector cannot access the development module" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+#[cfg(not(debug_assertions))]
+async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
+    select_production(paths, &discover_wokcore_executable)
+}
+"@ `
+            -NewText @"
+#[cfg(not(debug_assertions))]
+async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
+    let _ = std::env::var_os(development::EXECUTABLE_ENV);
+    let _ = development::candidate_from_environment();
+    select_production(paths, &discover_wokcore_executable)
+}
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "release select_once" `
+            -Scenario "release selector accessing the development module"
+    }
+
+    Invoke-Scenario -Name "development environment lookup cannot hide in a nested closure" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+    pub(super) fn candidate_from_environment() -> Option<PathBuf> {
+        candidate_from_value(std::env::var_os(EXECUTABLE_ENV))
+    }
+"@ `
+            -NewText @"
+    pub(super) fn candidate_from_environment() -> Option<PathBuf> {
+        let _inert = || candidate_from_value(std::env::var_os(EXECUTABLE_ENV));
+        None
+    }
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "environment lookup" `
+            -Scenario "development environment lookup retained only in a nested closure"
+    }
+
+    Invoke-Scenario -Name "debug selector candidate call cannot hide in a nested closure" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "    let candidate = development::candidate_from_environment();" `
+            -NewText @"
+    let _inert = || development::candidate_from_environment();
+    let candidate = None;
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "development candidate call" `
+            -Scenario "debug selector candidate call retained only in a nested closure"
+    }
+
     Invoke-Scenario -Name "development executable environment name cannot change" -Test {
         $root = New-ContractFixture
         Edit-FixtureFile `
@@ -844,6 +956,70 @@ static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
             -Scenario "selector sequence retained only in an unused closure"
     }
 
+    Invoke-Scenario -Name "complete selector loop cannot survive in an unused closure" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "    let Some(candidate) = candidate else {" `
+            -NewText @"
+    let deadline = Instant::now() + DEVELOPMENT_TIMEOUT;
+    let _inert = || async {
+    let Some(candidate) = candidate else {
+"@
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+    select_production(paths, discover)
+}
+"@ `
+            -NewText @"
+    select_production(paths, discover)
+    };
+    select_production(paths, discover)
+}
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "selection loop" `
+            -Scenario "complete selector loop retained only in an unused closure"
+    }
+
+    Invoke-Scenario -Name "identity branch cannot survive in an unused loop closure" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+    loop {
+        if let Some(process_id) = client.discovered_process_id()
+"@ `
+            -NewText @"
+    loop {
+        let _inert = || async {
+        if let Some(process_id) = client.discovered_process_id()
+"@
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+        }
+
+        let now = Instant::now();
+"@ `
+            -NewText @"
+        }
+        };
+
+        let now = Instant::now();
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "initial process identity check" `
+            -Scenario "identity branch retained only in an unused loop closure"
+    }
+
     Invoke-Scenario -Name "development connection probe must remain deadline-bound" -Test {
         $root = New-ContractFixture
         Edit-FixtureFile `
@@ -965,6 +1141,50 @@ async fn a_selected_development_session_never_switches_to_production() {
                 -NewText @"
 #[tokio::test]
 $($attributeMutation.Attribute)
+async fn a_selected_development_session_never_switches_to_production() {
+"@
+            Assert-ContractRejects `
+                -Root $root `
+                -ExpectedText "execution-changing attributes" `
+                -Scenario "no-switch test with $($attributeMutation.Name)"
+        }
+    }
+
+    foreach ($attributeMutation in @(
+        @{
+            Name = "spaced cfg exclusion"
+            Attribute = "# [ cfg(any()) ]"
+        },
+        @{
+            Name = "multiline cfg exclusion"
+            Attribute = @"
+#[cfg(
+    any()
+)]
+"@
+        },
+        @{
+            Name = "multiline conditional ignore"
+            Attribute = @"
+#[cfg_attr(
+    debug_assertions,
+    ignore
+)]
+"@
+        }
+    )) {
+        Invoke-Scenario -Name "development no-switch test rejects $($attributeMutation.Name)" -Test {
+            $root = New-ContractFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "crates/wokrouter-platform/tests/wokcore_runtime.rs" `
+                -OldText @"
+#[tokio::test]
+async fn a_selected_development_session_never_switches_to_production() {
+"@ `
+                -NewText @"
+$($attributeMutation.Attribute)
+#[tokio::test]
 async fn a_selected_development_session_never_switches_to_production() {
 "@
             Assert-ContractRejects `

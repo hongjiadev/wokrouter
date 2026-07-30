@@ -70,6 +70,7 @@ function Get-RustCodeView {
     )
 
     $view = $Source.ToCharArray()
+    $commentStrippedView = $Source.ToCharArray()
     $index = 0
     while ($index -lt $Source.Length) {
         $current = $Source[$index]
@@ -90,6 +91,10 @@ function Get-RustCodeView {
                 $end += 1
             }
             Set-RustMaskedRange -View $view -Start $index -End $end
+            Set-RustMaskedRange `
+                -View $commentStrippedView `
+                -Start $index `
+                -End $end
             $index = $end
             continue
         }
@@ -124,6 +129,10 @@ function Get-RustCodeView {
                 return $null
             }
             Set-RustMaskedRange -View $view -Start $index -End $end
+            Set-RustMaskedRange `
+                -View $commentStrippedView `
+                -Start $index `
+                -End $end
             $index = $end
             continue
         }
@@ -308,6 +317,7 @@ function Get-RustCodeView {
 
     return [pscustomobject]@{
         Code = $code
+        CommentStripped = -join $commentStrippedView
     }
 }
 
@@ -321,7 +331,9 @@ function Get-UniqueBracedItem {
         [string]$SignaturePattern,
 
         [Parameter(Mandatory)]
-        [string]$Description
+        [string]$Description,
+
+        [switch]$TopLevel
     )
 
     $codeView = Get-RustCodeView -Source $Source -Description $Description
@@ -329,11 +341,29 @@ function Get-UniqueBracedItem {
         return $null
     }
     $structure = $codeView.Code
-    $matches = [regex]::Matches(
+    $matches = @([regex]::Matches(
         $structure,
         $SignaturePattern,
         [System.Text.RegularExpressions.RegexOptions]::Multiline
-    )
+    ))
+    if ($TopLevel) {
+        $topLevelMatches = @()
+        foreach ($candidateMatch in $matches) {
+            $depth = 0
+            for ($index = 0; $index -lt $candidateMatch.Index; $index += 1) {
+                if ($structure[$index] -eq "{") {
+                    $depth += 1
+                }
+                elseif ($structure[$index] -eq "}") {
+                    $depth -= 1
+                }
+            }
+            if ($depth -eq 0) {
+                $topLevelMatches += $candidateMatch
+            }
+        }
+        $matches = @($topLevelMatches)
+    }
     if ($matches.Count -ne 1) {
         Add-ContractFailure `
             -Message "$Description must remain uniquely identifiable; found $($matches.Count)."
@@ -441,6 +471,9 @@ function Get-UniqueBracedItem {
     }
 
     return [pscustomobject]@{
+        SignatureIndex = $match.Index
+        OpeningBraceIndex = $openingBrace
+        ClosingBraceIndex = $closingBrace
         Attributes = if ($match.Groups["attributes"].Success) {
             $Source.Substring(
                 $match.Groups["attributes"].Index,
@@ -482,6 +515,132 @@ function Get-UniquePatternIndex {
         return -1
     }
     return $matches[0].Index
+}
+
+function Get-RustOuterAttributesBeforeItem {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [int]$ItemStart,
+
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $codeView = Get-RustCodeView -Source $Source -Description $Description
+    if ($null -eq $codeView) {
+        return $null
+    }
+    if ($ItemStart -lt 0 -or $ItemStart -gt $Source.Length) {
+        Add-ContractFailure `
+            -Message "$Description has an invalid item start."
+        return $null
+    }
+
+    $structure = $codeView.Code
+    $cursor = $ItemStart
+    $attributes = @()
+    while ($cursor -gt 0) {
+        while (
+            $cursor -gt 0 -and
+            [char]::IsWhiteSpace($structure[$cursor - 1])
+        ) {
+            $cursor -= 1
+        }
+        if ($cursor -eq 0 -or $structure[$cursor - 1] -ne "]") {
+            break
+        }
+
+        $attributeEnd = $cursor
+        $bracketDepth = 0
+        $openingBracket = -1
+        for ($index = $cursor - 1; $index -ge 0; $index -= 1) {
+            if ($structure[$index] -eq "]") {
+                $bracketDepth += 1
+            }
+            elseif ($structure[$index] -eq "[") {
+                $bracketDepth -= 1
+                if ($bracketDepth -eq 0) {
+                    $openingBracket = $index
+                    break
+                }
+                if ($bracketDepth -lt 0) {
+                    break
+                }
+            }
+        }
+        if ($openingBracket -lt 0) {
+            Add-ContractFailure `
+                -Message "$Description must have balanced outer attribute brackets."
+            return $null
+        }
+
+        $hashIndex = $openingBracket - 1
+        while (
+            $hashIndex -ge 0 -and
+            [char]::IsWhiteSpace($structure[$hashIndex])
+        ) {
+            $hashIndex -= 1
+        }
+        if ($hashIndex -lt 0 -or $structure[$hashIndex] -ne "#") {
+            break
+        }
+
+        $attributeStart = $hashIndex
+        $attributeLength = $attributeEnd - $attributeStart
+        $attributeCode = $structure.Substring(
+            $attributeStart,
+            $attributeLength
+        )
+        $delimiterStack = [System.Collections.Generic.Stack[char]]::new()
+        $balanced = $true
+        for ($index = 0; $index -lt $attributeCode.Length; $index += 1) {
+            $current = $attributeCode[$index]
+            if ($current -eq "(" -or $current -eq "[" -or $current -eq "{") {
+                $delimiterStack.Push($current)
+                continue
+            }
+            if ($current -ne ")" -and $current -ne "]" -and $current -ne "}") {
+                continue
+            }
+            if ($delimiterStack.Count -eq 0) {
+                $balanced = $false
+                break
+            }
+            $opening = $delimiterStack.Pop()
+            if (
+                ($current -eq ")" -and $opening -ne "(") -or
+                ($current -eq "]" -and $opening -ne "[") -or
+                ($current -eq "}" -and $opening -ne "{")
+            ) {
+                $balanced = $false
+                break
+            }
+        }
+        if (-not $balanced -or $delimiterStack.Count -ne 0) {
+            Add-ContractFailure `
+                -Message "$Description must have balanced outer attribute token trees."
+            return $null
+        }
+
+        $attribute = [pscustomobject]@{
+            Source = $Source.Substring(
+                $attributeStart,
+                $attributeLength
+            )
+            Code = $attributeCode
+        }
+        $attributes = @($attribute) + $attributes
+        $cursor = $attributeStart
+    }
+
+    return [pscustomobject]@{
+        Items = @($attributes)
+        Code = (($attributes | ForEach-Object { $_.Code }) -join "`n")
+    }
 }
 
 function Get-TopLevelRustBody {
@@ -1389,10 +1548,24 @@ if ($development -notmatch "cargo deny --version") {
     Add-ContractFailure `
         -Message "Development docs must require cargo-deny version verification."
 }
+$runtimeCodeView = Get-RustCodeView `
+    -Source $runtimeSelector `
+    -Description "WokCore runtime selector source"
+if ($null -ne $runtimeCodeView) {
+    $environmentLiteralMatches = [regex]::Matches(
+        $runtimeCodeView.CommentStripped,
+        '"WOKROUTER_DEV_WOKCORE_EXECUTABLE"'
+    )
+    if ($environmentLiteralMatches.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "WokCore runtime selector environment literal must occur exactly once outside comments."
+    }
+}
 $developmentModule = Get-UniqueBracedItem `
     -Source $runtimeSelector `
     -SignaturePattern '(?ms)(?<attributes>(?:(?:^[ \t]*#\[[^\r\n]*\][ \t]*\r?\n)|(?:^[ \t]*\r?\n))*)^[ \t]*mod[ \t]+development[ \t]*' `
-    -Description "Development module"
+    -Description "Development module" `
+    -TopLevel
 if ($null -ne $developmentModule) {
     if (
         $developmentModule.CodeAttributes -notmatch
@@ -1402,7 +1575,7 @@ if ($null -ne $developmentModule) {
             -Message "Development module must remain behind debug_assertions."
     }
 
-    $developmentBody = $developmentModule.CodeBody
+    $developmentBody = Get-TopLevelRustBody -Body $developmentModule.Body
     $environmentConstants = [regex]::Matches(
         $developmentBody,
         '(?m)^[ \t]*pub\(super\)[ \t]+const[ \t]+EXECUTABLE_ENV[ \t]*:[ \t]*&str[ \t]*=[ \t]+;'
@@ -1428,30 +1601,64 @@ if ($null -ne $developmentModule) {
     $candidateFromEnvironment = Get-UniqueBracedItem `
         -Source $developmentModule.Body `
         -SignaturePattern '(?m)^[ \t]*pub\(super\)[ \t]+fn[ \t]+candidate_from_environment[ \t]*\([^)]*\)[ \t]*->[^{]+' `
-        -Description "Development environment candidate function"
+        -Description "Development environment candidate function" `
+        -TopLevel
     if ($null -ne $candidateFromEnvironment) {
-        $null = Get-UniquePatternIndex `
-            -Source $candidateFromEnvironment.CodeBody `
-            -Pattern 'std::env::var_os\([ \t]*EXECUTABLE_ENV[ \t]*\)' `
-            -Description "Development module environment lookup"
+        $candidateTopLevel = Get-TopLevelRustBody `
+            -Body $candidateFromEnvironment.Body
+        if (
+            ($candidateTopLevel -replace '\s', '') -ne
+            'candidate_from_value(std::env::var_os(EXECUTABLE_ENV))'
+        ) {
+            Add-ContractFailure `
+                -Message "Development module environment lookup must remain the active top-level candidate expression."
+        }
     }
 }
 
 $debugSelectOnce = Get-UniqueBracedItem `
     -Source $runtimeSelector `
     -SignaturePattern '(?ms)(?<attributes>^[ \t]*#\[cfg\([ \t]*debug_assertions[ \t]*\)\][ \t]*\r?\n(?:(?:^[ \t]*#\[[^\r\n]*\][ \t]*\r?\n)|(?:^[ \t]*\r?\n))*)^[ \t]*async[ \t]+fn[ \t]+select_once[ \t]*\([^)]*\)[ \t]*->[^{]+' `
-    -Description "Debug select_once"
+    -Description "Debug select_once" `
+    -TopLevel
 if ($null -ne $debugSelectOnce) {
+    $debugSelectOnceTopLevel = Get-TopLevelRustBody `
+        -Body $debugSelectOnce.Body
     $null = Get-UniquePatternIndex `
-        -Source $debugSelectOnce.CodeBody `
-        -Pattern 'development::candidate_from_environment\(\)' `
+        -Source $debugSelectOnceTopLevel `
+        -Pattern '(?m)^[ \t]*let[ \t]+candidate[ \t]*=[ \t]*development::candidate_from_environment\(\)[ \t]*;' `
         -Description "Debug select_once development candidate call"
+}
+
+$releaseSelectOnce = Get-UniqueBracedItem `
+    -Source $runtimeSelector `
+    -SignaturePattern '(?ms)(?<attributes>^[ \t]*#\[cfg\([ \t]*not\([ \t]*debug_assertions[ \t]*\)[ \t]*\)\][ \t]*\r?\n(?:(?:^[ \t]*#\[[^\r\n]*\][ \t]*\r?\n)|(?:^[ \t]*\r?\n))*)^[ \t]*async[ \t]+fn[ \t]+select_once[ \t]*\([^)]*\)[ \t]*->[^{]+' `
+    -Description "Release select_once" `
+    -TopLevel
+if ($null -ne $releaseSelectOnce) {
+    $releaseSelectOnceTopLevel = Get-TopLevelRustBody `
+        -Body $releaseSelectOnce.Body
+    if (
+        ($releaseSelectOnceTopLevel -replace '\s', '') -ne
+        'select_production(paths,&discover_wokcore_executable)'
+    ) {
+        Add-ContractFailure `
+            -Message "Release select_once must directly call select_production with production discovery."
+    }
+    if (
+        $releaseSelectOnce.CodeBody -match
+        '(?:\bstd::env\b|\benv[ \t\r\n]*::|\bvar_os[ \t\r\n]*\(|\bdevelopment[ \t\r\n]*::|\bcandidate_from_environment[ \t\r\n]*\()'
+    ) {
+        Add-ContractFailure `
+            -Message "Release select_once must not read environment variables or access development candidates."
+    }
 }
 
 $dependencySelector = Get-UniqueBracedItem `
     -Source $runtimeSelector `
     -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+select_with_dependencies[ \t]*\(' `
-    -Description "select_with_dependencies"
+    -Description "select_with_dependencies" `
+    -TopLevel
 if ($null -ne $dependencySelector) {
     $selectorTopLevel = Get-TopLevelRustBody -Body $dependencySelector.Body
     $timeoutConstants = [regex]::Matches(
@@ -1478,11 +1685,20 @@ if ($null -ne $dependencySelector) {
         Add-ContractFailure `
             -Message "select_with_dependencies constant references must use DEVELOPMENT_TIMEOUT for the deadline."
     }
+    $candidateBindings = [regex]::Matches(
+        $selectorTopLevel,
+        '(?m)^[ \t]*let[ \t]+Some\(candidate\)[ \t]*=[ \t]*candidate[ \t]+else[ \t]*'
+    )
+    if ($candidateBindings.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "select_with_dependencies candidate must be bound on the active top-level path."
+    }
 
     $selectionLoop = Get-UniqueBracedItem `
         -Source $dependencySelector.Body `
         -SignaturePattern '(?m)^[ \t]*loop[ \t]*' `
-        -Description "select_with_dependencies selection loop"
+        -Description "select_with_dependencies selection loop" `
+        -TopLevel
     if ($null -ne $selectionLoop) {
         $loopTopLevel = Get-TopLevelRustBody -Body $selectionLoop.Body
         $retryReferences = [regex]::Matches(
@@ -1497,7 +1713,8 @@ if ($null -ne $dependencySelector) {
         $selectionIf = Get-UniqueBracedItem `
             -Source $selectionLoop.Body `
             -SignaturePattern '(?ms)^[ \t]*if[ \t]+let[ \t]+Some\(process_id\)[ \t]*=[ \t]*client\.discovered_process_id\(\)[ \t\r\n]*&&[ \t\r\n]*process_matches\([ \t]*process_id[ \t]*,[ \t]*&candidate[ \t]*\)[ \t]*' `
-            -Description "select_with_dependencies selection loop initial process identity check"
+            -Description "select_with_dependencies selection loop initial process identity check" `
+            -TopLevel
         if ($null -ne $selectionIf) {
             $selectionBody = Get-TopLevelRustBody -Body $selectionIf.Body
             $boundClientIndex = Get-UniquePatternIndex `
@@ -1561,24 +1778,39 @@ if ($null -ne $desktopErrorEnum) {
 
 $noSwitchTest = Get-UniqueBracedItem `
     -Source $runtimeSelectorTests `
-    -SignaturePattern '(?ms)(?<attributes>(?:(?:^[ \t]*#\[[^\r\n]*\][ \t]*\r?\n)|(?:^[ \t]*\r?\n))*)^[ \t]*async[ \t]+fn[ \t]+a_selected_development_session_never_switches_to_production[ \t]*\([^)]*\)[ \t]*' `
-    -Description "Development no-switch regression test"
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+a_selected_development_session_never_switches_to_production[ \t]*\([^)]*\)[ \t]*' `
+    -Description "Development no-switch regression test" `
+    -TopLevel
 if ($null -ne $noSwitchTest) {
-    $tokioTestAttributes = [regex]::Matches(
-        $noSwitchTest.CodeAttributes,
-        '(?m)^[ \t]*#\[[ \t]*tokio::test(?:\([^\]]*\))?[ \t]*\][ \t]*$'
-    )
-    if ($tokioTestAttributes.Count -ne 1) {
-        Add-ContractFailure `
-            -Message "Development no-switch regression test must contain exactly one Tokio test attribute."
-    }
-    $executionChangingAttributes = [regex]::Matches(
-        $noSwitchTest.CodeAttributes,
-        '(?m)^[ \t]*#\[[ \t]*(?:cfg|cfg_attr|ignore|should_panic)\b'
-    )
-    if ($executionChangingAttributes.Count -gt 0) {
-        Add-ContractFailure `
-            -Message "Development no-switch regression test must not be ignored or use execution-changing attributes."
+    $noSwitchAttributes = Get-RustOuterAttributesBeforeItem `
+        -Source $runtimeSelectorTests `
+        -ItemStart $noSwitchTest.SignatureIndex `
+        -Description "Development no-switch regression test attributes"
+    if ($null -ne $noSwitchAttributes) {
+        $tokioTestAttributeCount = 0
+        $executionChangingAttributeCount = 0
+        foreach ($attribute in $noSwitchAttributes.Items) {
+            if (
+                $attribute.Code -match
+                '(?s)^[ \t\r\n]*#[ \t\r\n]*\[[ \t\r\n]*tokio[ \t\r\n]*::[ \t\r\n]*test\b.*\][ \t\r\n]*$'
+            ) {
+                $tokioTestAttributeCount += 1
+            }
+            if (
+                $attribute.Code -match
+                '(?<![A-Za-z0-9_])(?:cfg|cfg_attr|ignore|should_panic)(?![A-Za-z0-9_])'
+            ) {
+                $executionChangingAttributeCount += 1
+            }
+        }
+        if ($tokioTestAttributeCount -ne 1) {
+            Add-ContractFailure `
+                -Message "Development no-switch regression test must contain exactly one Tokio test attribute."
+        }
+        if ($executionChangingAttributeCount -gt 0) {
+            Add-ContractFailure `
+                -Message "Development no-switch regression test must not be ignored or use execution-changing attributes."
+        }
     }
 
     $noSwitchBody = Get-TopLevelRustBody -Body $noSwitchTest.Body
