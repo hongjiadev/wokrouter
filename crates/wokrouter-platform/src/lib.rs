@@ -15,7 +15,9 @@ pub use system::locale::{SystemContext, detect_system_context};
 pub use system::paths::AppPaths;
 pub use system::wokcore::discover_wokcore_executable;
 pub use wokcore_install::{
-    WokCoreInstallError, WokCoreInstallOutcome, WokCoreInstallSource, install_missing_wokcore,
+    WokCoreInstallError, WokCoreInstallOutcome, WokCoreInstallPhase, WokCoreInstallProgress,
+    WokCoreInstallProgressObserver, WokCoreInstallSource, install_missing_wokcore,
+    install_missing_wokcore_with_progress,
 };
 pub use wokcore_runtime::{SelectedWokCoreRuntime, WokCoreRuntimeChannel, select_wokcore_runtime};
 

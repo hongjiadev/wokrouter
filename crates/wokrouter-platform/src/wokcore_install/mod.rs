@@ -1,5 +1,6 @@
 mod install;
 mod manifest;
+mod progress;
 
 use std::{fmt, path::PathBuf, sync::Arc};
 
@@ -8,28 +9,32 @@ use semver::Version;
 use url::Host;
 use url::Url;
 
-pub use install::install_missing_wokcore;
+pub use install::{install_missing_wokcore, install_missing_wokcore_with_progress};
+pub use progress::{WokCoreInstallPhase, WokCoreInstallProgress, WokCoreInstallProgressObserver};
 
 use self::manifest::validate_public_key;
 
 const PRODUCTION_RELEASE_ORIGIN: &str =
     "https://github.com/hongjiadev/wokcore/releases/latest/download/";
+const PRODUCTION_PUBLIC_KEY: &str = include_str!("wokcore-minisign.pub");
 
 #[derive(Clone)]
 pub struct WokCoreInstallSource {
     pub(super) origin: Url,
     pub(super) public_key: Arc<str>,
+    public_key_id: Arc<str>,
     pub(super) production: bool,
 }
 
 impl WokCoreInstallSource {
-    pub fn production(public_key: impl Into<Arc<str>>) -> Result<Self, WokCoreInstallError> {
-        let public_key = public_key.into();
-        validate_public_key(&public_key)?;
+    pub fn production() -> Result<Self, WokCoreInstallError> {
+        let public_key = Arc::from(PRODUCTION_PUBLIC_KEY);
+        let public_key_id = Arc::from(validate_public_key(&public_key)?);
         Ok(Self {
             origin: Url::parse(PRODUCTION_RELEASE_ORIGIN)
                 .map_err(|_| WokCoreInstallError::InvalidSource)?,
             public_key,
+            public_key_id,
             production: true,
         })
     }
@@ -41,7 +46,7 @@ impl WokCoreInstallSource {
         public_key: impl Into<Arc<str>>,
     ) -> Result<Self, WokCoreInstallError> {
         let public_key = public_key.into();
-        validate_public_key(&public_key)?;
+        let public_key_id = Arc::from(validate_public_key(&public_key)?);
         if origin.scheme() != "http"
             || !origin.username().is_empty()
             || origin.password().is_some()
@@ -56,12 +61,17 @@ impl WokCoreInstallSource {
         Ok(Self {
             origin,
             public_key,
+            public_key_id,
             production: false,
         })
     }
 
     pub fn origin(&self) -> &Url {
         &self.origin
+    }
+
+    pub fn public_key_id(&self) -> &str {
+        &self.public_key_id
     }
 }
 

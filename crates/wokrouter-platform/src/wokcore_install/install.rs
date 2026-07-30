@@ -10,6 +10,7 @@ use std::io::SeekFrom;
 
 use fs4::fs_std::FileExt;
 use reqwest::{Response, header::LOCATION};
+use semver::Version;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tempfile::{Builder, NamedTempFile};
@@ -18,11 +19,13 @@ use url::Url;
 use crate::{AppPaths, discover_wokcore_executable};
 
 use super::{
-    WokCoreInstallError, WokCoreInstallOutcome, WokCoreInstallSource,
+    WokCoreInstallError, WokCoreInstallOutcome, WokCoreInstallPhase, WokCoreInstallProgress,
+    WokCoreInstallProgressObserver, WokCoreInstallSource,
     manifest::{
         MAX_ARTIFACT_BYTES, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, ReleaseArtifact,
         ReleaseCandidate, current_target, is_release_file, verify_manifest,
     },
+    progress::NoopInstallProgress,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -34,6 +37,15 @@ const RELEASE_DOCUMENTS: [&str; 4] = ["LICENSE-APACHE", "LICENSE-MIT", "NOTICE.m
 pub async fn install_missing_wokcore(
     paths: &AppPaths,
     source: &WokCoreInstallSource,
+) -> Result<WokCoreInstallOutcome, WokCoreInstallError> {
+    let mut observer = NoopInstallProgress;
+    install_missing_wokcore_with_progress(paths, source, &mut observer).await
+}
+
+pub async fn install_missing_wokcore_with_progress(
+    paths: &AppPaths,
+    source: &WokCoreInstallSource,
+    observer: &mut dyn WokCoreInstallProgressObserver,
 ) -> Result<WokCoreInstallOutcome, WokCoreInstallError> {
     if let Some(executable) = existing_wokcore(paths)? {
         return Ok(WokCoreInstallOutcome::AlreadyInstalled { executable });
@@ -52,12 +64,20 @@ pub async fn install_missing_wokcore(
     }
 
     let client = release_client()?;
+    observer.on_progress(WokCoreInstallProgress {
+        phase: WokCoreInstallPhase::CheckingRelease,
+        target_version: None,
+        bytes_completed: None,
+        bytes_total: None,
+    });
     let release = fetch_release(&client, source).await?;
     let archive = download_artifact(
         &client,
         source,
         &release.artifact,
         &paths.wokcore_install_dir,
+        &release.version,
+        observer,
     )
     .await?;
     let executable = install_archive(
@@ -65,6 +85,8 @@ pub async fn install_missing_wokcore(
         &release.artifact,
         &paths.wokcore_install_dir,
         &paths.wokcore_install_record,
+        &release.version,
+        observer,
     )?;
     Ok(WokCoreInstallOutcome::Installed {
         version: release.version,
@@ -235,6 +257,8 @@ async fn download_artifact(
     source: &WokCoreInstallSource,
     artifact: &ReleaseArtifact,
     install_directory: &Path,
+    version: &Version,
+    observer: &mut dyn WokCoreInstallProgressObserver,
 ) -> Result<NamedTempFile, WokCoreInstallError> {
     if artifact.size == 0 || artifact.size > MAX_ARTIFACT_BYTES {
         return Err(WokCoreInstallError::ArtifactSizeMismatch);
@@ -264,6 +288,12 @@ async fn download_artifact(
         .map_err(|_| WokCoreInstallError::AtomicInstallFailed)?;
     let mut received = 0_u64;
     let mut hasher = Sha256::new();
+    observer.on_progress(WokCoreInstallProgress {
+        phase: WokCoreInstallPhase::Downloading,
+        target_version: Some(version.clone()),
+        bytes_completed: Some(0),
+        bytes_total: Some(artifact.size),
+    });
     while let Some(chunk) = response
         .chunk()
         .await
@@ -281,6 +311,12 @@ async fn download_artifact(
             .write_all(&chunk)
             .map_err(|_| WokCoreInstallError::AtomicInstallFailed)?;
         hasher.update(&chunk);
+        observer.on_progress(WokCoreInstallProgress {
+            phase: WokCoreInstallPhase::Downloading,
+            target_version: Some(version.clone()),
+            bytes_completed: Some(received),
+            bytes_total: Some(artifact.size),
+        });
     }
     if received != artifact.size {
         return Err(WokCoreInstallError::ArtifactSizeMismatch);
@@ -289,6 +325,12 @@ async fn download_artifact(
         .flush()
         .and_then(|_| staged.as_file().sync_all())
         .map_err(|_| WokCoreInstallError::AtomicInstallFailed)?;
+    observer.on_progress(WokCoreInstallProgress {
+        phase: WokCoreInstallPhase::Verifying,
+        target_version: Some(version.clone()),
+        bytes_completed: None,
+        bytes_total: None,
+    });
     if format!("{:x}", hasher.finalize()) != artifact.sha256 {
         return Err(WokCoreInstallError::ArtifactHashMismatch);
     }
@@ -454,6 +496,8 @@ fn install_archive(
     artifact: &ReleaseArtifact,
     install_directory: &Path,
     install_record: &Path,
+    version: &Version,
+    observer: &mut dyn WokCoreInstallProgressObserver,
 ) -> Result<PathBuf, WokCoreInstallError> {
     let mut candidate = Builder::new()
         .prefix(".wokcore-install-candidate-")
@@ -470,6 +514,12 @@ fn install_archive(
     if fs::symlink_metadata(&target).is_ok() {
         return Err(WokCoreInstallError::InvalidInstallState);
     }
+    observer.on_progress(WokCoreInstallProgress {
+        phase: WokCoreInstallPhase::Installing,
+        target_version: Some(version.clone()),
+        bytes_completed: None,
+        bytes_total: None,
+    });
     publish_candidate(candidate.path(), &target, install_directory)?;
 
     finish_record_commit(
@@ -928,15 +978,26 @@ mod tests {
         io::{self, Cursor, Write},
     };
 
+    use semver::Version;
     use tempfile::tempdir;
     use url::Url;
 
     use super::{
-        RecordCommitError, ReleaseArtifact, WokCoreInstallError, extract_executable,
-        finish_record_commit, publish_candidate_with_sync, validate_latest_release_redirect,
-        validate_release_asset_redirect, validate_versioned_release_url,
-        write_install_record_with_sync,
+        RecordCommitError, ReleaseArtifact, WokCoreInstallError, WokCoreInstallPhase,
+        WokCoreInstallProgress, WokCoreInstallProgressObserver, extract_executable,
+        finish_record_commit, install_archive, publish_candidate_with_sync,
+        validate_latest_release_redirect, validate_release_asset_redirect,
+        validate_versioned_release_url, write_install_record_with_sync,
     };
+
+    #[derive(Default)]
+    struct RecordingProgress(Vec<WokCoreInstallProgress>);
+
+    impl WokCoreInstallProgressObserver for RecordingProgress {
+        fn on_progress(&mut self, event: WokCoreInstallProgress) {
+            self.0.push(event);
+        }
+    }
 
     #[test]
     fn production_redirects_accept_only_fixed_release_locations() {
@@ -1074,6 +1135,33 @@ mod tests {
             Err(WokCoreInstallError::AtomicInstallFailed)
         );
         assert!(!executable.exists());
+    }
+
+    #[test]
+    fn an_invalid_archive_never_reports_installing() {
+        let fixture = tempdir().unwrap();
+        let mut archive = tempfile::NamedTempFile::new().unwrap();
+        archive.write_all(b"not an archive").unwrap();
+        archive.flush().unwrap();
+        let mut progress = RecordingProgress::default();
+
+        let error = install_archive(
+            &archive,
+            &test_artifact(),
+            fixture.path(),
+            &fixture.path().join("wokcore-install.json"),
+            &Version::new(1, 2, 3),
+            &mut progress,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, WokCoreInstallError::InvalidArchive);
+        assert!(
+            progress
+                .0
+                .iter()
+                .all(|event| event.phase != WokCoreInstallPhase::Installing)
+        );
     }
 
     #[cfg(windows)]
