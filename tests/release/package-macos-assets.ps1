@@ -773,7 +773,7 @@ $dmg = Get-ExactChild `
     -Subdirectory "dmg" `
     -Suffix ".dmg" `
     -Kind File `
-    -AllowedAuxiliaryNames @("bundle_dmg.sh", "share")
+    -AllowedAuxiliaryNames @("bundle_dmg.sh", "icon.icns", "share")
 $app = Get-ExactChild `
     -Root $bundle `
     -Subdirectory "macos" `

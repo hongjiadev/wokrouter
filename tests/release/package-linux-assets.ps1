@@ -283,6 +283,14 @@ function Get-ValidatedAppImageLinks {
         ".DirIcon" = "WokRouter.png"
         "WokRouter.desktop" = "usr/share/applications/WokRouter.desktop"
     }
+    $optional = [ordered]@{
+        "AppRun" = "usr/bin/wokrouter-desktop"
+    }
+    [string[]] $allowedRootLinks = @(
+        ".DirIcon",
+        "WokRouter.desktop",
+        "AppRun"
+    )
     $rawRootLinks = @(
         $inventory |
             Where-Object {
@@ -291,8 +299,23 @@ function Get-ValidatedAppImageLinks {
                 -not ([string] $_.Relative).Contains("\")
             }
     )
-    if ($rawRootLinks.Count -ne 2) {
-        throw "AppImage must contain exactly two expected root links."
+    $rawUnexpectedRootLinks = @(
+        $rawRootLinks | Where-Object {
+            $allowedRootLinks -notcontains [string] $_.Relative
+        }
+    )
+    if (
+        $rawRootLinks.Count -lt 2 -or
+        $rawRootLinks.Count -gt 3 -or
+        $rawUnexpectedRootLinks.Count -ne 0
+    ) {
+        throw (
+            "AppImage must contain the two required root links and at most " +
+            "one AppRun link; exactly the expected root links are allowed " +
+            "(root links: $([string]::Join('|', @(
+                $rawRootLinks | ForEach-Object { [string] $_.Relative }
+            ))))."
+        )
     }
     $records = [Collections.Generic.Dictionary[string, object]]::new(
         [StringComparer]::Ordinal
@@ -319,8 +342,15 @@ function Get-ValidatedAppImageLinks {
             throw "AppImage link inventory is malformed."
         }
         $relative = [string] $record.Relative
+        $known = [ordered]@{}
+        foreach ($entry in $expected.GetEnumerator()) {
+            $known[$entry.Key] = $entry.Value
+        }
+        foreach ($entry in $optional.GetEnumerator()) {
+            $known[$entry.Key] = $entry.Value
+        }
         $caseMatches = @(
-            $expected.Keys |
+            $known.Keys |
                 Where-Object {
                     $_.Equals(
                         $relative,
@@ -335,7 +365,10 @@ function Get-ValidatedAppImageLinks {
             $records.ContainsKey($relative) -or
             -not $caseInsensitive.Add($relative)
         ) {
-            throw "AppImage link inventory contains a duplicate or case-alternate path."
+            throw (
+                "AppImage link inventory contains a duplicate or case-alternate " +
+                "path; exactly one record per path is allowed."
+            )
         }
         if ([string] $record.LinkType -cne "SymbolicLink") {
             throw "AppImage reparse points must be symbolic links."
@@ -367,6 +400,12 @@ function Get-ValidatedAppImageLinks {
             ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "Adapter AppImage link contract must be a regular file."
         }
+        if (
+            $optional.Contains($relative) -and
+            [string] $record.Target -cne [string] $optional[$relative]
+        ) {
+            throw "AppImage optional link '$relative' target is invalid."
+        }
         $records.Add($relative, $record)
         $segmentsByRelative.Add($relative, $segments)
     }
@@ -374,12 +413,18 @@ function Get-ValidatedAppImageLinks {
     [string[]] $rootLinks = @(
         $records.Keys | Where-Object { -not $_.Contains("/") }
     )
+    $unexpectedRootLinks = @(
+        $rootLinks | Where-Object { $allowedRootLinks -notcontains $_ }
+    )
     if (
-        $rootLinks.Count -ne 2 -or
+        ($rootLinks.Count -lt 2 -or $rootLinks.Count -gt 3) -or
+        $unexpectedRootLinks.Count -ne 0 -or
         -not $records.ContainsKey(".DirIcon") -or
-        -not $records.ContainsKey("WokRouter.desktop")
+        -not $records.ContainsKey("WokRouter.desktop") -or
+        ($records.ContainsKey("AppRun") -and
+            [string] $records["AppRun"].Target -cne $optional["AppRun"])
     ) {
-        throw "AppImage must contain exactly two expected root links."
+        throw "AppImage root links do not match exactly the release contract."
     }
 
     $targets = [Collections.Generic.Dictionary[string, string]]::new(

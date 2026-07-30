@@ -729,6 +729,32 @@ try {
         }
     }
 
+    Invoke-Scenario -Name "Linux accepts an optional AppRun root link" -Test {
+        $root = New-FixtureRoot
+        $bundle = New-LinuxFixture -Root $root -Architecture "arm64"
+        Write-Utf8File `
+            -Path (Join-Path $root "appimage-tree/AppRun") `
+            -Content "app-run"
+        $inventory = Read-AppImageLinkInventory -Root $root
+        Write-AppImageLinkInventory -Root $root -Inventory @(
+            $inventory
+            [pscustomobject]@{
+                Relative = "AppRun"
+                LinkType = "SymbolicLink"
+                Target = "usr/bin/wokrouter-desktop"
+            }
+        )
+        $adapter = New-ToolAdapter -Root $root
+        $actual = Invoke-Packager -Path $linuxScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $bundle
+            OutputDirectory = (Join-Path $root "output")
+            Version = $version
+            Target = "aarch64-unknown-linux-gnu"
+            ToolAdapterPath = $adapter
+        }
+        if ($actual.Count -ne 3) { throw "Linux packager returned the wrong output count." }
+    }
+
     Invoke-Scenario -Name "Linux rejects missing duplicate extra and directory sources" -Test {
         foreach ($mutation in @("missing", "duplicate", "extra", "directory")) {
             $root = New-FixtureRoot
@@ -1612,6 +1638,23 @@ try {
         if (-not $block.Groups["Body"].Value.Contains("source entries:")) {
             throw "macOS exact-child failures must include source entries."
         }
+    }
+
+    Invoke-Scenario -Name "macOS accepts the Tauri DMG icon helper" -Test {
+        $root = New-FixtureRoot
+        $bundle = New-MacFixture -Root $root
+        Write-Utf8File `
+            -Path (Join-Path $bundle "dmg/icon.icns") `
+            -Content "icon"
+        $adapter = New-ToolAdapter -Root $root
+        $actual = Invoke-Packager -Path $macScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $bundle
+            OutputDirectory = (Join-Path $root "output")
+            Version = $version
+            Target = "x86_64-apple-darwin"
+            ToolAdapterPath = $adapter
+        }
+        if ($actual.Count -ne 3) { throw "macOS packager returned the wrong output count." }
     }
 
     Invoke-Scenario -Name "macOS fingerprints symlinks without following them" -Test {
