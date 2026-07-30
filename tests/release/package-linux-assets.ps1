@@ -791,16 +791,7 @@ function Assert-PackageMetadata {
         [string] $metadata.Version -cne $Version -or
         [string] $metadata.Architecture -cne $ExpectedArchitecture
     ) {
-        throw (
-            "$Kind metadata does not match the release contract " +
-            "(Name='{0}', Version='{1}', Architecture='{2}', " +
-            "ExpectedVersion='{3}', ExpectedArchitecture='{4}')." -f `
-                [string] $metadata.Name,
-                [string] $metadata.Version,
-                [string] $metadata.Architecture,
-                $Version,
-                $ExpectedArchitecture
-        )
+        throw "$Kind metadata does not match the release contract (Name='$([string] $metadata.Name)', Version='$([string] $metadata.Version)', Architecture='$([string] $metadata.Architecture)', ExpectedVersion='$Version', ExpectedArchitecture='$ExpectedArchitecture')."
     }
 }
 
