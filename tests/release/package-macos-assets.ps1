@@ -63,6 +63,7 @@ function Add-NativeAppInventory {
         [Parameter(Mandatory)][string] $Directory,
         [Parameter(Mandatory)][AllowEmptyString()][string] $Prefix,
         [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
         [Collections.Generic.List[object]] $Records
     )
 

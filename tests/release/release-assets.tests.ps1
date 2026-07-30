@@ -620,10 +620,14 @@ try {
 
     Invoke-Scenario -Name "macOS native app inventory accepts the root prefix" -Test {
         $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $macScript
-        if (-not $source.Contains(
-                '[Parameter(Mandatory)][AllowEmptyString()][string] $Prefix'
+        foreach ($required in @(
+                '[Parameter(Mandatory)][AllowEmptyString()][string] $Prefix',
+                '[AllowEmptyCollection()]',
+                '[Collections.Generic.List[object]] $Records'
             )) {
-            throw "macOS native app inventory must allow an empty root prefix."
+            if (-not $source.Contains($required)) {
+                throw "macOS native app inventory is missing '$required'."
+            }
         }
     }
 
