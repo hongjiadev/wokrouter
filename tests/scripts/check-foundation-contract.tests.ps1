@@ -72,8 +72,12 @@ function Edit-FixtureFile {
     $content = $content.Replace("`r`n", "`n")
     $OldText = $OldText.Replace("`r`n", "`n")
     $NewText = $NewText.Replace("`r`n", "`n")
-    if (-not $content.Contains($OldText)) {
-        throw "Fixture mutation source was not found in ${RelativePath}: $OldText"
+    $occurrences = [regex]::Matches(
+        $content,
+        [regex]::Escape($OldText)
+    ).Count
+    if ($occurrences -ne 1) {
+        throw "Fixture mutation source must occur exactly once in ${RelativePath}; found ${occurrences}: $OldText"
     }
     Set-Content -LiteralPath $path -Value $content.Replace($OldText, $NewText) -Encoding UTF8
 }
@@ -96,10 +100,53 @@ function Edit-Workflow {
     $content = $content.Replace("`r`n", "`n")
     $OldText = $OldText.Replace("`r`n", "`n")
     $NewText = $NewText.Replace("`r`n", "`n")
-    if (-not $content.Contains($OldText)) {
-        throw "Fixture mutation source was not found: $OldText"
+    $occurrences = [regex]::Matches(
+        $content,
+        [regex]::Escape($OldText)
+    ).Count
+    if ($occurrences -ne 1) {
+        throw "Fixture mutation source must occur exactly once; found ${occurrences}: $OldText"
     }
     Set-Content -LiteralPath $path -Value $content.Replace($OldText, $NewText) -Encoding UTF8
+}
+
+function Edit-WorkflowJob {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Root,
+
+        [Parameter(Mandatory)]
+        [string]$JobName,
+
+        [Parameter(Mandatory)]
+        [string]$OldText,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$NewText
+    )
+
+    $path = Join-Path $Root ".github/workflows/ci.yml"
+    $content = Get-Content -LiteralPath $path -Raw -Encoding UTF8
+    $content = $content.Replace("`r`n", "`n")
+    $OldText = $OldText.Replace("`r`n", "`n")
+    $NewText = $NewText.Replace("`r`n", "`n")
+    $jobPattern = "(?ms)^  $([regex]::Escape($JobName)):`n.*?(?=^  [A-Za-z0-9_-]+:`n|^`S|\z)"
+    $jobs = [regex]::Matches($content, $jobPattern)
+    if ($jobs.Count -ne 1) {
+        throw "Workflow job '$JobName' must occur exactly once; found $($jobs.Count)."
+    }
+    $job = $jobs[0]
+    $occurrences = [regex]::Matches(
+        $job.Value,
+        [regex]::Escape($OldText)
+    ).Count
+    if ($occurrences -ne 1) {
+        throw "Fixture mutation source must occur exactly once in workflow job '$JobName'; found ${occurrences}: $OldText"
+    }
+    $changedJob = $job.Value.Replace($OldText, $NewText)
+    $changed = $content.Remove($job.Index, $job.Length).Insert($job.Index, $changedJob)
+    Set-Content -LiteralPath $path -Value $changed -Encoding UTF8
 }
 
 function Set-FixedHostCondition {
@@ -212,6 +259,48 @@ try {
         Assert-ContractPasses -Root $root -Scenario "real workflow fixture"
     }
 
+    Invoke-Scenario -Name "fixture mutations require one exact source occurrence" -Test {
+        $root = New-ContractFixture
+        $rejected = $false
+        try {
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+                -OldText "CoreConnection" `
+                -NewText "ChangedConnection"
+        }
+        catch {
+            $rejected = $true
+            if ($_.Exception.Message -notmatch "exactly once") {
+                throw "duplicate mutation reported the wrong failure: $($_.Exception.Message)"
+            }
+        }
+        if (-not $rejected) {
+            throw "duplicate mutation source should be rejected"
+        }
+    }
+
+    Invoke-Scenario -Name "development debug gate permits non-semantic trivia" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+#[cfg(debug_assertions)]
+mod development {
+"@ `
+            -NewText @"
+#[cfg(debug_assertions)]
+
+/// Development-only candidate parsing.
+#[allow(clippy::missing_errors_doc)]
+mod development {
+"@
+        Assert-ContractPasses `
+            -Root $root `
+            -Scenario "development debug gate with trivia"
+    }
+
     Invoke-Scenario -Name "development environment parsing must remain debug-only" -Test {
         $root = New-ContractFixture
         Edit-FixtureFile `
@@ -230,6 +319,93 @@ mod development {
             -Scenario "missing development debug gate"
     }
 
+    Invoke-Scenario -Name "development parsing cannot survive only as inert text" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText '    pub(super) const EXECUTABLE_ENV: &str = "WOKROUTER_DEV_WOKCORE_EXECUTABLE";' `
+            -NewText '    pub(super) const EXECUTABLE_ENV: &str = "WOKROUTER_DISABLED_WOKCORE_EXECUTABLE";'
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "        candidate_from_value(std::env::var_os(EXECUTABLE_ENV))" `
+            -NewText '        candidate_from_value(std::env::var_os("WOKROUTER_DISABLED_WOKCORE_EXECUTABLE"))'
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "    let candidate = development::candidate_from_environment();" `
+            -NewText "    let candidate = None;"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();" `
+            -NewText @"
+// "WOKROUTER_DEV_WOKCORE_EXECUTABLE"
+#[allow(dead_code)]
+fn inert_development_parser() {
+    let _ = std::env::var_os(development::EXECUTABLE_ENV);
+    let _ = development::candidate_from_environment();
+}
+
+static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "development module" `
+            -Scenario "development parsing retained only in comments and a dead helper"
+    }
+
+    Invoke-Scenario -Name "development environment lookup must stay in its active function" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "        candidate_from_value(std::env::var_os(EXECUTABLE_ENV))" `
+            -NewText '        candidate_from_value(std::env::var_os("WOKROUTER_DISABLED_WOKCORE_EXECUTABLE"))'
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "    pub(super) fn candidate_from_value(value: Option<OsString>) -> Option<PathBuf> {" `
+            -NewText @"
+    #[allow(dead_code)]
+    fn inert_environment_lookup() {
+        let _ = std::env::var_os(EXECUTABLE_ENV);
+    }
+
+    pub(super) fn candidate_from_value(value: Option<OsString>) -> Option<PathBuf> {
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "environment lookup" `
+            -Scenario "environment lookup retained only in a dead helper"
+    }
+
+    Invoke-Scenario -Name "debug selector must actively read the development candidate" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "    let candidate = development::candidate_from_environment();" `
+            -NewText "    let candidate = None;"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();" `
+            -NewText @"
+#[allow(dead_code)]
+fn inert_development_candidate() {
+    let _ = development::candidate_from_environment();
+}
+
+static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "Debug select_once development candidate call" `
+            -Scenario "development candidate call retained only in a dead helper"
+    }
+
     Invoke-Scenario -Name "development executable environment name cannot change" -Test {
         $root = New-ContractFixture
         Edit-FixtureFile `
@@ -239,7 +415,7 @@ mod development {
             -NewText '"WOKROUTER_WOKCORE_EXECUTABLE"'
         Assert-ContractRejects `
             -Root $root `
-            -ExpectedText "WOKROUTER_DEV_WOKCORE_EXECUTABLE" `
+            -ExpectedText "environment constant" `
             -Scenario "wrong development executable environment name"
     }
 
@@ -278,7 +454,7 @@ mod development {
             -NewText '#[error("development_runtime_unavailable")]'
         Assert-ContractRejects `
             -Root $root `
-            -ExpectedText "development_runtime_managed_by_ide" `
+            -ExpectedText "IDE-managed variant" `
             -Scenario "missing IDE-managed lifecycle contract"
     }
 
@@ -334,6 +510,115 @@ mod development {
             -Scenario "unbound development client"
     }
 
+    Invoke-Scenario -Name "development selector tokens cannot survive only in comments" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "Duration::from_secs(5)" `
+            -NewText "Duration::from_secs(10)"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "Duration::from_millis(50)" `
+            -NewText "Duration::from_millis(100)"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "            && process_matches(process_id, &candidate)" `
+            -NewText "            && true"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "            let bound = client.bound_to_process(process_id);" `
+            -NewText "            let bound = client.clone();"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "                tokio::time::timeout_at(deadline, connection_probe(bound.clone())).await" `
+            -NewText "                Ok(connection_probe(bound.clone()).await)"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "            let still_matches = process_matches(process_id, &candidate);" `
+            -NewText "            let still_matches = true;"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();" `
+            -NewText @"
+// Duration::from_secs(5)
+// Duration::from_millis(50)
+// false && process_matches(process_id, &candidate)
+// let bound = client.bound_to_process(process_id);
+// tokio::time::timeout_at(deadline, connection_probe(bound.clone())).await
+// let still_matches = process_matches(process_id, &candidate);
+static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "select_with_dependencies" `
+            -Scenario "selector requirements retained only in comments"
+    }
+
+    Invoke-Scenario -Name "development connection probe must remain deadline-bound" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "                tokio::time::timeout_at(deadline, connection_probe(bound.clone())).await" `
+            -NewText "                Ok(connection_probe(bound.clone()).await)"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "deadline-bound connection probe" `
+            -Scenario "connection probe without selector deadline"
+    }
+
+    Invoke-Scenario -Name "development selector operations must retain their order" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+        if let Some(process_id) = client.discovered_process_id()
+            && process_matches(process_id, &candidate)
+        {
+            let bound = client.bound_to_process(process_id);
+"@ `
+            -NewText @"
+        let bound = client.bound_to_process(process_id);
+        if let Some(process_id) = client.discovered_process_id()
+            && process_matches(process_id, &candidate)
+        {
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "in order" `
+            -Scenario "PID binding moved before the initial identity check"
+    }
+
+    Invoke-Scenario -Name "IDE-managed error code cannot survive in a dead constant" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src-tauri/src/control.rs" `
+            -OldText '#[error("development_runtime_managed_by_ide")]' `
+            -NewText '#[error("development_runtime_unavailable")]'
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src-tauri/src/control.rs" `
+            -OldText "pub(crate) enum DesktopControlError {" `
+            -NewText @"
+const INERT_DEVELOPMENT_ERROR: &str = "development_runtime_managed_by_ide";
+
+pub(crate) enum DesktopControlError {
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "DesktopControlError" `
+            -Scenario "IDE-managed error retained only in a dead constant"
+    }
+
     Invoke-Scenario -Name "development no-switch regression test cannot be removed" -Test {
         $root = New-ContractFixture
         Edit-FixtureFile `
@@ -345,6 +630,127 @@ mod development {
             -Root $root `
             -ExpectedText "no-switch" `
             -Scenario "missing development no-switch regression"
+    }
+
+    Invoke-Scenario -Name "development no-switch regression test cannot be ignored" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/tests/wokcore_runtime.rs" `
+            -OldText @"
+#[tokio::test]
+async fn a_selected_development_session_never_switches_to_production() {
+"@ `
+            -NewText @"
+#[tokio::test]
+#[ignore]
+async fn a_selected_development_session_never_switches_to_production() {
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "must not be ignored" `
+            -Scenario "ignored development no-switch regression"
+    }
+
+    $noSwitchAssertions = @(
+        @{
+            Name = "development channel"
+            OldText = @"
+    fixture.write_discovery_at(42, 1, &replacement.uri());
+
+    assert_eq!(selected.channel(), WokCoreRuntimeChannel::Development);
+"@
+            NewText = @"
+    fixture.write_discovery_at(42, 1, &replacement.uri());
+"@
+        },
+        @{
+            Name = "selected executable"
+            OldText = @"
+    fixture.write_discovery_at(42, 1, &replacement.uri());
+
+    assert_eq!(selected.channel(), WokCoreRuntimeChannel::Development);
+    assert_eq!(selected.executable(), Some(development.as_path()));
+"@
+            NewText = @"
+    fixture.write_discovery_at(42, 1, &replacement.uri());
+
+    assert_eq!(selected.channel(), WokCoreRuntimeChannel::Development);
+"@
+        },
+        @{
+            Name = "stopped retained connection"
+            OldText = "    assert_eq!(selected.connection().await, CoreConnection::Stopped);"
+            NewText = ""
+        },
+        @{
+            Name = "replacement zero requests"
+            OldText = "    assert!(replacement.received_requests().await.unwrap().is_empty());"
+            NewText = ""
+        },
+        @{
+            Name = "production discovery zero calls"
+            OldText = @"
+    assert!(replacement.received_requests().await.unwrap().is_empty());
+    assert_eq!(discoveries.load(Ordering::SeqCst), 0);
+"@
+            NewText = @"
+    assert!(replacement.received_requests().await.unwrap().is_empty());
+"@
+        }
+    )
+    foreach ($assertion in $noSwitchAssertions) {
+        Invoke-Scenario -Name "development no-switch test retains $($assertion.Name) assertion" -Test {
+            $root = New-ContractFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "crates/wokrouter-platform/tests/wokcore_runtime.rs" `
+                -OldText $assertion.OldText `
+                -NewText $assertion.NewText
+            Assert-ContractRejects `
+                -Root $root `
+                -ExpectedText $assertion.Name `
+                -Scenario "no-switch test missing $($assertion.Name)"
+        }
+    }
+
+    Invoke-Scenario -Name "development no-switch regression test cannot have an empty body" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/tests/wokcore_runtime.rs" `
+            -OldText @"
+async fn a_selected_development_session_never_switches_to_production() {
+    let fixture = RuntimeFixture::new();
+    let development = fixture.create_file("development/wokcore");
+    fixture.write_discovery(41, 2);
+    let discoveries = Arc::new(AtomicUsize::new(0));
+    let selector = selector(
+        Some(development.clone().into_os_string()),
+        true,
+        None,
+        Arc::clone(&discoveries),
+    );
+    let selected = selector.select(&fixture.paths).await.unwrap();
+
+    let replacement = MockServer::start().await;
+    mount_running_runtime(&replacement).await;
+    fixture.write_discovery_at(42, 1, &replacement.uri());
+
+    assert_eq!(selected.channel(), WokCoreRuntimeChannel::Development);
+    assert_eq!(selected.executable(), Some(development.as_path()));
+    assert_eq!(selected.connection().await, CoreConnection::Stopped);
+    assert!(replacement.received_requests().await.unwrap().is_empty());
+    assert_eq!(discoveries.load(Ordering::SeqCst), 0);
+}
+"@ `
+            -NewText @"
+async fn a_selected_development_session_never_switches_to_production() {}
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "development channel" `
+            -Scenario "empty development no-switch regression"
     }
 
     foreach ($privateField in @("pid", "path", "executable")) {
@@ -377,8 +783,9 @@ mod development {
 
     Invoke-Scenario -Name "macOS arm64 must use the macos-14 runner" -Test {
         $root = New-ContractFixture
-        Edit-Workflow `
+        Edit-WorkflowJob `
             -Root $root `
+            -JobName "native-test-matrix" `
             -OldText @"
           - os: macos-14
             target: aarch64-apple-darwin
@@ -539,8 +946,9 @@ mod development {
 
     Invoke-Scenario -Name "Windows arm64 tools cannot be removed" -Test {
         $root = New-ContractFixture
-        Edit-Workflow `
+        Edit-WorkflowJob `
             -Root $root `
+            -JobName "native-test-matrix" `
             -OldText "Microsoft.VisualStudio.Component.VC.Tools.ARM64" `
             -NewText "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
         Assert-ContractRejects `
@@ -583,8 +991,9 @@ mod development {
 
     Invoke-Scenario -Name "six-target matrix cannot lose Windows arm64" -Test {
         $root = New-ContractFixture
-        Edit-Workflow `
+        Edit-WorkflowJob `
             -Root $root `
+            -JobName "target-check-matrix" `
             -OldText @"
           - os: windows-latest
             target: aarch64-pc-windows-msvc

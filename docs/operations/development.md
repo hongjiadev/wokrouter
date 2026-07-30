@@ -70,18 +70,21 @@ Run these six paths before accepting changes to development runtime selection:
    development variable. Confirm WokRouter does not mistake the system process
    for the configured debug executable and selects it on the production
    channel after five seconds.
-4. **Signed-install production fallback.** Remove both the development and
-   system WokCore, then start `wokrouter: dev`. Confirm that after five seconds
-   WokRouter enters the production signed automatic-install flow and displays
-   real download progress.
+4. **Signed-install production fallback (deferred).** The approved path removes
+   both the development and system WokCore, starts `wokrouter: dev`, then
+   expects the production signed automatic-install flow and real download
+   progress after five seconds. This path is not yet manually acceptable:
+   production start currently reports a missing WokCore instead of invoking
+   automatic installation. Verify it only after the core-lifecycle plan wires
+   the signed installer into production startup.
 5. **Release ignores the variable.** Set
    `WOKROUTER_DEV_WOKCORE_EXECUTABLE` and start a release build. Confirm it
    selects only through production discovery and never reports the development
    channel. The variable name and its parsing must not be present in release
    metadata.
-6. **Development runtime remains IDE-managed.** With the development channel
-   selected, close WokRouter and confirm the IDE-started WokCore keeps running;
-   an explicit stop attempt must return
+6. **Development runtime remains IDE-managed (update suppression deferred).**
+   With the development channel selected, close WokRouter and confirm the
+   IDE-started WokCore keeps running; an explicit stop attempt must return
    `development_runtime_managed_by_ide`. The approved path also requires that
    no WokCore upgrade prompt appear, but update suppression is not yet manually
    acceptable: the lifecycle update coordinator does not exist. Verify the
