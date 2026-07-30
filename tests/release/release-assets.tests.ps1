@@ -440,7 +440,7 @@ function New-WindowsFixture {
 
     $bundle = Join-Path $Root "bundle"
     [IO.Directory]::CreateDirectory((Join-Path $bundle "msi")) | Out-Null
-    $template = if ($Architecture -ceq "x86_64") { "x64;1033" } else { "Arm64;1033" }
+    $template = if ($Architecture -ceq "x86_64") { "x64;0" } else { "Arm64;0" }
     $msi = Join-Path $bundle "msi/WokRouter.msi"
     Write-Utf8File -Path $msi -Content (@{
         Name = "WokRouter"

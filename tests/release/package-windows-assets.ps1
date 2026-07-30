@@ -262,7 +262,7 @@ if ($contract.Count -ne 1 -or $contract[0].System -cne "Windows") {
     throw "Unsupported Windows release target '$Target'."
 }
 $architecture = [string] $contract[0].Architecture
-$template = if ($architecture -ceq "x86_64") { "x64;1033" } else { "Arm64;1033" }
+$template = if ($architecture -ceq "x86_64") { "x64;0" } else { "Arm64;0" }
 
 $bundle = (Assert-RegularPath `
     -Path $BundleDirectory `

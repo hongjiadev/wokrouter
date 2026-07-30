@@ -787,7 +787,7 @@ function Assert-PackageMetadata {
         throw "$Kind metadata inspection failed: $($_.Exception.Message)"
     }
     if (
-        [string] $metadata.Name -cne "wokrouter" -or
+        $expectedPackageNames -cnotcontains [string] $metadata.Name -or
         [string] $metadata.Version -cne $Version -or
         [string] $metadata.Architecture -cne $ExpectedArchitecture
     ) {
@@ -805,6 +805,7 @@ if ($contract.Count -ne 1 -or $contract[0].System -cne "Linux") {
 $architecture = [string] $contract[0].Architecture
 $debArchitecture = if ($architecture -ceq "x86_64") { "amd64" } else { "arm64" }
 $rpmArchitecture = if ($architecture -ceq "x86_64") { "x86_64" } else { "aarch64" }
+$expectedPackageNames = @("wokrouter", "wok-router")
 
 $bundle = (Assert-RegularPath `
     -Path $BundleDirectory `
