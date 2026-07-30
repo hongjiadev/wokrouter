@@ -136,26 +136,38 @@ try {
         Assert-Passes -Root $root -Scenario "real release fixture"
     }
 
+    Invoke-Scenario -Name "release assembly imports the contract module by path" -Test {
+        $source = Get-Content `
+            -Raw `
+            -Encoding UTF8 `
+            -LiteralPath (Join-Path $repositoryRoot ".github/workflows/release.yml")
+        if (-not $source.Contains(
+                'Import-Module ./tests/release/WokRouter.ReleaseContract.psm1 -Force'
+            )) {
+            throw "release assembly must import the contract module by an explicit path."
+        }
+    }
+
     Invoke-Scenario -Name "all product source versions must remain identical" -Test {
         $mutations = @(
             @{
                 Path = "Cargo.toml"
-                Old = "[workspace.package]`nversion = `"0.1.21`""
+                Old = "[workspace.package]`nversion = `"0.1.22`""
                 New = "[workspace.package]`nversion = `"0.1.0`""
             },
             @{
                 Path = "apps/desktop/package.json"
-                Old = '  "version": "0.1.21",'
+                Old = '  "version": "0.1.22",'
                 New = '  "version": "0.1.0",'
             },
             @{
                 Path = "apps/desktop/src-tauri/tauri.conf.json"
-                Old = '  "version": "0.1.21",'
+                Old = '  "version": "0.1.22",'
                 New = '  "version": "0.1.0",'
             },
             @{
                 Path = "Cargo.lock"
-                Old = "[[package]]`nname = `"wokrouter-cli`"`nversion = `"0.1.21`""
+                Old = "[[package]]`nname = `"wokrouter-cli`"`nversion = `"0.1.22`""
                 New = "[[package]]`nname = `"wokrouter-cli`"`nversion = `"0.1.0`""
             }
         )

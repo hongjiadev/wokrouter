@@ -479,7 +479,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.release-version.outputs.version }}
         run: |
-          Import-Module tests/release/WokRouter.ReleaseContract.psm1 -Force
+          Import-Module ./tests/release/WokRouter.ReleaseContract.psm1 -Force
           [string[]] $expected = @(
             Get-WokRouterPayloadNames -Version $env:RELEASE_VERSION
           )
