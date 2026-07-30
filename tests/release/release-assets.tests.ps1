@@ -801,6 +801,9 @@ try {
             Write-Utf8File `
                 -Path (Join-Path $root "$format-tree/usr/bin/wokrouter-desktop") `
                 -Content "desktop-patched-$format"
+            Write-Utf8File `
+                -Path (Join-Path $root "$format-tree/usr/bin/wokrouter") `
+                -Content "sidecar-patched-$format"
         }
         $adapter = New-ToolAdapter -Root $root
         $actual = Invoke-Packager -Path $linuxScript -FixtureRoot $root -Arguments @{

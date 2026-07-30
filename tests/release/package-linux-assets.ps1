@@ -980,7 +980,6 @@ try {
             -ExpectedArchitecture $architecture
     }
     foreach ($name in @(
-            "wokrouter",
             "LICENSE-APACHE",
             "LICENSE-MIT",
             "NOTICE.md",
