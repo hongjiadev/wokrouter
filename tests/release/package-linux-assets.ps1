@@ -650,7 +650,7 @@ function Invoke-Adapter {
         "linux-rpm-extract" {
             [IO.Directory]::CreateDirectory($Destination) | Out-Null
             $bash = (Get-Command bash -ErrorAction Stop).Source
-            & $bash `
+            $extractOutput = @(& $bash `
                 -o pipefail `
                 -c @'
 set -euo pipefail
@@ -662,9 +662,10 @@ rpm2cpio "$package" |
 '@ `
                 "wokrouter-rpm-extract" `
                 $Source `
-                $Destination
+                $Destination 2>&1)
             if ($LASTEXITCODE -ne 0) {
-                throw "Could not extract rpm."
+                $details = [string]::Join("`n", [string[]] $extractOutput)
+                throw "Could not extract rpm. $details"
             }
             return
         }
