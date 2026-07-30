@@ -37,7 +37,12 @@ function status(
   state: CoreStatus["state"],
   fields: Partial<CoreStatus> = {},
 ): CoreStatus {
-  return { state, capabilities: [], ...fields };
+  return {
+    state,
+    runtime_channel: "production",
+    capabilities: [],
+    ...fields,
+  };
 }
 
 function deferred<T>() {
@@ -71,6 +76,23 @@ describe("CoreHealth", () => {
 
     expect(await screen.findByText(title)).toBeInTheDocument();
   });
+
+  it.each([
+    ["development", "Development"],
+    ["production", "Production"],
+  ] as const)(
+    "renders the selected %s channel from backend status",
+    async (runtimeChannel, label) => {
+      vi.mocked(getCoreStatus).mockResolvedValue(
+        status("stopped", { runtime_channel: runtimeChannel }),
+      );
+
+      renderHealth();
+
+      expect(await screen.findByText("Runtime channel")).toBeInTheDocument();
+      expect(screen.getByText(label)).toBeInTheDocument();
+    },
+  );
 
   it("starts a stopped WokCore and refreshes its status", async () => {
     vi.mocked(getCoreStatus)

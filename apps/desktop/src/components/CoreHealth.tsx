@@ -61,6 +61,11 @@ const stateCopy: Record<
   },
 };
 
+const runtimeChannelCopy: Record<CoreStatus["runtime_channel"], string> = {
+  development: "Development",
+  production: "Production",
+};
+
 function formatPhase(phase: NonNullable<CoreStatus["phase"]>): string {
   return phase
     .split("_")
@@ -173,6 +178,10 @@ export function CoreHealth() {
         </div>
         <p className="health-summary">{copy.summary}</p>
         <dl className="health-meta">
+          <div>
+            <dt>Runtime channel</dt>
+            <dd>{runtimeChannelCopy[status.data.runtime_channel]}</dd>
+          </div>
           <div>
             <dt>Version</dt>
             <dd dir="ltr">

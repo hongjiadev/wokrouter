@@ -131,6 +131,7 @@ describe("ManagementPanel", () => {
     vi.clearAllMocks();
     vi.mocked(getCoreStatus).mockResolvedValue({
       state: "running",
+      runtime_channel: "production",
       version: "0.1.0",
       management_api_major: 1,
       capabilities,
@@ -198,6 +199,7 @@ describe("ManagementPanel", () => {
   it("shows only capability-backed management areas", async () => {
     vi.mocked(getCoreStatus).mockResolvedValue({
       state: "running",
+      runtime_channel: "production",
       capabilities: ["sessions.index.v1"],
     });
 

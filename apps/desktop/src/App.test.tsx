@@ -18,6 +18,7 @@ vi.mock("./control", () => ({
 beforeEach(() => {
   vi.mocked(getCoreStatus).mockResolvedValue({
     state: "running",
+    runtime_channel: "production",
     version: "0.1.0",
     management_api_major: 1,
     capabilities: [],

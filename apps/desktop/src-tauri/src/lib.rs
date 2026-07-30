@@ -1,35 +1,48 @@
 //! WokRouter desktop shell.
 
 mod control;
+mod runtime;
 mod wokcore;
 
-use control::{DesktopControl, DesktopControlError};
+use std::sync::Arc;
+
+use control::DesktopControl;
+use runtime::DesktopRuntimeState;
 use wokcore::ManagementState;
 use wokrouter_cli::commands::CoreStatus;
 
 struct DesktopState {
-    control: Result<DesktopControl, DesktopControlError>,
+    control: DesktopControl,
 }
 
 impl DesktopState {
-    fn new(control: Result<DesktopControl, DesktopControlError>) -> Self {
+    fn new(control: DesktopControl) -> Self {
         Self { control }
     }
 }
 
 async fn core_status_for(state: &DesktopState) -> Result<CoreStatus, String> {
-    let control = state.control.as_ref().map_err(|error| error.to_string())?;
-    control.status().await.map_err(|error| error.to_string())
+    state
+        .control
+        .status()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 async fn start_core_for(state: &DesktopState) -> Result<(), String> {
-    let control = state.control.as_ref().map_err(|error| error.to_string())?;
-    control.start().await.map_err(|error| error.to_string())
+    state
+        .control
+        .start()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 async fn stop_core_for(state: &DesktopState) -> Result<(), String> {
-    let control = state.control.as_ref().map_err(|error| error.to_string())?;
-    control.stop().await.map_err(|error| error.to_string())
+    state
+        .control
+        .stop()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -48,10 +61,11 @@ async fn stop_core(state: tauri::State<'_, DesktopState>) -> Result<(), String> 
 }
 
 pub fn run() -> tauri::Result<()> {
-    let state = DesktopState::new(DesktopControl::discover());
+    let runtime = Arc::new(DesktopRuntimeState::discover());
+    let state = DesktopState::new(DesktopControl::new(runtime.clone()));
     tauri::Builder::default()
         .manage(state)
-        .manage(ManagementState::discover())
+        .manage(ManagementState::discover(runtime))
         .invoke_handler(tauri::generate_handler![
             core_status,
             start_core,
@@ -72,26 +86,4 @@ pub fn run() -> tauri::Result<()> {
             wokcore::export_diagnostics,
         ])
         .run(tauri::generate_context!())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{DesktopState, core_status_for, start_core_for, stop_core_for};
-    use crate::control::DesktopControlError;
-
-    #[tokio::test]
-    async fn discovery_failure_maps_to_safe_recoverable_commands() {
-        let state = DesktopState::new(Err(DesktopControlError::Initialization));
-
-        let status_error = core_status_for(&state).await.unwrap_err();
-        let start_error = start_core_for(&state).await.unwrap_err();
-        let stop_error = stop_core_for(&state).await.unwrap_err();
-
-        assert_eq!(status_error, "Unable to initialize WokCore control.");
-        assert_eq!(start_error, "Unable to initialize WokCore control.");
-        assert_eq!(stop_error, "Unable to initialize WokCore control.");
-        assert!(!status_error.contains(['\\', '/']));
-        assert!(!start_error.contains(['\\', '/']));
-        assert!(!stop_error.contains(['\\', '/']));
-    }
 }

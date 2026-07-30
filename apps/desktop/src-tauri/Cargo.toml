@@ -33,3 +33,4 @@ tauri-build.workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 tempfile.workspace = true
+wokrouter-platform = { path = "../../../crates/wokrouter-platform", features = ["test-support"] }
