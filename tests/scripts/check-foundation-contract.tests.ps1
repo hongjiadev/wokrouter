@@ -849,6 +849,22 @@ async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, Platfor
             -Scenario "debug selector candidate retained only in stringify macro tokens"
     }
 
+    Invoke-Scenario -Name "debug selector must pass the environment candidate unchanged" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "    let candidate = development::candidate_from_environment();" `
+            -NewText @"
+    let candidate = development::candidate_from_environment();
+    let candidate = candidate.and(None);
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "candidate flow" `
+            -Scenario "debug selector discarding the environment candidate before selection"
+    }
+
     Invoke-Scenario -Name "development executable environment name cannot change" -Test {
         $root = New-ContractFixture
         Edit-FixtureFile `

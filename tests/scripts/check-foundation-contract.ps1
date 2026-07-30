@@ -1887,6 +1887,14 @@ else {
         -Source $debugSelectOnce.Body `
         -Pattern '(?m)^[ \t]*let[ \t]+candidate[ \t]*=[ \t]*development::candidate_from_environment\(\)[ \t]*;' `
         -Description "Debug select_once development candidate call"
+    $debugSelectOnceCandidateFlow = $debugSelectOnce.CodeBody -replace '\s', ''
+    if (
+        $debugSelectOnceCandidateFlow -ne
+        'letcandidate=development::candidate_from_environment();select_with_dependencies(paths,candidate,&crate::system::process_executable_matches,&probe_connection,&discover_wokcore_executable,).await'
+    ) {
+        Add-ContractFailure `
+            -Message "Debug select_once candidate flow must pass the environment candidate unchanged into select_with_dependencies."
+    }
 }
 if ($null -eq $releaseSelectOnce) {
     Add-ContractFailure `
