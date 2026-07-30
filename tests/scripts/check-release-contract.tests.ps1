@@ -140,22 +140,22 @@ try {
         $mutations = @(
             @{
                 Path = "Cargo.toml"
-                Old = "[workspace.package]`nversion = `"0.1.3`""
+                Old = "[workspace.package]`nversion = `"0.1.4`""
                 New = "[workspace.package]`nversion = `"0.1.0`""
             },
             @{
                 Path = "apps/desktop/package.json"
-                Old = '  "version": "0.1.3",'
+                Old = '  "version": "0.1.4",'
                 New = '  "version": "0.1.0",'
             },
             @{
                 Path = "apps/desktop/src-tauri/tauri.conf.json"
-                Old = '  "version": "0.1.3",'
+                Old = '  "version": "0.1.4",'
                 New = '  "version": "0.1.0",'
             },
             @{
                 Path = "Cargo.lock"
-                Old = "[[package]]`nname = `"wokrouter-cli`"`nversion = `"0.1.3`""
+                Old = "[[package]]`nname = `"wokrouter-cli`"`nversion = `"0.1.4`""
                 New = "[[package]]`nname = `"wokrouter-cli`"`nversion = `"0.1.0`""
             }
         )
