@@ -314,11 +314,192 @@ function Get-RustCodeView {
             -Message "$Description must have balanced braces: unclosed body."
         return $null
     }
+    $delimiterStack = [System.Collections.Generic.Stack[char]]::new()
+    for ($index = 0; $index -lt $code.Length; $index += 1) {
+        $current = $code[$index]
+        if ($current -eq "(" -or $current -eq "[" -or $current -eq "{") {
+            $delimiterStack.Push($current)
+            continue
+        }
+        if ($current -ne ")" -and $current -ne "]" -and $current -ne "}") {
+            continue
+        }
+        if ($delimiterStack.Count -eq 0) {
+            Add-ContractFailure `
+                -Message "$Description must have balanced Rust delimiters."
+            return $null
+        }
+        $opening = $delimiterStack.Pop()
+        if (
+            ($current -eq ")" -and $opening -ne "(") -or
+            ($current -eq "]" -and $opening -ne "[") -or
+            ($current -eq "}" -and $opening -ne "{")
+        ) {
+            Add-ContractFailure `
+                -Message "$Description must have balanced Rust delimiters."
+            return $null
+        }
+    }
+    if ($delimiterStack.Count -ne 0) {
+        Add-ContractFailure `
+            -Message "$Description must have balanced Rust delimiters."
+        return $null
+    }
 
     return [pscustomobject]@{
         Code = $code
         CommentStripped = -join $commentStrippedView
     }
+}
+
+function Get-RustOwnershipAtIndex {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Structure,
+
+        [Parameter(Mandatory)]
+        [int]$Index
+    )
+
+    $braceDepth = 0
+    $parenthesisDepth = 0
+    $bracketDepth = 0
+    $statementStart = $true
+    for ($cursor = 0; $cursor -lt $Index; $cursor += 1) {
+        $current = $Structure[$cursor]
+        if ([char]::IsWhiteSpace($current)) {
+            continue
+        }
+
+        $allDepthsZero = (
+            $braceDepth -eq 0 -and
+            $parenthesisDepth -eq 0 -and
+            $bracketDepth -eq 0
+        )
+        if ($current -eq "{") {
+            if ($allDepthsZero) {
+                $statementStart = $false
+            }
+            $braceDepth += 1
+            continue
+        }
+        if ($current -eq "(") {
+            if ($allDepthsZero) {
+                $statementStart = $false
+            }
+            $parenthesisDepth += 1
+            continue
+        }
+        if ($current -eq "[") {
+            if ($allDepthsZero) {
+                $statementStart = $false
+            }
+            $bracketDepth += 1
+            continue
+        }
+        if ($current -eq "}") {
+            $braceDepth -= 1
+            if (
+                $braceDepth -eq 0 -and
+                $parenthesisDepth -eq 0 -and
+                $bracketDepth -eq 0
+            ) {
+                $statementStart = $true
+            }
+            continue
+        }
+        if ($current -eq ")") {
+            $parenthesisDepth -= 1
+            continue
+        }
+        if ($current -eq "]") {
+            $bracketDepth -= 1
+            continue
+        }
+        if ($allDepthsZero) {
+            if ($current -eq ";") {
+                $statementStart = $true
+            }
+            else {
+                $statementStart = $false
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        AllDelimiterDepthsZero = (
+            $braceDepth -eq 0 -and
+            $parenthesisDepth -eq 0 -and
+            $bracketDepth -eq 0
+        )
+        StatementStart = $statementStart
+    }
+}
+
+function Get-RustOwnedPatternMatches {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$Pattern,
+
+        [Parameter(Mandatory)]
+        [string]$Description,
+
+        [switch]$RequireStatementStart
+    )
+
+    $codeView = Get-RustCodeView -Source $Source -Description $Description
+    if ($null -eq $codeView) {
+        return @()
+    }
+    $matches = @([regex]::Matches(
+        $codeView.Code,
+        $Pattern,
+        [System.Text.RegularExpressions.RegexOptions]::Multiline
+    ))
+    $ownedMatches = @()
+    foreach ($match in $matches) {
+        $ownership = Get-RustOwnershipAtIndex `
+            -Structure $codeView.Code `
+            -Index $match.Index
+        if (
+            $ownership.AllDelimiterDepthsZero -and
+            (-not $RequireStatementStart -or $ownership.StatementStart)
+        ) {
+            $ownedMatches += $match
+        }
+    }
+    return @($ownedMatches)
+}
+
+function Get-UniqueDirectStatementIndex {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$Pattern,
+
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $matches = @(Get-RustOwnedPatternMatches `
+        -Source $Source `
+        -Pattern $Pattern `
+        -Description $Description `
+        -RequireStatementStart)
+    if ($matches.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "$Description must occur as one direct statement; found $($matches.Count)."
+        return -1
+    }
+    return $matches[0].Index
 }
 
 function Get-UniqueBracedItem {
@@ -333,7 +514,11 @@ function Get-UniqueBracedItem {
         [Parameter(Mandatory)]
         [string]$Description,
 
-        [switch]$TopLevel
+        [switch]$TopLevel,
+
+        [switch]$DirectStatement,
+
+        [int]$MatchOrdinal = -1
     )
 
     $codeView = Get-RustCodeView -Source $Source -Description $Description
@@ -346,31 +531,37 @@ function Get-UniqueBracedItem {
         $SignaturePattern,
         [System.Text.RegularExpressions.RegexOptions]::Multiline
     ))
-    if ($TopLevel) {
+    if ($TopLevel -or $DirectStatement) {
         $topLevelMatches = @()
         foreach ($candidateMatch in $matches) {
-            $depth = 0
-            for ($index = 0; $index -lt $candidateMatch.Index; $index += 1) {
-                if ($structure[$index] -eq "{") {
-                    $depth += 1
-                }
-                elseif ($structure[$index] -eq "}") {
-                    $depth -= 1
-                }
-            }
-            if ($depth -eq 0) {
+            $ownership = Get-RustOwnershipAtIndex `
+                -Structure $structure `
+                -Index $candidateMatch.Index
+            if (
+                $ownership.AllDelimiterDepthsZero -and
+                (-not $DirectStatement -or $ownership.StatementStart)
+            ) {
                 $topLevelMatches += $candidateMatch
             }
         }
         $matches = @($topLevelMatches)
     }
-    if ($matches.Count -ne 1) {
+    if ($MatchOrdinal -ge 0) {
+        if ($MatchOrdinal -ge $matches.Count) {
+            Add-ContractFailure `
+                -Message "$Description match ordinal $MatchOrdinal is unavailable; found $($matches.Count)."
+            return $null
+        }
+        $match = $matches[$MatchOrdinal]
+    }
+    elseif ($matches.Count -ne 1) {
         Add-ContractFailure `
             -Message "$Description must remain uniquely identifiable; found $($matches.Count)."
         return $null
     }
-
-    $match = $matches[0]
+    else {
+        $match = $matches[0]
+    }
     $parenthesisDepth = 0
     $bracketDepth = 0
     for (
@@ -1616,26 +1807,92 @@ if ($null -ne $developmentModule) {
     }
 }
 
-$debugSelectOnce = Get-UniqueBracedItem `
+$selectOnceSignaturePattern = (
+    '(?m)^[ \t]*async[ \t]+fn[ \t]+select_once\b'
+)
+$selectOnceMatches = @(Get-RustOwnedPatternMatches `
     -Source $runtimeSelector `
-    -SignaturePattern '(?ms)(?<attributes>^[ \t]*#\[cfg\([ \t]*debug_assertions[ \t]*\)\][ \t]*\r?\n(?:(?:^[ \t]*#\[[^\r\n]*\][ \t]*\r?\n)|(?:^[ \t]*\r?\n))*)^[ \t]*async[ \t]+fn[ \t]+select_once[ \t]*\([^)]*\)[ \t]*->[^{]+' `
-    -Description "Debug select_once" `
-    -TopLevel
-if ($null -ne $debugSelectOnce) {
-    $debugSelectOnceTopLevel = Get-TopLevelRustBody `
-        -Body $debugSelectOnce.Body
-    $null = Get-UniquePatternIndex `
-        -Source $debugSelectOnceTopLevel `
+    -Pattern $selectOnceSignaturePattern `
+    -Description "Top-level select_once functions")
+$debugSelectOnce = $null
+$releaseSelectOnce = $null
+if ($selectOnceMatches.Count -ne 2) {
+    Add-ContractFailure `
+        -Message "WokCore runtime selector must contain exactly two top-level select_once functions; found $($selectOnceMatches.Count)."
+}
+else {
+    for ($ordinal = 0; $ordinal -lt $selectOnceMatches.Count; $ordinal += 1) {
+        $selectOnce = Get-UniqueBracedItem `
+            -Source $runtimeSelector `
+            -SignaturePattern $selectOnceSignaturePattern `
+            -Description "Top-level select_once function $ordinal" `
+            -TopLevel `
+            -MatchOrdinal $ordinal
+        if ($null -eq $selectOnce) {
+            continue
+        }
+        $attributes = Get-RustOuterAttributesBeforeItem `
+            -Source $runtimeSelector `
+            -ItemStart $selectOnce.SignatureIndex `
+            -Description "Top-level select_once selector attributes"
+        if ($null -eq $attributes) {
+            continue
+        }
+
+        $selectorCfgAttributes = @()
+        foreach ($attribute in $attributes.Items) {
+            if (
+                $attribute.Code -match
+                '(?<![A-Za-z0-9_])(?:cfg|cfg_attr)(?![A-Za-z0-9_])'
+            ) {
+                $selectorCfgAttributes += $attribute
+            }
+        }
+        if ($selectorCfgAttributes.Count -ne 1) {
+            Add-ContractFailure `
+                -Message "Each select_once selector attributes set must contain exactly one cfg and no cfg_attr."
+            continue
+        }
+        $normalizedCfg = $selectorCfgAttributes[0].Code -replace '\s', ''
+        if ($normalizedCfg -eq '#[cfg(debug_assertions)]') {
+            if ($null -ne $debugSelectOnce) {
+                Add-ContractFailure `
+                    -Message "Debug select_once selector attributes must identify exactly one function."
+            }
+            else {
+                $debugSelectOnce = $selectOnce
+            }
+        }
+        elseif ($normalizedCfg -eq '#[cfg(not(debug_assertions))]') {
+            if ($null -ne $releaseSelectOnce) {
+                Add-ContractFailure `
+                    -Message "Release select_once selector attributes must identify exactly one function."
+            }
+            else {
+                $releaseSelectOnce = $selectOnce
+            }
+        }
+        else {
+            Add-ContractFailure `
+                -Message "select_once selector attributes must be exactly cfg(debug_assertions) or cfg(not(debug_assertions))."
+        }
+    }
+}
+if ($null -eq $debugSelectOnce) {
+    Add-ContractFailure `
+        -Message "Debug select_once selector attributes must identify exactly one function."
+}
+else {
+    $null = Get-UniqueDirectStatementIndex `
+        -Source $debugSelectOnce.Body `
         -Pattern '(?m)^[ \t]*let[ \t]+candidate[ \t]*=[ \t]*development::candidate_from_environment\(\)[ \t]*;' `
         -Description "Debug select_once development candidate call"
 }
-
-$releaseSelectOnce = Get-UniqueBracedItem `
-    -Source $runtimeSelector `
-    -SignaturePattern '(?ms)(?<attributes>^[ \t]*#\[cfg\([ \t]*not\([ \t]*debug_assertions[ \t]*\)[ \t]*\)\][ \t]*\r?\n(?:(?:^[ \t]*#\[[^\r\n]*\][ \t]*\r?\n)|(?:^[ \t]*\r?\n))*)^[ \t]*async[ \t]+fn[ \t]+select_once[ \t]*\([^)]*\)[ \t]*->[^{]+' `
-    -Description "Release select_once" `
-    -TopLevel
-if ($null -ne $releaseSelectOnce) {
+if ($null -eq $releaseSelectOnce) {
+    Add-ContractFailure `
+        -Message "Release select_once selector attributes must identify exactly one function."
+}
+else {
     $releaseSelectOnceTopLevel = Get-TopLevelRustBody `
         -Body $releaseSelectOnce.Body
     if (
@@ -1660,35 +1917,38 @@ $dependencySelector = Get-UniqueBracedItem `
     -Description "select_with_dependencies" `
     -TopLevel
 if ($null -ne $dependencySelector) {
-    $selectorTopLevel = Get-TopLevelRustBody -Body $dependencySelector.Body
-    $timeoutConstants = [regex]::Matches(
-        $selectorTopLevel,
-        '(?m)^[ \t]*const[ \t]+DEVELOPMENT_TIMEOUT[ \t]*:[ \t]*Duration[ \t]*=[ \t]*Duration::from_secs\([ \t]*5[ \t]*\)[ \t]*;'
-    )
+    $timeoutConstants = @(Get-RustOwnedPatternMatches `
+        -Source $dependencySelector.Body `
+        -Pattern '(?m)^[ \t]*const[ \t]+DEVELOPMENT_TIMEOUT[ \t]*:[ \t]*Duration[ \t]*=[ \t]*Duration::from_secs\([ \t]*5[ \t]*\)[ \t]*;' `
+        -Description "select_with_dependencies five-second deadline constant" `
+        -RequireStatementStart)
     if ($timeoutConstants.Count -ne 1) {
         Add-ContractFailure `
             -Message "select_with_dependencies named constants must define the five-second deadline exactly once."
     }
-    $retryConstants = [regex]::Matches(
-        $selectorTopLevel,
-        '(?m)^[ \t]*const[ \t]+DEVELOPMENT_RETRY_DELAY[ \t]*:[ \t]*Duration[ \t]*=[ \t]*Duration::from_millis\([ \t]*50[ \t]*\)[ \t]*;'
-    )
+    $retryConstants = @(Get-RustOwnedPatternMatches `
+        -Source $dependencySelector.Body `
+        -Pattern '(?m)^[ \t]*const[ \t]+DEVELOPMENT_RETRY_DELAY[ \t]*:[ \t]*Duration[ \t]*=[ \t]*Duration::from_millis\([ \t]*50[ \t]*\)[ \t]*;' `
+        -Description "select_with_dependencies retry interval constant" `
+        -RequireStatementStart)
     if ($retryConstants.Count -ne 1) {
         Add-ContractFailure `
             -Message "select_with_dependencies named constants must define the 50-ms retry interval exactly once."
     }
-    $deadlineReferences = [regex]::Matches(
-        $selectorTopLevel,
-        '(?m)^[ \t]*let[ \t]+deadline[ \t]*=[ \t]*Instant::now\(\)[ \t]*\+[ \t]*DEVELOPMENT_TIMEOUT[ \t]*;'
-    )
+    $deadlineReferences = @(Get-RustOwnedPatternMatches `
+        -Source $dependencySelector.Body `
+        -Pattern '(?m)^[ \t]*let[ \t]+deadline[ \t]*=[ \t]*Instant::now\(\)[ \t]*\+[ \t]*DEVELOPMENT_TIMEOUT[ \t]*;' `
+        -Description "select_with_dependencies deadline constant use" `
+        -RequireStatementStart)
     if ($deadlineReferences.Count -ne 1) {
         Add-ContractFailure `
             -Message "select_with_dependencies constant references must use DEVELOPMENT_TIMEOUT for the deadline."
     }
-    $candidateBindings = [regex]::Matches(
-        $selectorTopLevel,
-        '(?m)^[ \t]*let[ \t]+Some\(candidate\)[ \t]*=[ \t]*candidate[ \t]+else[ \t]*'
-    )
+    $candidateBindings = @(Get-RustOwnedPatternMatches `
+        -Source $dependencySelector.Body `
+        -Pattern '(?m)^[ \t]*let[ \t]+Some\(candidate\)[ \t]*=[ \t]*candidate[ \t]+else[ \t]*' `
+        -Description "select_with_dependencies candidate binding" `
+        -RequireStatementStart)
     if ($candidateBindings.Count -ne 1) {
         Add-ContractFailure `
             -Message "select_with_dependencies candidate must be bound on the active top-level path."
@@ -1698,35 +1958,29 @@ if ($null -ne $dependencySelector) {
         -Source $dependencySelector.Body `
         -SignaturePattern '(?m)^[ \t]*loop[ \t]*' `
         -Description "select_with_dependencies selection loop" `
-        -TopLevel
+        -DirectStatement
     if ($null -ne $selectionLoop) {
-        $loopTopLevel = Get-TopLevelRustBody -Body $selectionLoop.Body
-        $retryReferences = [regex]::Matches(
-            $loopTopLevel,
-            '(?m)^[ \t]*tokio::time::sleep\([ \t]*DEVELOPMENT_RETRY_DELAY\.min\([ \t]*deadline[ \t]*-[ \t]*now[ \t]*\)[ \t]*\)\.await[ \t]*;'
-        )
-        if ($retryReferences.Count -ne 1) {
-            Add-ContractFailure `
-                -Message "select_with_dependencies constant references must use DEVELOPMENT_RETRY_DELAY for sleep."
-        }
+        $null = Get-UniqueDirectStatementIndex `
+            -Source $selectionLoop.Body `
+            -Pattern '(?m)^[ \t]*tokio::time::sleep\([ \t]*DEVELOPMENT_RETRY_DELAY\.min\([ \t]*deadline[ \t]*-[ \t]*now[ \t]*\)[ \t]*\)\.await[ \t]*;' `
+            -Description "select_with_dependencies constant references must use DEVELOPMENT_RETRY_DELAY for sleep"
 
         $selectionIf = Get-UniqueBracedItem `
             -Source $selectionLoop.Body `
             -SignaturePattern '(?ms)^[ \t]*if[ \t]+let[ \t]+Some\(process_id\)[ \t]*=[ \t]*client\.discovered_process_id\(\)[ \t\r\n]*&&[ \t\r\n]*process_matches\([ \t]*process_id[ \t]*,[ \t]*&candidate[ \t]*\)[ \t]*' `
             -Description "select_with_dependencies selection loop initial process identity check" `
-            -TopLevel
+            -DirectStatement
         if ($null -ne $selectionIf) {
-            $selectionBody = Get-TopLevelRustBody -Body $selectionIf.Body
-            $boundClientIndex = Get-UniquePatternIndex `
-                -Source $selectionBody `
+            $boundClientIndex = Get-UniqueDirectStatementIndex `
+                -Source $selectionIf.Body `
                 -Pattern 'let[ \t]+bound[ \t]*=[ \t]*client\.bound_to_process\([ \t]*process_id[ \t]*\)[ \t]*;' `
                 -Description "select_with_dependencies selection loop in order PID-bound client"
-            $connectionIndex = Get-UniquePatternIndex `
-                -Source $selectionBody `
+            $connectionIndex = Get-UniqueDirectStatementIndex `
+                -Source $selectionIf.Body `
                 -Pattern '(?s)let[ \t]+Ok\(connection\)[ \t\r\n]*=[ \t\r\n]*tokio::time::timeout_at\([ \t\r\n]*deadline[ \t\r\n]*,[ \t\r\n]*connection_probe\([ \t\r\n]*bound\.clone\(\)[ \t\r\n]*\)[ \t\r\n]*\)\.await' `
                 -Description "select_with_dependencies selection loop in order deadline-bound connection probe"
-            $secondIdentityIndex = Get-UniquePatternIndex `
-                -Source $selectionBody `
+            $secondIdentityIndex = Get-UniqueDirectStatementIndex `
+                -Source $selectionIf.Body `
                 -Pattern 'let[ \t]+still_matches[ \t]*=[ \t]*process_matches\([ \t]*process_id[ \t]*,[ \t]*&candidate[ \t]*\)[ \t]*;' `
                 -Description "select_with_dependencies selection loop in order post-connection process identity check"
 

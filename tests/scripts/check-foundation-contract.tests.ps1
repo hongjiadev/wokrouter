@@ -679,6 +679,120 @@ async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, Platfor
             -Scenario "release selector accessing the development module"
     }
 
+    Invoke-Scenario -Name "release selector cannot hide behind a disabled exact-cfg decoy" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+#[cfg(not(debug_assertions))]
+async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
+    select_production(paths, &discover_wokcore_executable)
+}
+"@ `
+            -NewText @"
+#[cfg(not(debug_assertions))]
+#[cfg(any())]
+async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
+    select_production(paths, &discover_wokcore_executable)
+}
+
+#[cfg(all(not(debug_assertions), not(any())))]
+async fn select_once(_paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
+    panic!("active release selector is wrong")
+}
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "select_once" `
+            -Scenario "disabled exact release decoy with an alternate active selector"
+    }
+
+    Invoke-Scenario -Name "debug selector cannot hide behind a disabled exact-cfg decoy" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+#[cfg(debug_assertions)]
+async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
+    let candidate = development::candidate_from_environment();
+    select_with_dependencies(
+        paths,
+        candidate,
+        &crate::system::process_executable_matches,
+        &probe_connection,
+        &discover_wokcore_executable,
+    )
+    .await
+}
+"@ `
+            -NewText @"
+#[cfg(debug_assertions)]
+#[cfg(any())]
+async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
+    let candidate = development::candidate_from_environment();
+    select_with_dependencies(
+        paths,
+        candidate,
+        &crate::system::process_executable_matches,
+        &probe_connection,
+        &discover_wokcore_executable,
+    )
+    .await
+}
+
+#[cfg(all(debug_assertions, not(any())))]
+async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
+    select_production(paths, &discover_wokcore_executable)
+}
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "select_once" `
+            -Scenario "disabled exact debug decoy with an alternate active selector"
+    }
+
+    Invoke-Scenario -Name "debug selector cannot carry an additional cfg" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+#[cfg(debug_assertions)]
+async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
+"@ `
+            -NewText @"
+#[cfg(debug_assertions)]
+#[cfg(any())]
+async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "selector attributes" `
+            -Scenario "debug selector disabled by an additional cfg"
+    }
+
+    Invoke-Scenario -Name "release selector cannot carry cfg_attr" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+#[cfg(not(debug_assertions))]
+async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
+"@ `
+            -NewText @"
+#[cfg(not(debug_assertions))]
+#[cfg_attr(not(any()), cfg(any()))]
+async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "selector attributes" `
+            -Scenario "release selector disabled through cfg_attr"
+    }
+
     Invoke-Scenario -Name "development environment lookup cannot hide in a nested closure" -Test {
         $root = New-ContractFixture
         Edit-FixtureFile `
@@ -715,6 +829,24 @@ async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, Platfor
             -Root $root `
             -ExpectedText "development candidate call" `
             -Scenario "debug selector candidate call retained only in a nested closure"
+    }
+
+    Invoke-Scenario -Name "debug selector candidate cannot survive only in macro tokens" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "    let candidate = development::candidate_from_environment();" `
+            -NewText @"
+    let candidate = None;
+    let _inert = stringify!(
+        let candidate = development::candidate_from_environment();
+    );
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "development candidate call" `
+            -Scenario "debug selector candidate retained only in stringify macro tokens"
     }
 
     Invoke-Scenario -Name "development executable environment name cannot change" -Test {
@@ -1018,6 +1150,66 @@ static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
             -Root $root `
             -ExpectedText "initial process identity check" `
             -Scenario "identity branch retained only in an unused loop closure"
+    }
+
+    Invoke-Scenario -Name "selector loop cannot survive as an async closure expression" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "    loop {" `
+            -NewText @"
+    let _inert = async ||
+        loop {
+"@
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+    }
+    select_production(paths, discover)
+"@ `
+            -NewText @"
+        };
+    select_production(paths, discover)
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "selection loop" `
+            -Scenario "complete selector loop retained as an uncalled async closure expression"
+    }
+
+    Invoke-Scenario -Name "identity branch cannot survive as an async closure expression" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+    loop {
+        if let Some(process_id) = client.discovered_process_id()
+"@ `
+            -NewText @"
+    loop {
+        let _inert = async ||
+            if let Some(process_id) = client.discovered_process_id()
+"@
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+        }
+
+        let now = Instant::now();
+"@ `
+            -NewText @"
+            };
+
+        let now = Instant::now();
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "initial process identity check" `
+            -Scenario "identity branch retained as an uncalled async closure expression"
     }
 
     Invoke-Scenario -Name "development connection probe must remain deadline-bound" -Test {
