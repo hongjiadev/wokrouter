@@ -17,6 +17,11 @@ $fixtureBase = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).Tr
 function New-ContractFixture {
     $root = Join-Path ([System.IO.Path]::GetTempPath()) ("wokrouter-contract-" + [guid]::NewGuid())
     $null = New-Item -ItemType Directory -Path (Join-Path $root ".github/workflows") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/cli/src/commands") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri/src") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-platform/src") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-platform/tests") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "docs/operations") -Force
     Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot ".github/workflows/ci.yml") `
@@ -27,8 +32,50 @@ function New-ContractFixture {
     Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "docs/operations/development.md") `
         -Destination (Join-Path $root "docs/operations/development.md")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/cli/src/commands/mod.rs") `
+        -Destination (Join-Path $root "apps/cli/src/commands/mod.rs")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src/control.ts") `
+        -Destination (Join-Path $root "apps/desktop/src/control.ts")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/src/control.rs") `
+        -Destination (Join-Path $root "apps/desktop/src-tauri/src/control.rs")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "crates/wokrouter-platform/src/wokcore_runtime.rs") `
+        -Destination (Join-Path $root "crates/wokrouter-platform/src/wokcore_runtime.rs")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "crates/wokrouter-platform/tests/wokcore_runtime.rs") `
+        -Destination (Join-Path $root "crates/wokrouter-platform/tests/wokcore_runtime.rs")
     $fixtureRoots.Add($root)
     return $root
+}
+
+function Edit-FixtureFile {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Root,
+
+        [Parameter(Mandatory)]
+        [string]$RelativePath,
+
+        [Parameter(Mandatory)]
+        [string]$OldText,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$NewText
+    )
+
+    $path = Join-Path $Root $RelativePath
+    $content = Get-Content -LiteralPath $path -Raw -Encoding UTF8
+    $content = $content.Replace("`r`n", "`n")
+    $OldText = $OldText.Replace("`r`n", "`n")
+    $NewText = $NewText.Replace("`r`n", "`n")
+    if (-not $content.Contains($OldText)) {
+        throw "Fixture mutation source was not found in ${RelativePath}: $OldText"
+    }
+    Set-Content -LiteralPath $path -Value $content.Replace($OldText, $NewText) -Encoding UTF8
 }
 
 function Edit-Workflow {
@@ -163,6 +210,169 @@ try {
     Invoke-Scenario -Name "real workflow satisfies the structural contract" -Test {
         $root = New-ContractFixture
         Assert-ContractPasses -Root $root -Scenario "real workflow fixture"
+    }
+
+    Invoke-Scenario -Name "development environment parsing must remain debug-only" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+#[cfg(debug_assertions)]
+mod development {
+"@ `
+            -NewText @"
+mod development {
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "debug_assertions" `
+            -Scenario "missing development debug gate"
+    }
+
+    Invoke-Scenario -Name "development executable environment name cannot change" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText '"WOKROUTER_DEV_WOKCORE_EXECUTABLE"' `
+            -NewText '"WOKROUTER_WOKCORE_EXECUTABLE"'
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "WOKROUTER_DEV_WOKCORE_EXECUTABLE" `
+            -Scenario "wrong development executable environment name"
+    }
+
+    Invoke-Scenario -Name "development selection deadline must remain five seconds" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "Duration::from_secs(5)" `
+            -NewText "Duration::from_secs(10)"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "five-second" `
+            -Scenario "wrong development selection deadline"
+    }
+
+    Invoke-Scenario -Name "development retry interval must remain 50 milliseconds" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "Duration::from_millis(50)" `
+            -NewText "Duration::from_millis(100)"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "50-ms" `
+            -Scenario "wrong development retry interval"
+    }
+
+    Invoke-Scenario -Name "IDE-managed lifecycle error code cannot change" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src-tauri/src/control.rs" `
+            -OldText '#[error("development_runtime_managed_by_ide")]' `
+            -NewText '#[error("development_runtime_unavailable")]'
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "development_runtime_managed_by_ide" `
+            -Scenario "missing IDE-managed lifecycle contract"
+    }
+
+    Invoke-Scenario -Name "runtime status must retain the runtime channel" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/commands/mod.rs" `
+            -OldText "    pub runtime_channel: WokCoreRuntimeChannel," `
+            -NewText "    pub channel: WokCoreRuntimeChannel,"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "runtime_channel" `
+            -Scenario "missing runtime channel"
+    }
+
+    Invoke-Scenario -Name "development selector must compare process identity" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "            && process_matches(process_id, &candidate)" `
+            -NewText "            && true"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "process identity" `
+            -Scenario "missing process identity comparison"
+    }
+
+    Invoke-Scenario -Name "development selector must recheck process identity after connecting" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "            let still_matches = process_matches(process_id, &candidate);" `
+            -NewText "            let still_matches = true;"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "process identity" `
+            -Scenario "missing process identity recheck"
+    }
+
+    Invoke-Scenario -Name "development client must remain bound to the discovered PID" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "            let bound = client.bound_to_process(process_id);" `
+            -NewText "            let bound = client.clone();"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "PID-bound" `
+            -Scenario "unbound development client"
+    }
+
+    Invoke-Scenario -Name "development no-switch regression test cannot be removed" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/tests/wokcore_runtime.rs" `
+            -OldText "async fn a_selected_development_session_never_switches_to_production()" `
+            -NewText "async fn selected_development_runtime_can_switch_to_production()"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "no-switch" `
+            -Scenario "missing development no-switch regression"
+    }
+
+    foreach ($privateField in @("pid", "path", "executable")) {
+        Invoke-Scenario -Name "Rust runtime status cannot expose $privateField" -Test {
+            $root = New-ContractFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "apps/cli/src/commands/mod.rs" `
+                -OldText "pub struct CoreStatus {`n    pub state: CoreUiState," `
+                -NewText "pub struct CoreStatus {`n    pub ${privateField}: Option<String>,`n    pub state: CoreUiState,"
+            Assert-ContractRejects `
+                -Root $root `
+                -ExpectedText "private runtime field" `
+                -Scenario "Rust status exposing $privateField"
+        }
+
+        Invoke-Scenario -Name "frontend runtime status cannot expose $privateField" -Test {
+            $root = New-ContractFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "apps/desktop/src/control.ts" `
+                -OldText "  .object({`n    state: z.enum([" `
+                -NewText "  .object({`n    ${privateField}: z.string().optional(),`n    state: z.enum(["
+            Assert-ContractRejects `
+                -Root $root `
+                -ExpectedText "private runtime field" `
+                -Scenario "frontend status exposing $privateField"
+        }
     }
 
     Invoke-Scenario -Name "macOS arm64 must use the macos-14 runner" -Test {

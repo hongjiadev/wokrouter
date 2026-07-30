@@ -13,6 +13,11 @@ $rootPath = (Resolve-Path -LiteralPath $Root).Path
 $workflowPath = Join-Path $rootPath ".github/workflows/ci.yml"
 $denyPath = Join-Path $rootPath "deny.toml"
 $developmentPath = Join-Path $rootPath "docs/operations/development.md"
+$runtimeSelectorPath = Join-Path $rootPath "crates/wokrouter-platform/src/wokcore_runtime.rs"
+$runtimeSelectorTestsPath = Join-Path $rootPath "crates/wokrouter-platform/tests/wokcore_runtime.rs"
+$commandModelPath = Join-Path $rootPath "apps/cli/src/commands/mod.rs"
+$desktopControlPath = Join-Path $rootPath "apps/desktop/src-tauri/src/control.rs"
+$frontendControlPath = Join-Path $rootPath "apps/desktop/src/control.ts"
 $failures = [System.Collections.Generic.List[string]]::new()
 
 function Add-ContractFailure {
@@ -485,6 +490,11 @@ $workflowLines = @(Get-Content -LiteralPath $workflowPath -Encoding UTF8)
 $workflow = $workflowLines -join "`n"
 $deny = Get-Content -LiteralPath $denyPath -Raw -Encoding UTF8
 $development = Get-Content -LiteralPath $developmentPath -Raw -Encoding UTF8
+$runtimeSelector = Get-Content -LiteralPath $runtimeSelectorPath -Raw -Encoding UTF8
+$runtimeSelectorTests = Get-Content -LiteralPath $runtimeSelectorTestsPath -Raw -Encoding UTF8
+$commandModel = Get-Content -LiteralPath $commandModelPath -Raw -Encoding UTF8
+$desktopControl = Get-Content -LiteralPath $desktopControlPath -Raw -Encoding UTF8
+$frontendControl = Get-Content -LiteralPath $frontendControlPath -Raw -Encoding UTF8
 $jobs = Get-WorkflowJobs -Lines $workflowLines
 
 $requiredJobs = @(
@@ -871,6 +881,93 @@ if (
 if ($development -notmatch "cargo deny --version") {
     Add-ContractFailure `
         -Message "Development docs must require cargo-deny version verification."
+}
+if (
+    $runtimeSelector -notmatch
+    '(?m)^#\[cfg\(debug_assertions\)\]\r?\nmod development \{'
+) {
+    Add-ContractFailure `
+        -Message "WOKROUTER_DEV_WOKCORE_EXECUTABLE parsing must remain behind debug_assertions."
+}
+if ($runtimeSelector -notmatch '"WOKROUTER_DEV_WOKCORE_EXECUTABLE"') {
+    Add-ContractFailure `
+        -Message "Development selection must use WOKROUTER_DEV_WOKCORE_EXECUTABLE."
+}
+if ($runtimeSelector -notmatch 'Duration::from_secs\(5\)') {
+    Add-ContractFailure `
+        -Message "Development selection must retain its five-second deadline."
+}
+if ($runtimeSelector -notmatch 'Duration::from_millis\(50\)') {
+    Add-ContractFailure `
+        -Message "Development selection must retain its 50-ms retry interval."
+}
+if (
+    $runtimeSelector -notmatch
+    '&&\s*process_matches\(process_id,\s*&candidate\)'
+) {
+    Add-ContractFailure `
+        -Message "Development selection must compare the discovered process identity."
+}
+if (
+    $runtimeSelector -notmatch
+    'let still_matches = process_matches\(process_id,\s*&candidate\);'
+) {
+    Add-ContractFailure `
+        -Message "Development selection must recheck process identity after connecting."
+}
+if (
+    $runtimeSelector -notmatch
+    'let bound = client\.bound_to_process\(process_id\);'
+) {
+    Add-ContractFailure `
+        -Message "Development selection must retain a PID-bound client."
+}
+if (
+    $runtimeSelectorTests -notmatch
+    'async fn a_selected_development_session_never_switches_to_production\(\)'
+) {
+    Add-ContractFailure `
+        -Message "Development selection must retain its no-switch regression test."
+}
+if ($desktopControl -notmatch 'development_runtime_managed_by_ide') {
+    Add-ContractFailure `
+        -Message "Desktop lifecycle errors must retain development_runtime_managed_by_ide."
+}
+
+$rustStatusMatch = [regex]::Match(
+    $commandModel,
+    '(?s)pub struct CoreStatus\s*\{(?<body>.*?)\r?\n\}'
+)
+if (-not $rustStatusMatch.Success) {
+    Add-ContractFailure -Message "Rust runtime status model must remain identifiable."
+}
+else {
+    $rustStatus = $rustStatusMatch.Groups["body"].Value
+    if ($rustStatus -notmatch '(?m)^\s*pub runtime_channel\s*:') {
+        Add-ContractFailure -Message "Rust runtime status must expose runtime_channel."
+    }
+    if ($rustStatus -match '(?m)^\s*pub (pid|path|executable)\s*:') {
+        Add-ContractFailure `
+            -Message "Rust runtime status must not expose a private runtime field."
+    }
+}
+
+$frontendStatusMatch = [regex]::Match(
+    $frontendControl,
+    '(?s)const coreStatusSchema\s*=\s*z\s*\.object\(\{(?<body>.*?)\}\)\s*\.strict\(\);'
+)
+if (-not $frontendStatusMatch.Success) {
+    Add-ContractFailure -Message "Frontend runtime status model must remain identifiable."
+}
+else {
+    $frontendStatus = $frontendStatusMatch.Groups["body"].Value
+    if ($frontendStatus -notmatch '(?m)^\s*runtime_channel\s*:') {
+        Add-ContractFailure -Message "Frontend runtime status must expose runtime_channel."
+    }
+    if ($frontendStatus -match '(?m)^\s*(pid|path|executable)\s*:') {
+        Add-ContractFailure `
+            -Message "Frontend runtime status must not expose a private runtime field."
+    }
 }
 
 if ($failures.Count -gt 0) {

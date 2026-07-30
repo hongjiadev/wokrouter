@@ -50,6 +50,48 @@ Install the locked frontend dependency graph with:
 pnpm --dir apps/desktop install --frozen-lockfile
 ```
 
+## Development WokCore runtime acceptance
+
+The Cursor workspace compound `wok: debug` starts `wokcore: debug` with
+`serve` and starts `wokrouter: dev` with
+`WOKROUTER_DEV_WOKCORE_EXECUTABLE` pointing at the WokCore debug executable.
+Run these six paths before accepting changes to development runtime selection:
+
+1. **Development match.** Stop any system WokCore, start `wok: debug`, and
+   wait for both configurations to reach their running state. Confirm WokRouter
+   reports `runtime_channel: "development"` and a debugger breakpoint is hit
+   in the IDE-started WokCore.
+2. **Delayed development match.** Delay the WokCore debug launch by less than
+   five seconds while starting `wok: debug`. Confirm WokRouter waits and then
+   connects on the development channel, with no production download during
+   the wait.
+3. **System production fallback.** Disable `wokcore: debug`, keep a system
+   WokCore available, and start `wokrouter: dev` with its configured
+   development variable. Confirm WokRouter does not mistake the system process
+   for the configured debug executable and selects it on the production
+   channel after five seconds.
+4. **Signed-install production fallback.** Remove both the development and
+   system WokCore, then start `wokrouter: dev`. Confirm that after five seconds
+   WokRouter enters the production signed automatic-install flow and displays
+   real download progress.
+5. **Release ignores the variable.** Set
+   `WOKROUTER_DEV_WOKCORE_EXECUTABLE` and start a release build. Confirm it
+   selects only through production discovery and never reports the development
+   channel. The variable name and its parsing must not be present in release
+   metadata.
+6. **Development runtime remains IDE-managed.** With the development channel
+   selected, close WokRouter and confirm the IDE-started WokCore keeps running;
+   an explicit stop attempt must return
+   `development_runtime_managed_by_ide`. The approved path also requires that
+   no WokCore upgrade prompt appear, but update suppression is not yet manually
+   acceptable: the lifecycle update coordinator does not exist. Verify the
+   no-update portion only after that coordinator implements and tests the
+   development-channel guard.
+
+Runtime status exposed through JSON or the Tauri bridge may include
+`runtime_channel`, but must never include a field named `pid`, `path`, or
+`executable`.
+
 ## Foundation quality gate
 
 Run the same gates used by CI from the repository root:
