@@ -48,5 +48,6 @@ windows-sys = { version = "0.61.2", features = [
 zip.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 wiremock.workspace = true
 wokrouter-storage = { path = "../wokrouter-storage" }
