@@ -301,6 +301,122 @@ mod development {
             -Scenario "development debug gate with trivia"
     }
 
+    Invoke-Scenario -Name "Rust literals do not change braced item boundaries" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+    use tokio::time::Instant;
+
+    const DEVELOPMENT_TIMEOUT: Duration = Duration::from_secs(5);
+"@ `
+            -NewText @"
+    use tokio::time::Instant;
+
+    let _normal = "{ normal string brace }";
+    let _byte = b"{ byte string brace }";
+    let _raw = r###"raw " quote { brace }"###;
+    let _raw_byte = br##"raw byte " quote { brace }"##;
+    let _character = '}';
+    let _byte_character = b'x';
+
+    const DEVELOPMENT_TIMEOUT: Duration = Duration::from_secs(5);
+"@
+        Assert-ContractPasses `
+            -Root $root `
+            -Scenario "Rust literal brace trivia"
+    }
+
+    Invoke-Scenario -Name "Rust parameter delimiters do not become an item opener" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+    paths: &AppPaths,
+    candidate: Option<PathBuf>,
+"@ `
+            -NewText @"
+    paths: &AppPaths,
+    _marker: Option<[u8; { 1 }]>,
+    candidate: Option<PathBuf>,
+"@
+        Assert-ContractPasses `
+            -Root $root `
+            -Scenario "Rust parameter and array delimiter trivia"
+    }
+
+    foreach ($braceMutation in @(
+        @{
+            Name = "negative brace depth"
+            Text = "}"
+        },
+        @{
+            Name = "unbalanced brace depth"
+            Text = "{"
+        }
+    )) {
+        Invoke-Scenario -Name "Rust $($braceMutation.Name) fails closed" -Test {
+            $root = New-ContractFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+                -OldText @"
+#[cfg(all(feature = "test-support", debug_assertions))]
+pub(crate) mod test_support {
+"@ `
+                -NewText @"
+$($braceMutation.Text)
+#[cfg(all(feature = "test-support", debug_assertions))]
+pub(crate) mod test_support {
+"@
+            Assert-ContractRejects `
+                -Root $root `
+                -ExpectedText "balanced braces" `
+                -Scenario "Rust $($braceMutation.Name)"
+        }
+    }
+
+    foreach ($unterminated in @(
+        @{
+            Name = "normal string"
+            Text = '"unterminated'
+        },
+        @{
+            Name = "raw string"
+            Text = 'r###"unterminated'
+        },
+        @{
+            Name = "nested block comment"
+            Text = "/* outer /* inner */"
+        },
+        @{
+            Name = "character"
+            Text = "'{"
+        }
+    )) {
+        Invoke-Scenario -Name "unterminated Rust $($unterminated.Name) fails closed" -Test {
+            $root = New-ContractFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+                -OldText @"
+#[cfg(all(feature = "test-support", debug_assertions))]
+pub(crate) mod test_support {
+"@ `
+                -NewText @"
+$($unterminated.Text)
+#[cfg(all(feature = "test-support", debug_assertions))]
+pub(crate) mod test_support {
+"@
+            Assert-ContractRejects `
+                -Root $root `
+                -ExpectedText "lexically valid" `
+                -Scenario "unterminated Rust $($unterminated.Name)"
+        }
+    }
+
     Invoke-Scenario -Name "development environment parsing must remain debug-only" -Test {
         $root = New-ContractFixture
         Edit-FixtureFile `
@@ -356,6 +472,73 @@ static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
             -Scenario "development parsing retained only in comments and a dead helper"
     }
 
+    Invoke-Scenario -Name "development module opener cannot bind past a semicolon" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText '    pub(super) const EXECUTABLE_ENV: &str = "WOKROUTER_DEV_WOKCORE_EXECUTABLE";' `
+            -NewText '    pub(super) const EXECUTABLE_ENV: &str = "WOKROUTER_DISABLED_WOKCORE_EXECUTABLE";'
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "mod development {" `
+            -NewText @"
+mod development;
+#[allow(dead_code)]
+fn inert_development_body() {
+    pub(super) const EXECUTABLE_ENV: &str = "WOKROUTER_DEV_WOKCORE_EXECUTABLE";
+    pub(super) fn candidate_from_environment() -> Option<PathBuf> {
+        candidate_from_value(std::env::var_os(EXECUTABLE_ENV))
+    }
+}
+{
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "braced body" `
+            -Scenario "semicolon development module bound to a later brace"
+    }
+
+    Invoke-Scenario -Name "character braces cannot extend the development module body" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText '    pub(super) const EXECUTABLE_ENV: &str = "WOKROUTER_DEV_WOKCORE_EXECUTABLE";' `
+            -NewText '    pub(super) const EXECUTABLE_ENV: &str = "WOKROUTER_DISABLED_WOKCORE_EXECUTABLE";'
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+mod development {
+    use std::{
+"@ `
+            -NewText @"
+mod development {
+    const INERT_OPEN_BRACE: char = '{';
+    use std::{
+"@
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText @"
+#[cfg(all(feature = "test-support", debug_assertions))]
+pub(crate) mod test_support {
+"@ `
+            -NewText @"
+pub(super) const INERT_EXECUTABLE_ENV: &str = "WOKROUTER_DEV_WOKCORE_EXECUTABLE";
+const INERT_CLOSE_BRACE: char = '}';
+
+#[cfg(all(feature = "test-support", debug_assertions))]
+pub(crate) mod test_support {
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "environment constant" `
+            -Scenario "character braces extending the development module body"
+    }
+
     Invoke-Scenario -Name "development environment lookup must stay in its active function" -Test {
         $root = New-ContractFixture
         Edit-FixtureFile `
@@ -404,6 +587,22 @@ static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
             -Root $root `
             -ExpectedText "Debug select_once development candidate call" `
             -Scenario "development candidate call retained only in a dead helper"
+    }
+
+    Invoke-Scenario -Name "debug selector candidate call cannot survive in a normal string" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "    let candidate = development::candidate_from_environment();" `
+            -NewText @"
+    let candidate = None;
+    let _inert = "development::candidate_from_environment()";
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "development candidate call" `
+            -Scenario "development candidate call retained in a normal string"
     }
 
     Invoke-Scenario -Name "development executable environment name cannot change" -Test {
@@ -561,6 +760,90 @@ static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
             -Scenario "selector requirements retained only in comments"
     }
 
+    Invoke-Scenario -Name "selector constants reject unused raw-string and local decoys" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "    const DEVELOPMENT_TIMEOUT: Duration = Duration::from_secs(5);" `
+            -NewText @"
+    const DEVELOPMENT_TIMEOUT: Duration = Duration::from_secs(10);
+    let _raw_decoy = r#"Duration::from_secs(5)"#;
+"@
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "    const DEVELOPMENT_RETRY_DELAY: Duration = Duration::from_millis(50);" `
+            -NewText @"
+    const DEVELOPMENT_RETRY_DELAY: Duration = Duration::from_millis(100);
+    let _unused_decoy = Duration::from_millis(50);
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "named constants" `
+            -Scenario "selector values retained only in inert decoys"
+    }
+
+    Invoke-Scenario -Name "selector must use its timeout and retry constants" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "    let deadline = Instant::now() + DEVELOPMENT_TIMEOUT;" `
+            -NewText "    let deadline = Instant::now() + Duration::from_secs(10);"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "        tokio::time::sleep(DEVELOPMENT_RETRY_DELAY.min(deadline - now)).await;" `
+            -NewText "        tokio::time::sleep(Duration::from_millis(100).min(deadline - now)).await;"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "constant references" `
+            -Scenario "selector declarations are unused by deadline and sleep"
+    }
+
+    Invoke-Scenario -Name "selector sequence cannot survive in an unused closure" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "            && process_matches(process_id, &candidate)" `
+            -NewText "            && true"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "            let bound = client.bound_to_process(process_id);" `
+            -NewText "            let bound = client.clone();"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "                tokio::time::timeout_at(deadline, connection_probe(bound.clone())).await" `
+            -NewText "                Ok(connection_probe(bound.clone()).await)"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "            let still_matches = process_matches(process_id, &candidate);" `
+            -NewText "            let still_matches = true;"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "    loop {" `
+            -NewText @"
+    let _inert = || {
+        let _ = false && process_matches(process_id, &candidate);
+        let bound = client.bound_to_process(process_id);
+        let Ok(connection) =
+            tokio::time::timeout_at(deadline, connection_probe(bound.clone())).await;
+        let still_matches = process_matches(process_id, &candidate);
+    };
+    loop {
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "selection loop" `
+            -Scenario "selector sequence retained only in an unused closure"
+    }
+
     Invoke-Scenario -Name "development connection probe must remain deadline-bound" -Test {
         $root = New-ContractFixture
         Edit-FixtureFile `
@@ -650,6 +933,71 @@ async fn a_selected_development_session_never_switches_to_production() {
             -Root $root `
             -ExpectedText "must not be ignored" `
             -Scenario "ignored development no-switch regression"
+    }
+
+    foreach ($attributeMutation in @(
+        @{
+            Name = "cfg exclusion"
+            Attribute = "#[cfg(any())]"
+        },
+        @{
+            Name = "conditional ignore"
+            Attribute = "#[cfg_attr(debug_assertions, ignore)]"
+        },
+        @{
+            Name = "reasoned ignore"
+            Attribute = '#[ignore = "reason"]'
+        },
+        @{
+            Name = "should panic"
+            Attribute = "#[should_panic]"
+        }
+    )) {
+        Invoke-Scenario -Name "development no-switch test rejects $($attributeMutation.Name)" -Test {
+            $root = New-ContractFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "crates/wokrouter-platform/tests/wokcore_runtime.rs" `
+                -OldText @"
+#[tokio::test]
+async fn a_selected_development_session_never_switches_to_production() {
+"@ `
+                -NewText @"
+#[tokio::test]
+$($attributeMutation.Attribute)
+async fn a_selected_development_session_never_switches_to_production() {
+"@
+            Assert-ContractRejects `
+                -Root $root `
+                -ExpectedText "execution-changing attributes" `
+                -Scenario "no-switch test with $($attributeMutation.Name)"
+        }
+    }
+
+    Invoke-Scenario -Name "no-switch assertion cannot survive in a byte string" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/tests/wokcore_runtime.rs" `
+            -OldText "    assert_eq!(selected.connection().await, CoreConnection::Stopped);" `
+            -NewText '    let _inert = b"assert_eq!(selected.connection().await, CoreConnection::Stopped);";'
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "stopped retained connection" `
+            -Scenario "stopped assertion retained only in a byte string"
+    }
+
+    Invoke-Scenario -Name "no-switch assertion cannot survive in a raw byte string" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/tests/wokcore_runtime.rs" `
+            -OldText "    assert!(replacement.received_requests().await.unwrap().is_empty());" `
+            -NewText '    let _inert = br##"assert!(replacement.received_requests().await.unwrap().is_empty());"##;'
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "replacement zero requests" `
+            -Scenario "replacement assertion retained only in a raw byte string"
     }
 
     $noSwitchAssertions = @(

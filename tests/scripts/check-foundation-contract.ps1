@@ -31,20 +31,46 @@ function Add-ContractFailure {
     }
 }
 
-function Remove-RustComments {
+function Set-RustMaskedRange {
+    param(
+        [Parameter(Mandatory)]
+        [char[]]$View,
+
+        [Parameter(Mandatory)]
+        [int]$Start,
+
+        [Parameter(Mandatory)]
+        [int]$End
+    )
+
+    for ($index = $Start; $index -lt $End; $index += 1) {
+        if ($View[$index] -ne "`r" -and $View[$index] -ne "`n") {
+            $View[$index] = " "
+        }
+    }
+}
+
+function Test-RustIdentifierCharacter {
+    param(
+        [Parameter(Mandatory)]
+        [char]$Character
+    )
+
+    return $Character -eq "_" -or [char]::IsLetterOrDigit($Character)
+}
+
+function Get-RustCodeView {
     param(
         [Parameter(Mandatory)]
         [AllowEmptyString()]
         [string]$Source,
 
-        [switch]$MaskStrings
+        [Parameter(Mandatory)]
+        [string]$Description
     )
 
-    $result = [System.Text.StringBuilder]::new($Source.Length)
+    $view = $Source.ToCharArray()
     $index = 0
-    $lineComment = $false
-    $blockDepth = 0
-    $quotedString = $false
     while ($index -lt $Source.Length) {
         $current = $Source[$index]
         $next = if ($index + 1 -lt $Source.Length) {
@@ -54,98 +80,235 @@ function Remove-RustComments {
             [char]0
         }
 
-        if ($lineComment) {
-            if ($current -eq "`r" -or $current -eq "`n") {
-                $null = $result.Append($current)
-                $lineComment = $false
+        if ($current -eq "/" -and $next -eq "/") {
+            $end = $index + 2
+            while (
+                $end -lt $Source.Length -and
+                $Source[$end] -ne "`r" -and
+                $Source[$end] -ne "`n"
+            ) {
+                $end += 1
             }
-            else {
-                $null = $result.Append(" ")
-            }
-            $index += 1
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            $index = $end
             continue
         }
 
-        if ($blockDepth -gt 0) {
-            if ($current -eq "/" -and $next -eq "*") {
-                $null = $result.Append("  ")
-                $blockDepth += 1
-                $index += 2
-                continue
-            }
-            if ($current -eq "*" -and $next -eq "/") {
-                $null = $result.Append("  ")
-                $blockDepth -= 1
-                $index += 2
-                continue
-            }
-            if ($current -eq "`r" -or $current -eq "`n") {
-                $null = $result.Append($current)
-            }
-            else {
-                $null = $result.Append(" ")
-            }
-            $index += 1
-            continue
-        }
-
-        if ($quotedString) {
-            if ($current -eq "\") {
-                if ($MaskStrings) {
-                    $null = $result.Append(" ")
-                }
-                else {
-                    $null = $result.Append($current)
-                }
-                if ($index + 1 -lt $Source.Length) {
-                    if ($MaskStrings) {
-                        $null = $result.Append(" ")
-                    }
-                    else {
-                        $null = $result.Append($next)
-                    }
-                    $index += 2
+        if ($current -eq "/" -and $next -eq "*") {
+            $depth = 1
+            $end = $index + 2
+            while ($end -lt $Source.Length -and $depth -gt 0) {
+                if (
+                    $end + 1 -lt $Source.Length -and
+                    $Source[$end] -eq "/" -and
+                    $Source[$end + 1] -eq "*"
+                ) {
+                    $depth += 1
+                    $end += 2
                     continue
                 }
+                if (
+                    $end + 1 -lt $Source.Length -and
+                    $Source[$end] -eq "*" -and
+                    $Source[$end + 1] -eq "/"
+                ) {
+                    $depth -= 1
+                    $end += 2
+                    continue
+                }
+                $end += 1
             }
-            if ($current -eq '"') {
-                $null = $result.Append($current)
-                $quotedString = $false
+            if ($depth -ne 0) {
+                Add-ContractFailure `
+                    -Message "$Description must be lexically valid: unterminated block comment."
+                return $null
             }
-            elseif ($MaskStrings) {
-                $null = $result.Append(" ")
-            }
-            else {
-                $null = $result.Append($current)
-            }
-            $index += 1
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            $index = $end
             continue
         }
 
-        if ($current -eq "/" -and $next -eq "/") {
-            $null = $result.Append("  ")
-            $lineComment = $true
-            $index += 2
+        $rawPrefixLength = 0
+        $rawHashCount = 0
+        $rawCursor = -1
+        $atTokenBoundary = $false
+        if ($current -eq "r" -or $current -eq "b") {
+            $atTokenBoundary = (
+                $index -eq 0 -or
+                -not (Test-RustIdentifierCharacter -Character $Source[$index - 1])
+            )
+        }
+        if ($atTokenBoundary -and $current -eq "r") {
+            $rawPrefixLength = 1
+            $rawCursor = $index + 1
+        }
+        elseif (
+            $atTokenBoundary -and
+            $current -eq "b" -and
+            $next -eq "r"
+        ) {
+            $rawPrefixLength = 2
+            $rawCursor = $index + 2
+        }
+        if ($rawCursor -ge 0) {
+            while (
+                $rawCursor -lt $Source.Length -and
+                $Source[$rawCursor] -eq "#"
+            ) {
+                $rawHashCount += 1
+                $rawCursor += 1
+            }
+            if (
+                $rawCursor -ge $Source.Length -or
+                $Source[$rawCursor] -ne '"'
+            ) {
+                $rawPrefixLength = 0
+                $rawCursor = -1
+            }
+        }
+        if ($rawCursor -ge 0) {
+            $end = $rawCursor + 1
+            $closed = $false
+            while ($end -lt $Source.Length) {
+                if ($Source[$end] -eq '"') {
+                    $matchesDelimiter = $true
+                    for ($hash = 0; $hash -lt $rawHashCount; $hash += 1) {
+                        if (
+                            $end + 1 + $hash -ge $Source.Length -or
+                            $Source[$end + 1 + $hash] -ne "#"
+                        ) {
+                            $matchesDelimiter = $false
+                            break
+                        }
+                    }
+                    if ($matchesDelimiter) {
+                        $end += 1 + $rawHashCount
+                        $closed = $true
+                        break
+                    }
+                }
+                $end += 1
+            }
+            if (-not $closed) {
+                Add-ContractFailure `
+                    -Message "$Description must be lexically valid: unterminated raw string."
+                return $null
+            }
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            $index = $end
             continue
         }
-        if ($current -eq "/" -and $next -eq "*") {
-            $null = $result.Append("  ")
-            $blockDepth = 1
-            $index += 2
-            continue
-        }
+
+        $quoteIndex = -1
         if ($current -eq '"') {
-            $null = $result.Append($current)
-            $quotedString = $true
-            $index += 1
+            $quoteIndex = $index
+        }
+        elseif ($current -eq "b" -and $next -eq '"') {
+            $quoteIndex = $index + 1
+        }
+        if ($quoteIndex -ge 0) {
+            $end = $quoteIndex + 1
+            $closed = $false
+            while ($end -lt $Source.Length) {
+                if ($Source[$end] -eq "\") {
+                    $end += 2
+                    continue
+                }
+                if ($Source[$end] -eq '"') {
+                    $end += 1
+                    $closed = $true
+                    break
+                }
+                $end += 1
+            }
+            if (-not $closed) {
+                Add-ContractFailure `
+                    -Message "$Description must be lexically valid: unterminated string."
+                return $null
+            }
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            $index = $end
             continue
         }
 
-        $null = $result.Append($current)
+        $characterQuote = -1
+        $byteCharacter = $false
+        if ($current -eq "b" -and $next -eq "'") {
+            $characterQuote = $index + 1
+            $byteCharacter = $true
+        }
+        elseif ($current -eq "'") {
+            $characterQuote = $index
+        }
+        if ($characterQuote -ge 0) {
+            $contentStart = $characterQuote + 1
+            if (
+                -not $byteCharacter -and
+                $contentStart -lt $Source.Length -and
+                (Test-RustIdentifierCharacter -Character $Source[$contentStart]) -and
+                (
+                    $contentStart + 1 -ge $Source.Length -or
+                    $Source[$contentStart + 1] -ne "'"
+                )
+            ) {
+                $index += 1
+                continue
+            }
+
+            $end = $contentStart
+            $closed = $false
+            while ($end -lt $Source.Length) {
+                if ($Source[$end] -eq "\") {
+                    $end += 2
+                    continue
+                }
+                if ($Source[$end] -eq "'") {
+                    $end += 1
+                    $closed = $true
+                    break
+                }
+                if ($Source[$end] -eq "`r" -or $Source[$end] -eq "`n") {
+                    break
+                }
+                $end += 1
+            }
+            if (-not $closed) {
+                Add-ContractFailure `
+                    -Message "$Description must be lexically valid: unterminated character literal."
+                return $null
+            }
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            $index = $end
+            continue
+        }
+
         $index += 1
     }
 
-    return $result.ToString()
+    $code = -join $view
+    $braceDepth = 0
+    for ($index = 0; $index -lt $code.Length; $index += 1) {
+        if ($code[$index] -eq "{") {
+            $braceDepth += 1
+        }
+        elseif ($code[$index] -eq "}") {
+            $braceDepth -= 1
+            if ($braceDepth -lt 0) {
+                Add-ContractFailure `
+                    -Message "$Description must have balanced braces: negative depth."
+                return $null
+            }
+        }
+    }
+    if ($braceDepth -ne 0) {
+        Add-ContractFailure `
+            -Message "$Description must have balanced braces: unclosed body."
+        return $null
+    }
+
+    return [pscustomobject]@{
+        Code = $code
+    }
 }
 
 function Get-UniqueBracedItem {
@@ -161,7 +324,11 @@ function Get-UniqueBracedItem {
         [string]$Description
     )
 
-    $structure = Remove-RustComments -Source $Source -MaskStrings
+    $codeView = Get-RustCodeView -Source $Source -Description $Description
+    if ($null -eq $codeView) {
+        return $null
+    }
+    $structure = $codeView.Code
     $matches = [regex]::Matches(
         $structure,
         $SignaturePattern,
@@ -174,9 +341,78 @@ function Get-UniqueBracedItem {
     }
 
     $match = $matches[0]
-    $openingBrace = $structure.IndexOf("{", $match.Index + $match.Length)
+    $parenthesisDepth = 0
+    $bracketDepth = 0
+    for (
+        $index = $match.Index;
+        $index -lt $match.Index + $match.Length;
+        $index += 1
+    ) {
+        switch ($structure[$index]) {
+            "(" { $parenthesisDepth += 1 }
+            ")" { $parenthesisDepth -= 1 }
+            "[" { $bracketDepth += 1 }
+            "]" { $bracketDepth -= 1 }
+        }
+        if ($parenthesisDepth -lt 0 -or $bracketDepth -lt 0) {
+            Add-ContractFailure `
+                -Message "$Description has unbalanced signature delimiters."
+            return $null
+        }
+    }
+
+    $openingBrace = -1
+    $scanStart = $match.Index + $match.Length
+    for ($index = $scanStart; $index -lt $structure.Length; $index += 1) {
+        $current = $structure[$index]
+        switch ($current) {
+            "(" { $parenthesisDepth += 1; continue }
+            ")" {
+                $parenthesisDepth -= 1
+                if ($parenthesisDepth -lt 0) {
+                    Add-ContractFailure `
+                        -Message "$Description has unbalanced signature parentheses."
+                    return $null
+                }
+                continue
+            }
+            "[" { $bracketDepth += 1; continue }
+            "]" {
+                $bracketDepth -= 1
+                if ($bracketDepth -lt 0) {
+                    Add-ContractFailure `
+                        -Message "$Description has unbalanced signature brackets."
+                    return $null
+                }
+                continue
+            }
+        }
+        if ($parenthesisDepth -eq 0 -and $bracketDepth -eq 0) {
+            if ($current -eq ";") {
+                Add-ContractFailure `
+                    -Message "$Description must have a braced body, not a semicolon declaration."
+                return $null
+            }
+            if ($current -eq "{") {
+                $openingBrace = $index
+                break
+            }
+        }
+    }
     if ($openingBrace -lt 0) {
         Add-ContractFailure -Message "$Description must have a braced body."
+        return $null
+    }
+    $declarationTail = $structure.Substring(
+        $scanStart,
+        $openingBrace - $scanStart
+    )
+    if (
+        $declarationTail -match
+        '(?m)^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?(?:async[ \t]+)?(?:fn|mod|struct|enum|impl|trait|type|const|static)\b'
+    ) {
+        Add-ContractFailure `
+            -Message "$Description must open its body before the next Rust item."
         return $null
     }
 
@@ -188,6 +424,11 @@ function Get-UniqueBracedItem {
         }
         elseif ($structure[$index] -eq "}") {
             $depth -= 1
+            if ($depth -lt 0) {
+                Add-ContractFailure `
+                    -Message "$Description has a negative braced-body depth."
+                return $null
+            }
             if ($depth -eq 0) {
                 $closingBrace = $index
                 break
@@ -200,8 +441,21 @@ function Get-UniqueBracedItem {
     }
 
     return [pscustomobject]@{
-        Attributes = $match.Groups["attributes"].Value
+        Attributes = if ($match.Groups["attributes"].Success) {
+            $Source.Substring(
+                $match.Groups["attributes"].Index,
+                $match.Groups["attributes"].Length
+            )
+        }
+        else {
+            ""
+        }
+        CodeAttributes = $match.Groups["attributes"].Value
         Body = $Source.Substring(
+            $openingBrace + 1,
+            $closingBrace - $openingBrace - 1
+        )
+        CodeBody = $structure.Substring(
             $openingBrace + 1,
             $closingBrace - $openingBrace - 1
         )
@@ -237,7 +491,13 @@ function Get-TopLevelRustBody {
         [string]$Body
     )
 
-    $structure = Remove-RustComments -Source $Body -MaskStrings
+    $codeView = Get-RustCodeView `
+        -Source $Body `
+        -Description "Rust top-level body"
+    if ($null -eq $codeView) {
+        return ""
+    }
+    $structure = $codeView.Code
     $result = [System.Text.StringBuilder]::new($Body.Length)
     $depth = 0
     for ($index = 0; $index -lt $Body.Length; $index += 1) {
@@ -249,18 +509,31 @@ function Get-TopLevelRustBody {
         }
         if ($current -eq "}") {
             $depth -= 1
+            if ($depth -lt 0) {
+                Add-ContractFailure `
+                    -Message "Rust top-level body has a negative brace depth."
+                return ""
+            }
             $null = $result.Append(" ")
             continue
         }
         if ($depth -eq 0) {
-            $null = $result.Append($Body[$index])
+            $null = $result.Append($structure[$index])
         }
-        elseif ($Body[$index] -eq "`r" -or $Body[$index] -eq "`n") {
-            $null = $result.Append($Body[$index])
+        elseif (
+            $structure[$index] -eq "`r" -or
+            $structure[$index] -eq "`n"
+        ) {
+            $null = $result.Append($structure[$index])
         }
         else {
             $null = $result.Append(" ")
         }
+    }
+    if ($depth -ne 0) {
+        Add-ContractFailure `
+            -Message "Rust top-level body has an unbalanced brace depth."
+        return ""
     }
     return $result.ToString()
 }
@@ -1122,21 +1395,34 @@ $developmentModule = Get-UniqueBracedItem `
     -Description "Development module"
 if ($null -ne $developmentModule) {
     if (
-        $developmentModule.Attributes -notmatch
+        $developmentModule.CodeAttributes -notmatch
         '(?m)^[ \t]*#\[cfg\([ \t]*debug_assertions[ \t]*\)\][ \t]*$'
     ) {
         Add-ContractFailure `
             -Message "Development module must remain behind debug_assertions."
     }
 
-    $developmentBody = Remove-RustComments -Source $developmentModule.Body
+    $developmentBody = $developmentModule.CodeBody
     $environmentConstants = [regex]::Matches(
         $developmentBody,
-        '(?m)^[ \t]*pub\(super\)[ \t]+const[ \t]+EXECUTABLE_ENV[ \t]*:[^=\r\n]+=[ \t]*"WOKROUTER_DEV_WOKCORE_EXECUTABLE"[ \t]*;'
+        '(?m)^[ \t]*pub\(super\)[ \t]+const[ \t]+EXECUTABLE_ENV[ \t]*:[ \t]*&str[ \t]*=[ \t]+;'
     )
     if ($environmentConstants.Count -ne 1) {
         Add-ContractFailure `
             -Message "Development module must define its executable environment constant exactly once."
+    }
+    else {
+        $environmentConstant = $developmentModule.Body.Substring(
+            $environmentConstants[0].Index,
+            $environmentConstants[0].Length
+        )
+        if (
+            $environmentConstant -notmatch
+            '(?m)^[ \t]*pub\(super\)[ \t]+const[ \t]+EXECUTABLE_ENV[ \t]*:[ \t]*&str[ \t]*=[ \t]*"WOKROUTER_DEV_WOKCORE_EXECUTABLE"[ \t]*;[ \t]*$'
+        ) {
+            Add-ContractFailure `
+                -Message "Development module executable environment constant must retain its exact value."
+        }
     }
 
     $candidateFromEnvironment = Get-UniqueBracedItem `
@@ -1144,22 +1430,11 @@ if ($null -ne $developmentModule) {
         -SignaturePattern '(?m)^[ \t]*pub\(super\)[ \t]+fn[ \t]+candidate_from_environment[ \t]*\([^)]*\)[ \t]*->[^{]+' `
         -Description "Development environment candidate function"
     if ($null -ne $candidateFromEnvironment) {
-        $candidateBody = Remove-RustComments -Source $candidateFromEnvironment.Body
         $null = Get-UniquePatternIndex `
-            -Source $candidateBody `
+            -Source $candidateFromEnvironment.CodeBody `
             -Pattern 'std::env::var_os\([ \t]*EXECUTABLE_ENV[ \t]*\)' `
             -Description "Development module environment lookup"
     }
-}
-
-$runtimeWithoutComments = Remove-RustComments -Source $runtimeSelector
-$environmentLiterals = [regex]::Matches(
-    $runtimeWithoutComments,
-    '"WOKROUTER_DEV_WOKCORE_EXECUTABLE"'
-)
-if ($environmentLiterals.Count -ne 1) {
-    Add-ContractFailure `
-        -Message "Development executable environment literal must occur exactly once in active source."
 }
 
 $debugSelectOnce = Get-UniqueBracedItem `
@@ -1167,9 +1442,8 @@ $debugSelectOnce = Get-UniqueBracedItem `
     -SignaturePattern '(?ms)(?<attributes>^[ \t]*#\[cfg\([ \t]*debug_assertions[ \t]*\)\][ \t]*\r?\n(?:(?:^[ \t]*#\[[^\r\n]*\][ \t]*\r?\n)|(?:^[ \t]*\r?\n))*)^[ \t]*async[ \t]+fn[ \t]+select_once[ \t]*\([^)]*\)[ \t]*->[^{]+' `
     -Description "Debug select_once"
 if ($null -ne $debugSelectOnce) {
-    $debugSelectBody = Remove-RustComments -Source $debugSelectOnce.Body
     $null = Get-UniquePatternIndex `
-        -Source $debugSelectBody `
+        -Source $debugSelectOnce.CodeBody `
         -Pattern 'development::candidate_from_environment\(\)' `
         -Description "Debug select_once development candidate call"
 }
@@ -1179,48 +1453,81 @@ $dependencySelector = Get-UniqueBracedItem `
     -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+select_with_dependencies[ \t]*\(' `
     -Description "select_with_dependencies"
 if ($null -ne $dependencySelector) {
-    $selectorBody = Remove-RustComments -Source $dependencySelector.Body
-    $timeoutIndex = Get-UniquePatternIndex `
-        -Source $selectorBody `
-        -Pattern 'Duration::from_secs\([ \t]*5[ \t]*\)' `
-        -Description "select_with_dependencies five-second deadline"
-    $retryIndex = Get-UniquePatternIndex `
-        -Source $selectorBody `
-        -Pattern 'Duration::from_millis\([ \t]*50[ \t]*\)' `
-        -Description "select_with_dependencies 50-ms retry interval"
-    $firstIdentityIndex = Get-UniquePatternIndex `
-        -Source $selectorBody `
-        -Pattern '&&[ \t\r\n]*process_matches\([ \t]*process_id[ \t]*,[ \t]*&candidate[ \t]*\)' `
-        -Description "select_with_dependencies initial process identity check"
-    $boundClientIndex = Get-UniquePatternIndex `
-        -Source $selectorBody `
-        -Pattern 'let[ \t]+bound[ \t]*=[ \t]*client\.bound_to_process\([ \t]*process_id[ \t]*\)[ \t]*;' `
-        -Description "select_with_dependencies PID-bound client"
-    $connectionIndex = Get-UniquePatternIndex `
-        -Source $selectorBody `
-        -Pattern '(?s)let[ \t]+Ok\(connection\)[ \t\r\n]*=[ \t\r\n]*tokio::time::timeout_at\([ \t\r\n]*deadline[ \t\r\n]*,[ \t\r\n]*connection_probe\([ \t\r\n]*bound\.clone\(\)[ \t\r\n]*\)[ \t\r\n]*\)\.await' `
-        -Description "select_with_dependencies deadline-bound connection probe"
-    $secondIdentityIndex = Get-UniquePatternIndex `
-        -Source $selectorBody `
-        -Pattern 'let[ \t]+still_matches[ \t]*=[ \t]*process_matches\([ \t]*process_id[ \t]*,[ \t]*&candidate[ \t]*\)[ \t]*;' `
-        -Description "select_with_dependencies post-connection process identity check"
-
-    $orderedIndexes = @(
-        $firstIdentityIndex,
-        $boundClientIndex,
-        $connectionIndex,
-        $secondIdentityIndex
+    $selectorTopLevel = Get-TopLevelRustBody -Body $dependencySelector.Body
+    $timeoutConstants = [regex]::Matches(
+        $selectorTopLevel,
+        '(?m)^[ \t]*const[ \t]+DEVELOPMENT_TIMEOUT[ \t]*:[ \t]*Duration[ \t]*=[ \t]*Duration::from_secs\([ \t]*5[ \t]*\)[ \t]*;'
     )
-    if (
-        $orderedIndexes -notcontains -1 -and
-        -not (
-            $firstIdentityIndex -lt $boundClientIndex -and
-            $boundClientIndex -lt $connectionIndex -and
-            $connectionIndex -lt $secondIdentityIndex
-        )
-    ) {
+    if ($timeoutConstants.Count -ne 1) {
         Add-ContractFailure `
-            -Message "select_with_dependencies must check identity, bind the PID, probe before the deadline, then recheck identity in order."
+            -Message "select_with_dependencies named constants must define the five-second deadline exactly once."
+    }
+    $retryConstants = [regex]::Matches(
+        $selectorTopLevel,
+        '(?m)^[ \t]*const[ \t]+DEVELOPMENT_RETRY_DELAY[ \t]*:[ \t]*Duration[ \t]*=[ \t]*Duration::from_millis\([ \t]*50[ \t]*\)[ \t]*;'
+    )
+    if ($retryConstants.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "select_with_dependencies named constants must define the 50-ms retry interval exactly once."
+    }
+    $deadlineReferences = [regex]::Matches(
+        $selectorTopLevel,
+        '(?m)^[ \t]*let[ \t]+deadline[ \t]*=[ \t]*Instant::now\(\)[ \t]*\+[ \t]*DEVELOPMENT_TIMEOUT[ \t]*;'
+    )
+    if ($deadlineReferences.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "select_with_dependencies constant references must use DEVELOPMENT_TIMEOUT for the deadline."
+    }
+
+    $selectionLoop = Get-UniqueBracedItem `
+        -Source $dependencySelector.Body `
+        -SignaturePattern '(?m)^[ \t]*loop[ \t]*' `
+        -Description "select_with_dependencies selection loop"
+    if ($null -ne $selectionLoop) {
+        $loopTopLevel = Get-TopLevelRustBody -Body $selectionLoop.Body
+        $retryReferences = [regex]::Matches(
+            $loopTopLevel,
+            '(?m)^[ \t]*tokio::time::sleep\([ \t]*DEVELOPMENT_RETRY_DELAY\.min\([ \t]*deadline[ \t]*-[ \t]*now[ \t]*\)[ \t]*\)\.await[ \t]*;'
+        )
+        if ($retryReferences.Count -ne 1) {
+            Add-ContractFailure `
+                -Message "select_with_dependencies constant references must use DEVELOPMENT_RETRY_DELAY for sleep."
+        }
+
+        $selectionIf = Get-UniqueBracedItem `
+            -Source $selectionLoop.Body `
+            -SignaturePattern '(?ms)^[ \t]*if[ \t]+let[ \t]+Some\(process_id\)[ \t]*=[ \t]*client\.discovered_process_id\(\)[ \t\r\n]*&&[ \t\r\n]*process_matches\([ \t]*process_id[ \t]*,[ \t]*&candidate[ \t]*\)[ \t]*' `
+            -Description "select_with_dependencies selection loop initial process identity check"
+        if ($null -ne $selectionIf) {
+            $selectionBody = Get-TopLevelRustBody -Body $selectionIf.Body
+            $boundClientIndex = Get-UniquePatternIndex `
+                -Source $selectionBody `
+                -Pattern 'let[ \t]+bound[ \t]*=[ \t]*client\.bound_to_process\([ \t]*process_id[ \t]*\)[ \t]*;' `
+                -Description "select_with_dependencies selection loop in order PID-bound client"
+            $connectionIndex = Get-UniquePatternIndex `
+                -Source $selectionBody `
+                -Pattern '(?s)let[ \t]+Ok\(connection\)[ \t\r\n]*=[ \t\r\n]*tokio::time::timeout_at\([ \t\r\n]*deadline[ \t\r\n]*,[ \t\r\n]*connection_probe\([ \t\r\n]*bound\.clone\(\)[ \t\r\n]*\)[ \t\r\n]*\)\.await' `
+                -Description "select_with_dependencies selection loop in order deadline-bound connection probe"
+            $secondIdentityIndex = Get-UniquePatternIndex `
+                -Source $selectionBody `
+                -Pattern 'let[ \t]+still_matches[ \t]*=[ \t]*process_matches\([ \t]*process_id[ \t]*,[ \t]*&candidate[ \t]*\)[ \t]*;' `
+                -Description "select_with_dependencies selection loop in order post-connection process identity check"
+
+            if (
+                @(
+                    $boundClientIndex,
+                    $connectionIndex,
+                    $secondIdentityIndex
+                ) -notcontains -1 -and
+                -not (
+                    $boundClientIndex -lt $connectionIndex -and
+                    $connectionIndex -lt $secondIdentityIndex
+                )
+            ) {
+                Add-ContractFailure `
+                    -Message "select_with_dependencies selection loop must bind the PID, probe before the deadline, then recheck identity in order."
+            }
+        }
     }
 }
 
@@ -1229,11 +1536,27 @@ $desktopErrorEnum = Get-UniqueBracedItem `
     -SignaturePattern '(?m)^[ \t]*pub\(crate\)[ \t]+enum[ \t]+DesktopControlError[ \t]*' `
     -Description "DesktopControlError enum"
 if ($null -ne $desktopErrorEnum) {
-    $desktopErrorBody = Remove-RustComments -Source $desktopErrorEnum.Body
-    $null = Get-UniquePatternIndex `
-        -Source $desktopErrorBody `
-        -Pattern '(?m)^[ \t]*#\[error\("development_runtime_managed_by_ide"\)\][ \t]*\r?\n[ \t]*DevelopmentRuntimeManagedByIde[ \t]*,[ \t]*$' `
-        -Description "DesktopControlError IDE-managed variant"
+    $desktopErrorMatches = [regex]::Matches(
+        $desktopErrorEnum.CodeBody,
+        '(?m)^[ \t]*#\[error\([ \t]+\)\][ \t]*\r?\n[ \t]*DevelopmentRuntimeManagedByIde[ \t]*,[ \t]*$'
+    )
+    if ($desktopErrorMatches.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "DesktopControlError IDE-managed variant must occur exactly once."
+    }
+    else {
+        $desktopErrorSource = $desktopErrorEnum.Body.Substring(
+            $desktopErrorMatches[0].Index,
+            $desktopErrorMatches[0].Length
+        )
+        if (
+            $desktopErrorSource -notmatch
+            '(?m)^[ \t]*#\[error\("development_runtime_managed_by_ide"\)\][ \t]*\r?\n[ \t]*DevelopmentRuntimeManagedByIde[ \t]*,[ \t]*$'
+        ) {
+            Add-ContractFailure `
+                -Message "DesktopControlError IDE-managed variant must retain its exact error value."
+        }
+    }
 }
 
 $noSwitchTest = Get-UniqueBracedItem `
@@ -1241,23 +1564,24 @@ $noSwitchTest = Get-UniqueBracedItem `
     -SignaturePattern '(?ms)(?<attributes>(?:(?:^[ \t]*#\[[^\r\n]*\][ \t]*\r?\n)|(?:^[ \t]*\r?\n))*)^[ \t]*async[ \t]+fn[ \t]+a_selected_development_session_never_switches_to_production[ \t]*\([^)]*\)[ \t]*' `
     -Description "Development no-switch regression test"
 if ($null -ne $noSwitchTest) {
-    if (
-        $noSwitchTest.Attributes -notmatch
-        '(?m)^[ \t]*#\[tokio::test(?:\([^\]]*\))?\][ \t]*$'
-    ) {
+    $tokioTestAttributes = [regex]::Matches(
+        $noSwitchTest.CodeAttributes,
+        '(?m)^[ \t]*#\[[ \t]*tokio::test(?:\([^\]]*\))?[ \t]*\][ \t]*$'
+    )
+    if ($tokioTestAttributes.Count -ne 1) {
         Add-ContractFailure `
-            -Message "Development no-switch regression test must remain a Tokio test."
+            -Message "Development no-switch regression test must contain exactly one Tokio test attribute."
     }
-    if (
-        $noSwitchTest.Attributes -match
-        '(?m)^[ \t]*#\[ignore(?:\([^\]]*\))?\][ \t]*$'
-    ) {
+    $executionChangingAttributes = [regex]::Matches(
+        $noSwitchTest.CodeAttributes,
+        '(?m)^[ \t]*#\[[ \t]*(?:cfg|cfg_attr|ignore|should_panic)\b'
+    )
+    if ($executionChangingAttributes.Count -gt 0) {
         Add-ContractFailure `
-            -Message "Development no-switch regression test must not be ignored."
+            -Message "Development no-switch regression test must not be ignored or use execution-changing attributes."
     }
 
-    $noSwitchBody = Remove-RustComments `
-        -Source (Get-TopLevelRustBody -Body $noSwitchTest.Body)
+    $noSwitchBody = Get-TopLevelRustBody -Body $noSwitchTest.Body
     $null = Get-UniquePatternIndex `
         -Source $noSwitchBody `
         -Pattern 'assert_eq!\([ \t\r\n]*selected\.channel\(\)[ \t\r\n]*,[ \t\r\n]*WokCoreRuntimeChannel::Development[ \t\r\n]*\)[ \t]*;' `
