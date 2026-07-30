@@ -11,7 +11,9 @@ name = "wokrouter"
 path = "src/main.rs"
 
 [dependencies]
+async-trait.workspace = true
 secrecy.workspace = true
+semver = { workspace = true, features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -22,3 +24,5 @@ wokrouter-wokcore-client = { path = "../../crates/wokrouter-wokcore-client" }
 
 [dev-dependencies]
 tempfile.workspace = true
+wiremock.workspace = true
+wokrouter-platform = { path = "../../crates/wokrouter-platform", features = ["test-support"] }

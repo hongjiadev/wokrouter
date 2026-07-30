@@ -5,7 +5,7 @@ use wokrouter_platform::{AppPaths, WokCoreRuntimeChannel, select_wokcore_runtime
 use wokrouter_wokcore_client::ServicePhase;
 
 #[tokio::test]
-async fn missing_wokcore_has_stable_status_start_and_stop_contracts() {
+async fn missing_wokcore_has_stable_status_and_stop_contracts() {
     let home = tempfile::tempdir().unwrap();
     let paths = isolated_paths(&home);
     let runtime = select_wokcore_runtime(&paths).await.unwrap();
@@ -20,12 +20,6 @@ async fn missing_wokcore_has_stable_status_start_and_stop_contracts() {
         "{\"state\":\"missing\",\"runtime_channel\":\"production\",\"capabilities\":[],\"error_code\":\"missing\"}"
     );
 
-    assert_eq!(
-        wokrouter_cli::commands::start::execute(&runtime)
-            .await
-            .unwrap_err(),
-        CommandError::WokCoreMissing
-    );
     assert_eq!(
         wokrouter_cli::commands::stop::execute(&runtime)
             .await

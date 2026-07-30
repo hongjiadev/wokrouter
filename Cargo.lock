@@ -5483,12 +5483,15 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 name = "wokrouter-cli"
 version = "0.1.22"
 dependencies = [
+ "async-trait",
  "secrecy",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "wiremock",
  "wokrouter-platform",
  "wokrouter-storage",
  "wokrouter-wokcore-client",
