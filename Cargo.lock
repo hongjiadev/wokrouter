@@ -5520,6 +5520,7 @@ name = "wokrouter-platform"
 version = "0.1.22"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "flate2",
  "fs4",
  "jiff",

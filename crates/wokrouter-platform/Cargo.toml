@@ -12,6 +12,7 @@ test-support = []
 
 [dependencies]
 base64.workspace = true
+bytes.workspace = true
 fs4.workspace = true
 jiff = { workspace = true, features = ["tzdb-concatenated"] }
 minisign-verify.workspace = true

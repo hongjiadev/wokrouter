@@ -517,6 +517,15 @@ async fn artifact_hash_mismatch_leaves_no_install_or_record() {
 
     assert_eq!(error, WokCoreInstallError::ArtifactHashMismatch);
     assert_no_installing(&progress);
+    assert_eq!(
+        progress.0.last(),
+        Some(&WokCoreInstallProgress {
+            phase: WokCoreInstallPhase::Verifying,
+            target_version: Some(Version::new(1, 2, 3)),
+            bytes_completed: None,
+            bytes_total: None,
+        })
+    );
     assert!(!paths.wokcore_install_record.exists());
     assert!(
         !paths
@@ -588,7 +597,15 @@ async fn invalid_manifest_signature_is_rejected_before_artifact_download() {
 
     assert_eq!(error, WokCoreInstallError::InvalidSignature);
     assert!(!paths.wokcore_install_record.exists());
-    assert_no_installing(&progress);
+    assert_eq!(
+        progress.0,
+        [WokCoreInstallProgress {
+            phase: WokCoreInstallPhase::CheckingRelease,
+            target_version: None,
+            bytes_completed: None,
+            bytes_total: None,
+        }]
+    );
 }
 
 #[tokio::test]
@@ -606,6 +623,33 @@ async fn unsafe_install_directory_fails_before_network_access() {
     let error = install_missing_wokcore(&paths, &source).await.unwrap_err();
 
     assert_eq!(error, WokCoreInstallError::UnsafeInstallLocation);
+}
+
+#[tokio::test]
+async fn unreachable_release_reports_only_an_unversioned_checking_prefix() {
+    let fixture = tempdir().unwrap();
+    let paths = app_paths(fixture.path());
+    let source = WokCoreInstallSource::loopback(
+        Url::parse("http://127.0.0.1:9/releases/").unwrap(),
+        PUBLIC_KEY,
+    )
+    .unwrap();
+    let mut progress = RecordingProgress::default();
+
+    let error = install_missing_wokcore_with_progress(&paths, &source, &mut progress)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, WokCoreInstallError::DownloadFailed);
+    assert_eq!(
+        progress.0,
+        [WokCoreInstallProgress {
+            phase: WokCoreInstallPhase::CheckingRelease,
+            target_version: None,
+            bytes_completed: None,
+            bytes_total: None,
+        }]
+    );
 }
 
 #[tokio::test]
