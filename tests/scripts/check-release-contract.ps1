@@ -247,29 +247,29 @@ if ($failures.Count -eq 0) {
             "x86_64-unknown-linux-gnu"
         )
         [string[]] $expectedPayloads = @(
-            "WokRouter-v0.1.19-Linux-arm64.AppImage",
-            "WokRouter-v0.1.19-Linux-arm64.deb",
-            "WokRouter-v0.1.19-Linux-arm64.rpm",
-            "WokRouter-v0.1.19-Linux-x86_64.AppImage",
-            "WokRouter-v0.1.19-Linux-x86_64.deb",
-            "WokRouter-v0.1.19-Linux-x86_64.rpm",
-            "WokRouter-v0.1.19-Windows-arm64-Portable.zip",
-            "WokRouter-v0.1.19-Windows-arm64.msi",
-            "WokRouter-v0.1.19-Windows-x86_64-Portable.zip",
-            "WokRouter-v0.1.19-Windows-x86_64.msi",
-            "WokRouter-v0.1.19-macOS-arm64.dmg",
-            "WokRouter-v0.1.19-macOS-arm64.tar.gz",
-            "WokRouter-v0.1.19-macOS-arm64.zip",
-            "WokRouter-v0.1.19-macOS-x86_64.dmg",
-            "WokRouter-v0.1.19-macOS-x86_64.tar.gz",
-            "WokRouter-v0.1.19-macOS-x86_64.zip"
+            "WokRouter-v0.1.20-Linux-arm64.AppImage",
+            "WokRouter-v0.1.20-Linux-arm64.deb",
+            "WokRouter-v0.1.20-Linux-arm64.rpm",
+            "WokRouter-v0.1.20-Linux-x86_64.AppImage",
+            "WokRouter-v0.1.20-Linux-x86_64.deb",
+            "WokRouter-v0.1.20-Linux-x86_64.rpm",
+            "WokRouter-v0.1.20-Windows-arm64-Portable.zip",
+            "WokRouter-v0.1.20-Windows-arm64.msi",
+            "WokRouter-v0.1.20-Windows-x86_64-Portable.zip",
+            "WokRouter-v0.1.20-Windows-x86_64.msi",
+            "WokRouter-v0.1.20-macOS-arm64.dmg",
+            "WokRouter-v0.1.20-macOS-arm64.tar.gz",
+            "WokRouter-v0.1.20-macOS-arm64.zip",
+            "WokRouter-v0.1.20-macOS-x86_64.dmg",
+            "WokRouter-v0.1.20-macOS-x86_64.tar.gz",
+            "WokRouter-v0.1.20-macOS-x86_64.zip"
         )
         [string[]] $actualTargets = @(
-            Get-WokRouterTargetContracts -Version "0.1.19" |
+            Get-WokRouterTargetContracts -Version "0.1.20" |
                 ForEach-Object Target
         )
         [string[]] $actualPayloads = @(
-            Get-WokRouterPayloadNames -Version "0.1.19"
+            Get-WokRouterPayloadNames -Version "0.1.20"
         )
         if (
             [string]::Join("`n", $actualTargets) -cne
