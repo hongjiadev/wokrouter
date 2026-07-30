@@ -595,6 +595,8 @@ try {
                 'Invoke-MsiRows',
                 '-FieldCount 2',
                 '-FieldCount 3',
+                '$null = $view.Execute()',
+                '$null = $view.Close()',
                 '$_.Fields[0] -ceq "ProductName"',
                 '$_.Fields[0] -ceq "ProductVersion"',
                 'ForEach-Object { [string] $_.Fields[2] }'

@@ -89,7 +89,7 @@ function Invoke-MsiRows {
 
     $view = $Database.OpenView($Sql)
     try {
-        $view.Execute()
+        $null = $view.Execute()
         $rows = [Collections.Generic.List[object]]::new()
         while ($record = $view.Fetch()) {
             $fields = [Collections.Generic.List[string]]::new()
@@ -105,7 +105,7 @@ function Invoke-MsiRows {
         return $rows.ToArray()
     }
     finally {
-        $view.Close()
+        $null = $view.Close()
         [Runtime.InteropServices.Marshal]::FinalReleaseComObject($view) |
             Out-Null
     }
