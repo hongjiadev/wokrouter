@@ -794,6 +794,25 @@ try {
         if ($actual.Count -ne 3) { throw "Linux packager returned the wrong output count." }
     }
 
+    Invoke-Scenario -Name "Linux allows bundle-patched desktop executables" -Test {
+        $root = New-FixtureRoot
+        $bundle = New-LinuxFixture -Root $root
+        foreach ($format in @("appimage", "deb", "rpm")) {
+            Write-Utf8File `
+                -Path (Join-Path $root "$format-tree/usr/bin/wokrouter-desktop") `
+                -Content "desktop-patched-$format"
+        }
+        $adapter = New-ToolAdapter -Root $root
+        $actual = Invoke-Packager -Path $linuxScript -FixtureRoot $root -Arguments @{
+            BundleDirectory = $bundle
+            OutputDirectory = (Join-Path $root "output")
+            Version = $version
+            Target = "x86_64-unknown-linux-gnu"
+            ToolAdapterPath = $adapter
+        }
+        if ($actual.Count -ne 3) { throw "Linux packager returned the wrong output count." }
+    }
+
     Invoke-Scenario -Name "Linux rejects missing duplicate extra and directory sources" -Test {
         foreach ($mutation in @("missing", "duplicate", "extra", "directory")) {
             $root = New-FixtureRoot
