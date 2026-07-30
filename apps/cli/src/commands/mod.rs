@@ -3,7 +3,10 @@ use std::{collections::BTreeSet, path::PathBuf};
 use secrecy::SecretString;
 use serde::Serialize;
 use wokrouter_platform::IntegrationError;
-use wokrouter_platform::{AppPaths, PlatformError, discover_wokcore_executable};
+use wokrouter_platform::{
+    AppPaths, PlatformError, SelectedWokCoreRuntime, WokCoreRuntimeChannel,
+    discover_wokcore_executable,
+};
 use wokrouter_storage::{NativeWokCoreTokenVault, TokenVaultError, WokCoreTokenVault};
 use wokrouter_wokcore_client::{
     AuthorizationError, CoreConnection, CoreHandshake, ServiceError, ServicePhase, ServiceStatus,
@@ -17,6 +20,31 @@ pub mod stop;
 
 pub const NOT_RUNNING_EXIT_CODE: u8 = 3;
 pub const AUTHORIZATION_REQUIRED_EXIT_CODE: u8 = 4;
+
+pub(crate) trait CommandRuntime {
+    fn channel(&self) -> WokCoreRuntimeChannel;
+    fn executable(&self) -> Option<&std::path::Path>;
+    fn client(&self) -> &WokCoreClient;
+    async fn connection(&self) -> CoreConnection;
+}
+
+impl CommandRuntime for SelectedWokCoreRuntime {
+    fn channel(&self) -> WokCoreRuntimeChannel {
+        self.channel()
+    }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        self.executable()
+    }
+
+    fn client(&self) -> &WokCoreClient {
+        self.client()
+    }
+
+    async fn connection(&self) -> CoreConnection {
+        self.connection().await
+    }
+}
 
 pub fn client(paths: &AppPaths) -> Result<WokCoreClient, CommandError> {
     WokCoreClient::new(&paths.wokcore_discovery_file).map_err(CommandError::from)
@@ -62,30 +90,45 @@ fn clone_secret(token: &SecretString) -> SecretString {
     SecretString::from(token.expose_secret().to_owned())
 }
 
-pub fn public_status(connection: CoreConnection) -> CoreStatus {
+pub fn public_status(
+    runtime_channel: WokCoreRuntimeChannel,
+    connection: CoreConnection,
+) -> CoreStatus {
     match connection {
-        CoreConnection::Missing => CoreStatus::bare(CoreUiState::Stopped, "not_running"),
-        CoreConnection::Stopped => CoreStatus::bare(CoreUiState::Stopped, "not_running"),
+        CoreConnection::Missing => {
+            CoreStatus::bare(runtime_channel, CoreUiState::Stopped, "not_running")
+        }
+        CoreConnection::Stopped => {
+            CoreStatus::bare(runtime_channel, CoreUiState::Stopped, "not_running")
+        }
         CoreConnection::Incompatible(_) => {
-            CoreStatus::bare(CoreUiState::Incompatible, "incompatible")
+            CoreStatus::bare(runtime_channel, CoreUiState::Incompatible, "incompatible")
         }
-        CoreConnection::InvalidRuntime => {
-            CoreStatus::bare(CoreUiState::InvalidRuntime, "invalid_runtime")
-        }
-        CoreConnection::Running(handshake) => {
-            CoreStatus::from_handshake(CoreUiState::AuthorizationRequired, handshake)
-        }
+        CoreConnection::InvalidRuntime => CoreStatus::bare(
+            runtime_channel,
+            CoreUiState::InvalidRuntime,
+            "invalid_runtime",
+        ),
+        CoreConnection::Running(handshake) => CoreStatus::from_handshake(
+            runtime_channel,
+            CoreUiState::AuthorizationRequired,
+            handshake,
+        ),
     }
 }
 
-pub fn protected_status(handshake: CoreHandshake, service: ServiceStatus) -> CoreStatus {
+pub fn protected_status(
+    runtime_channel: WokCoreRuntimeChannel,
+    handshake: CoreHandshake,
+    service: ServiceStatus,
+) -> CoreStatus {
     let state = match service.phase {
         ServicePhase::Starting => CoreUiState::Starting,
         ServicePhase::Running => CoreUiState::Running,
         ServicePhase::Draining | ServicePhase::AwaitingCancellation => CoreUiState::Draining,
         ServicePhase::Stopping => CoreUiState::Stopped,
     };
-    let mut status = CoreStatus::from_handshake(state, handshake);
+    let mut status = CoreStatus::from_handshake(runtime_channel, state, handshake);
     status.phase = Some(service.phase);
     status.active_requests = Some(service.active_requests);
     status.error_code = None;
@@ -108,6 +151,7 @@ pub enum CoreUiState {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CoreStatus {
     pub state: CoreUiState,
+    pub runtime_channel: WokCoreRuntimeChannel,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -122,13 +166,18 @@ pub struct CoreStatus {
 }
 
 impl CoreStatus {
-    pub fn missing() -> Self {
-        Self::bare(CoreUiState::Missing, "missing")
+    pub fn missing(runtime_channel: WokCoreRuntimeChannel) -> Self {
+        Self::bare(runtime_channel, CoreUiState::Missing, "missing")
     }
 
-    fn bare(state: CoreUiState, error_code: &'static str) -> Self {
+    fn bare(
+        runtime_channel: WokCoreRuntimeChannel,
+        state: CoreUiState,
+        error_code: &'static str,
+    ) -> Self {
         Self {
             state,
+            runtime_channel,
             version: None,
             management_api_major: None,
             capabilities: BTreeSet::new(),
@@ -138,9 +187,14 @@ impl CoreStatus {
         }
     }
 
-    fn from_handshake(state: CoreUiState, handshake: CoreHandshake) -> Self {
+    fn from_handshake(
+        runtime_channel: WokCoreRuntimeChannel,
+        state: CoreUiState,
+        handshake: CoreHandshake,
+    ) -> Self {
         Self {
             state,
+            runtime_channel,
             version: Some(handshake.version),
             management_api_major: Some(handshake.management_api_major),
             capabilities: handshake.capabilities,
@@ -151,7 +205,8 @@ impl CoreStatus {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
 pub enum CommandError {
     #[error(
         "usage: wokrouter <start|status [--json]|stop|integrate <client>|restore <client>|doctor [--json|--repair <check-id>]|integration-token <client>>"
@@ -175,6 +230,8 @@ pub enum CommandError {
     InvalidRuntime,
     #[error("WokCore API version is incompatible")]
     Incompatible,
+    #[error("the development WokCore runtime is managed by the IDE")]
+    DevelopmentRuntimeManagedByIde,
     #[error("the client home directory is unavailable")]
     ClientHomeUnavailable,
     #[error("the client integration is not installed")]

@@ -280,6 +280,7 @@ mod tests {
         cli_command,
     };
     use wokrouter_cli::commands::{CoreStatus, CoreUiState};
+    use wokrouter_platform::WokCoreRuntimeChannel;
 
     enum FakeBehavior {
         Fail,
@@ -397,6 +398,7 @@ mod tests {
             } else {
                 CoreUiState::Stopped
             },
+            runtime_channel: WokCoreRuntimeChannel::Production,
             version: running.then(|| "0.1.0".to_owned()),
             management_api_major: running.then_some(1),
             capabilities: BTreeSet::new(),

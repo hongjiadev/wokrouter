@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 use wokrouter_cli::commands::{self, CommandError};
-use wokrouter_platform::{AppPaths, ClientKind};
+use wokrouter_platform::{AppPaths, ClientKind, select_wokcore_runtime};
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
@@ -30,9 +30,18 @@ async fn run() -> Result<u8, CommandError> {
     let command = parse_command(std::env::args().skip(1))?;
     let paths = AppPaths::discover()?;
     match command {
-        Command::Start => commands::start::execute(&paths).await,
-        Command::Status { json } => commands::status::execute(&paths, json).await,
-        Command::Stop => commands::stop::execute(&paths).await,
+        Command::Start => {
+            let runtime = select_wokcore_runtime(&paths).await?;
+            commands::start::execute(&runtime).await
+        }
+        Command::Status { json } => {
+            let runtime = select_wokcore_runtime(&paths).await?;
+            commands::status::execute(&runtime, json).await
+        }
+        Command::Stop => {
+            let runtime = select_wokcore_runtime(&paths).await?;
+            commands::stop::execute(&runtime).await
+        }
         Command::Integrate { client } => commands::integrations::integrate(&paths, client).await,
         Command::Restore { client } => commands::integrations::restore(&paths, client).await,
         Command::Doctor { json } => commands::integrations::doctor(&paths, json).await,
