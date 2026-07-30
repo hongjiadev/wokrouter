@@ -1006,7 +1006,7 @@ try {
         -Encoding UTF8 `
         -LiteralPath $appImageLinks.Targets["WokRouter.desktop"]
     if ($desktopEntry -notmatch (
-            "(?m)^X-AppImage-Version=" + [regex]::Escape($Version) + "$"
+            "(?m)^X-AppImage-Version=" + [regex]::Escape($Version) + "\r?$"
         )) {
         throw "AppImage version metadata does not match '$Version'."
     }

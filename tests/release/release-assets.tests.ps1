@@ -656,6 +656,11 @@ try {
     Invoke-Scenario -Name "Linux accepts exact x86_64 Tauri AppImage links" -Test {
         $root = New-FixtureRoot
         $bundle = New-LinuxFixture -Root $root
+        [IO.File]::WriteAllText(
+            (Join-Path $root "appimage-tree/usr/share/applications/WokRouter.desktop"),
+            "X-AppImage-Version=$version`r`n",
+            [Text.UTF8Encoding]::new($false)
+        )
         [IO.Directory]::CreateDirectory(
             (Join-Path $bundle "appimage/WokRouter.AppDir")
         ) | Out-Null
