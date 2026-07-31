@@ -4,7 +4,7 @@ import type { CoreOperation } from "../coreOperation";
 
 type CoreOperationPanelProps = {
   operation: CoreOperation;
-  onRetry: () => void;
+  onRetry: (trigger?: HTMLButtonElement) => void;
 };
 
 const phaseCopy: Record<CoreOperation["phase"], string> = {
@@ -152,15 +152,39 @@ export function CoreOperationPanel({
     : undefined;
   const failed = operation.state === "failed";
   const succeeded = operation.state === "succeeded";
-  const announcement = failed
-    ? "WokCore setup did not finish"
-    : succeeded
-      ? "WokCore is ready"
-      : phaseCopy[operation.phase];
+  const isUpdate = operation.operation === "update";
+  const recoveryRequired =
+    isUpdate && operation.errorCode === "recovery_required";
+  const updateIsCurrent =
+    isUpdate && succeeded && operation.targetVersion === undefined;
+  const announcement = recoveryRequired
+    ? "WokCore recovery required"
+    : failed
+      ? isUpdate
+        ? "WokCore update did not finish"
+        : "WokCore setup did not finish"
+      : succeeded
+        ? isUpdate
+          ? updateIsCurrent
+            ? "WokCore is already current"
+            : "WokCore updated"
+          : "WokCore is ready"
+        : phaseCopy[operation.phase];
+  const failureCopy =
+    operation.errorCode === "active_requests_remain" &&
+    operation.activeRequests !== undefined
+      ? `${new Intl.NumberFormat().format(operation.activeRequests)} active requests remain. WokCore is still serving them; try the update again later.`
+      : (errorCopy[operation.errorCode ?? ""] ??
+        "WokRouter could not complete the operation safely. Check WokCore status and try again.");
+  const successCopy = isUpdate
+    ? updateIsCurrent
+      ? `The fresh signed check reports WokCore ${operation.currentVersion ?? ""} is already current.`.trim()
+      : `Verified WokCore ${operation.targetVersion ?? ""} is installed and ready.`.trim()
+    : "The verified WokCore operation completed successfully.";
 
   return (
     <section
-      className="health-panel core-operation-panel"
+      className={`health-panel core-operation-panel${recoveryRequired ? " core-operation-panel--urgent" : ""}`}
       aria-labelledby="core-operation-heading"
     >
       <p
@@ -179,10 +203,9 @@ export function CoreOperationPanel({
       <h1 id="core-operation-heading">{announcement}</h1>
       <p className="health-summary">
         {failed
-          ? (errorCopy[operation.errorCode ?? ""] ??
-            "WokRouter could not complete the operation safely. Check WokCore status and try again.")
+          ? failureCopy
           : succeeded
-            ? "The verified WokCore operation completed successfully."
+            ? successCopy
             : phaseCopy[operation.phase]}
       </p>
 
@@ -227,10 +250,22 @@ export function CoreOperationPanel({
           <button
             className="button button--primary"
             type="button"
-            onClick={onRetry}
+            onClick={(event) => onRetry(event.currentTarget)}
           >
-            Try again
+            {isUpdate && operation.errorCode === "active_requests_remain"
+              ? "Try update later"
+              : isUpdate
+                ? "Try update again"
+                : "Try again"}
           </button>
+          {recoveryRequired && (
+            <a
+              className="button button--secondary"
+              href="#management-tab-diagnostics"
+            >
+              Open diagnostics
+            </a>
+          )}
           <p className="action-note">
             Closing this window never cancels a WokCore operation.
           </p>

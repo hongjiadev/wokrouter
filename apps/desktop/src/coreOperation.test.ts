@@ -4,12 +4,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   checkCoreUpdate,
+  checkCoreUpdateOnce,
   getCoreOperation,
   installAndStartCore,
   installCoreUpdate,
   listenForCoreOperation,
   parseCoreOperation,
   parseCoreUpdateCheck,
+  rememberCoreUpdateCompletion,
+  retryCoreUpdateCheck,
   type CoreOperation,
 } from "./coreOperation";
 
@@ -248,6 +251,58 @@ describe("core operation bridge", () => {
     expect(invoke).toHaveBeenNthCalledWith(4, "install_core_update", {
       expectedVersion: "0.1.23",
     });
+  });
+
+  it("shares one automatic attempt across remounts and permits only manual retry", async () => {
+    const check = Promise.reject(new Error("offline"));
+    vi.mocked(invoke)
+      .mockReturnValueOnce(check)
+      .mockResolvedValueOnce({
+        code: "update_available",
+        current_version: "0.1.22",
+        target_version: "0.1.23",
+      });
+
+    const first = checkCoreUpdateOnce();
+    const second = checkCoreUpdateOnce();
+    await expect(first).rejects.toThrow("offline");
+    await expect(second).rejects.toThrow("offline");
+    const remounted = checkCoreUpdateOnce();
+    await expect(remounted).rejects.toThrow("offline");
+    expect(invoke).toHaveBeenCalledTimes(2);
+
+    const retry = retryCoreUpdateCheck();
+
+    await expect(retry).resolves.toEqual({
+      code: "update_available",
+      currentVersion: "0.1.22",
+      targetVersion: "0.1.23",
+    });
+    expect(invoke).toHaveBeenCalledTimes(3);
+    expect(invoke).toHaveBeenLastCalledWith("check_core_update");
+    await expect(checkCoreUpdateOnce()).resolves.toEqual({
+      code: "update_available",
+      currentVersion: "0.1.22",
+      targetVersion: "0.1.23",
+    });
+    expect(invoke).toHaveBeenCalledTimes(3);
+
+    rememberCoreUpdateCompletion(
+      parseCoreOperation(
+        operation({
+          operation: "update",
+          state: "succeeded",
+          phase: "completed",
+          current_version: "0.1.22",
+          target_version: "0.1.24",
+        }),
+      ),
+    );
+    await expect(checkCoreUpdateOnce()).resolves.toEqual({
+      code: "current",
+      currentVersion: "0.1.24",
+    });
+    expect(invoke).toHaveBeenCalledTimes(3);
   });
 
   it("rejects malformed command responses", async () => {

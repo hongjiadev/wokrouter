@@ -478,6 +478,38 @@ export async function checkCoreUpdate(): Promise<CoreUpdateCheck> {
   return parseCoreUpdateCheck(await invoke<unknown>("check_core_update"));
 }
 
+let startupUpdateCheck: Promise<CoreUpdateCheck> | undefined;
+
+export function checkCoreUpdateOnce(): Promise<CoreUpdateCheck> {
+  startupUpdateCheck ??= checkCoreUpdate();
+  return startupUpdateCheck;
+}
+
+export function retryCoreUpdateCheck(): Promise<CoreUpdateCheck> {
+  startupUpdateCheck = checkCoreUpdate();
+  return startupUpdateCheck;
+}
+
+export function rememberCoreUpdateCompletion(
+  operation: CoreOperation,
+): void {
+  if (
+    operation.operation !== "update" ||
+    operation.state !== "succeeded" ||
+    operation.phase !== "completed"
+  ) {
+    return;
+  }
+  const currentVersion =
+    operation.targetVersion ?? operation.currentVersion;
+  if (currentVersion !== undefined) {
+    startupUpdateCheck = Promise.resolve({
+      code: "current",
+      currentVersion,
+    });
+  }
+}
+
 export function installCoreUpdate(
   expectedVersion: string,
 ): Promise<CoreOperation> {

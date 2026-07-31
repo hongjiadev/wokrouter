@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -19,7 +19,7 @@ vi.mock("../control", () => ({
   stopCore: vi.fn(),
 }));
 
-function renderHealth() {
+function renderHealth(props: ComponentProps<typeof CoreHealth> = {}) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
@@ -30,7 +30,7 @@ function renderHealth() {
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
 
-  return render(<CoreHealth />, { wrapper: Wrapper });
+  return render(<CoreHealth {...props} />, { wrapper: Wrapper });
 }
 
 function status(
@@ -132,6 +132,56 @@ describe("CoreHealth", () => {
     ).toBeEnabled();
     expect(startCore).not.toHaveBeenCalled();
     expect(stopCore).not.toHaveBeenCalled();
+  });
+
+  it("offers the verified production update candidate through its owner", async () => {
+    vi.mocked(getCoreStatus).mockResolvedValue(
+      status("running", { version: "0.1.22" }),
+    );
+    const onUpgrade = vi.fn();
+    const user = userEvent.setup();
+
+    renderHealth({
+      updateCheck: {
+        code: "update_available",
+        currentVersion: "0.1.22",
+        targetVersion: "0.1.23",
+      },
+      onUpgrade,
+    });
+
+    const trigger = await screen.findByRole("button", {
+      name: "Upgrade WokCore",
+    });
+    await user.click(trigger);
+    expect(onUpgrade).toHaveBeenCalledWith(trigger);
+  });
+
+  it("suppresses even a supplied update candidate for development", async () => {
+    vi.mocked(getCoreStatus).mockResolvedValue(
+      status("running", {
+        runtime_channel: "development",
+        version: "0.1.22",
+      }),
+    );
+
+    renderHealth({
+      updateCheck: {
+        code: "update_available",
+        currentVersion: "0.1.22",
+        targetVersion: "0.1.23",
+      },
+      updateCheckFailed: true,
+      onCheckForUpdates: vi.fn(),
+      onUpgrade: vi.fn(),
+    });
+
+    expect(await screen.findByText("Development")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: /upgrade wokcore|check for updates/i,
+      }),
+    ).not.toBeInTheDocument();
   });
 
   it("starts a stopped WokCore and refreshes its status", async () => {

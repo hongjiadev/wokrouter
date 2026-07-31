@@ -150,4 +150,123 @@ describe("CoreOperationPanel", () => {
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   });
+
+  it("reports a verified update target without using setup success copy", () => {
+    render(
+      <CoreOperationPanel
+        operation={operation({
+          operation: "update",
+          state: "succeeded",
+          phase: "completed",
+          currentVersion: "0.1.22",
+          targetVersion: "0.1.23",
+        })}
+        onRetry={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "WokCore updated" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/verified WokCore 0\.1\.23/i),
+    ).toBeInTheDocument();
+  });
+
+  it("reports a stale candidate as current without claiming installation", () => {
+    render(
+      <CoreOperationPanel
+        operation={operation({
+          operation: "update",
+          state: "succeeded",
+          phase: "completed",
+          currentVersion: "0.1.22",
+        })}
+        onRetry={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", {
+        name: "WokCore is already current",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/installed successfully/i)).not.toBeInTheDocument();
+  });
+
+  it("shows capped active-request context and defers retry", () => {
+    render(
+      <CoreOperationPanel
+        operation={operation({
+          operation: "update",
+          state: "failed",
+          phase: "completed",
+          activeRequests: 1_000_000,
+          errorCode: "active_requests_remain",
+        })}
+        onRetry={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText(/1,000,000 active requests remain/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Try update later" }),
+    ).toBeEnabled();
+  });
+
+  it.each([
+    [
+      "rolled_back",
+      /previous version was restored/i,
+    ],
+    [
+      "update_verification_failed",
+      /no untrusted update was installed/i,
+    ],
+    [
+      "update_install_failed",
+      /review diagnostics and try again/i,
+    ],
+  ] as const)("shows safe transactional copy for %s", (errorCode, copy) => {
+    render(
+      <CoreOperationPanel
+        operation={operation({
+          operation: "update",
+          state: "failed",
+          phase: "completed",
+          errorCode,
+        })}
+        onRetry={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(copy)).toBeInTheDocument();
+  });
+
+  it("marks recovery_required as high priority and links diagnostics", () => {
+    render(
+      <CoreOperationPanel
+        operation={operation({
+          operation: "update",
+          state: "failed",
+          phase: "completed",
+          errorCode: "recovery_required",
+        })}
+        onRetry={vi.fn()}
+      />,
+    );
+
+    const heading = screen.getByRole("heading", {
+      name: "WokCore recovery required",
+    });
+    expect(heading).toBeInTheDocument();
+    expect(heading.closest("section")).toHaveClass(
+      "core-operation-panel--urgent",
+    );
+    expect(
+      screen.getByRole("link", { name: "Open diagnostics" }),
+    ).toHaveAttribute("href", "#management-tab-diagnostics");
+  });
 });

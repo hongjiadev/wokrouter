@@ -8,6 +8,15 @@ import {
   stopCore,
   type CoreStatus,
 } from "../control";
+import type { CoreUpdateCheck } from "../coreOperation";
+
+type CoreHealthProps = {
+  updateCheck?: CoreUpdateCheck;
+  updateCheckFailed?: boolean;
+  updateCheckPending?: boolean;
+  onCheckForUpdates?: () => void;
+  onUpgrade?: (trigger: HTMLButtonElement) => void;
+};
 
 const stateCopy: Record<
   CoreStatus["state"],
@@ -87,7 +96,13 @@ function LoadingHealth() {
   );
 }
 
-export function CoreHealth() {
+export function CoreHealth({
+  updateCheck,
+  updateCheckFailed = false,
+  updateCheckPending = false,
+  onCheckForUpdates,
+  onUpgrade,
+}: CoreHealthProps = {}) {
   const queryClient = useQueryClient();
   const status = useQuery({
     queryKey: coreStatusQueryKey,
@@ -148,6 +163,12 @@ export function CoreHealth() {
     const canRetry =
       status.data.state === "incompatible" ||
       status.data.state === "invalid_runtime";
+    const updateAvailable =
+      !isDevelopment &&
+      updateCheck?.code === "update_available" &&
+      updateCheck.targetVersion !== undefined;
+    const canRetryUpdateCheck =
+      !isDevelopment && updateCheckFailed && onCheckForUpdates !== undefined;
     const actionError = start.isError
       ? "WokCore could not start"
       : stop.isError
@@ -259,6 +280,32 @@ export function CoreHealth() {
             >
               {status.isFetching ? "Checking…" : "Check again"}
             </button>
+          )}
+          {updateAvailable && onUpgrade && (
+            <button
+              className="button button--primary"
+              type="button"
+              onClick={(event) => onUpgrade(event.currentTarget)}
+            >
+              Upgrade WokCore
+            </button>
+          )}
+          {canRetryUpdateCheck && (
+            <div className="recovery-error">
+              <strong>WokCore update check unavailable</strong>
+              <span>
+                WokRouter could not verify whether an update is available.
+                The current WokCore remains unchanged.
+              </span>
+              <button
+                className="button button--secondary"
+                type="button"
+                disabled={updateCheckPending}
+                onClick={onCheckForUpdates}
+              >
+                {updateCheckPending ? "Checking…" : "Check for updates"}
+              </button>
+            </div>
           )}
           <p className="action-note">
             {isDevelopment
