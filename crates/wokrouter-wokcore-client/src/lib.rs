@@ -11,7 +11,12 @@ mod service;
 mod sessions;
 mod usage;
 
-use std::{fmt, num::NonZeroU32, path::PathBuf};
+use std::{
+    fmt,
+    num::NonZeroU32,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
 
 use discovery::DiscoveryRead;
 use http::{CapabilitiesWire, HealthWire, HttpError, WokCoreHttp};
@@ -48,7 +53,50 @@ const SUPPORTED_API_MAJOR: u32 = 1;
 pub struct WokCoreClient {
     discovery_file: PathBuf,
     http: WokCoreHttp,
-    expected_process_id: Option<NonZeroU32>,
+    runtime_policy: RuntimePolicy,
+}
+
+pub type WokCoreRuntimeValidator = dyn Fn(NonZeroU32) -> bool + Send + Sync;
+
+#[derive(Clone)]
+enum RuntimePolicy {
+    Unrestricted,
+    Fixed {
+        identity: WokCoreRuntimeIdentity,
+        validator: Arc<WokCoreRuntimeValidator>,
+    },
+    PendingTrustedExecutable(Arc<OnceLock<Arc<WokCoreRuntimeValidator>>>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WokCoreRuntimeIdentity {
+    process_id: NonZeroU32,
+    instance_id: Uuid,
+}
+
+impl WokCoreRuntimeIdentity {
+    pub fn process_id(self) -> NonZeroU32 {
+        self.process_id
+    }
+}
+
+#[derive(Clone)]
+pub struct WokCoreRuntimeBinder {
+    validator: Arc<OnceLock<Arc<WokCoreRuntimeValidator>>>,
+}
+
+impl WokCoreRuntimeBinder {
+    pub fn bind_trusted_executable(&self, validator: Arc<WokCoreRuntimeValidator>) -> bool {
+        self.validator.set(validator).is_ok() || self.validator.get().is_some()
+    }
+}
+
+impl fmt::Debug for WokCoreRuntimeBinder {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WokCoreRuntimeBinder")
+            .finish_non_exhaustive()
+    }
 }
 
 impl WokCoreClient {
@@ -56,23 +104,50 @@ impl WokCoreClient {
         Ok(Self {
             discovery_file: discovery_file.into(),
             http: WokCoreHttp::new()?,
-            expected_process_id: None,
+            runtime_policy: RuntimePolicy::Unrestricted,
         })
     }
 
-    pub fn discovered_process_id(&self) -> Option<NonZeroU32> {
-        match self.read_discovery() {
-            DiscoveryRead::Record(record) => Some(record.process_id),
+    pub fn discovered_runtime_identity(&self) -> Option<WokCoreRuntimeIdentity> {
+        match discovery::read(&self.discovery_file) {
+            DiscoveryRead::Record(record) => Some(WokCoreRuntimeIdentity {
+                process_id: record.process_id,
+                instance_id: record.instance_id,
+            }),
             DiscoveryRead::Missing | DiscoveryRead::Invalid => None,
         }
     }
 
-    pub fn bound_to_process(&self, process_id: NonZeroU32) -> Self {
+    pub fn discovered_process_id(&self) -> Option<NonZeroU32> {
+        self.discovered_runtime_identity()
+            .map(WokCoreRuntimeIdentity::process_id)
+    }
+
+    pub fn bound_to_runtime(
+        &self,
+        identity: WokCoreRuntimeIdentity,
+        validator: Arc<WokCoreRuntimeValidator>,
+    ) -> Self {
         Self {
             discovery_file: self.discovery_file.clone(),
             http: self.http.clone(),
-            expected_process_id: Some(process_id),
+            runtime_policy: RuntimePolicy::Fixed {
+                identity,
+                validator,
+            },
         }
+    }
+
+    pub fn pending_trusted_executable_runtime(&self) -> (Self, WokCoreRuntimeBinder) {
+        let validator = Arc::new(OnceLock::new());
+        (
+            Self {
+                discovery_file: self.discovery_file.clone(),
+                http: self.http.clone(),
+                runtime_policy: RuntimePolicy::PendingTrustedExecutable(Arc::clone(&validator)),
+            },
+            WokCoreRuntimeBinder { validator },
+        )
     }
 
     pub async fn connection(&self) -> CoreConnection {
@@ -96,6 +171,9 @@ impl WokCoreClient {
         if !valid_health(&health, discovery.instance_id) {
             return CoreConnection::InvalidRuntime;
         }
+        if !self.runtime_authorized(&discovery) {
+            return CoreConnection::Missing;
+        }
 
         let capabilities = match self.http.capabilities(&discovery).await {
             Ok(capabilities) => capabilities,
@@ -106,16 +184,39 @@ impl WokCoreClient {
     }
 
     fn read_discovery(&self) -> DiscoveryRead {
+        if matches!(
+            &self.runtime_policy,
+            RuntimePolicy::PendingTrustedExecutable(validator) if validator.get().is_none()
+        ) {
+            return DiscoveryRead::Missing;
+        }
         match discovery::read(&self.discovery_file) {
-            DiscoveryRead::Record(record)
-                if self
-                    .expected_process_id
-                    .is_some_and(|expected| expected != record.process_id) =>
-            {
+            DiscoveryRead::Record(record) if !self.runtime_authorized(&record) => {
                 DiscoveryRead::Missing
             }
             other => other,
         }
+    }
+
+    pub(crate) fn runtime_authorized(&self, record: &discovery::ValidatedDiscovery) -> bool {
+        match &self.runtime_policy {
+            RuntimePolicy::Unrestricted => true,
+            RuntimePolicy::Fixed {
+                identity,
+                validator,
+            } => {
+                identity.process_id == record.process_id
+                    && identity.instance_id == record.instance_id
+                    && validator(record.process_id)
+            }
+            RuntimePolicy::PendingTrustedExecutable(validator) => validator
+                .get()
+                .is_some_and(|validator| validator(record.process_id)),
+        }
+    }
+
+    pub(crate) fn has_runtime_policy(&self) -> bool {
+        !matches!(self.runtime_policy, RuntimePolicy::Unrestricted)
     }
 }
 

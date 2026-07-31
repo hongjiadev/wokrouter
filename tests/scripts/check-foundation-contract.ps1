@@ -15,6 +15,7 @@ $denyPath = Join-Path $rootPath "deny.toml"
 $developmentPath = Join-Path $rootPath "docs/operations/development.md"
 $runtimeSelectorPath = Join-Path $rootPath "crates/wokrouter-platform/src/wokcore_runtime.rs"
 $runtimeSelectorTestsPath = Join-Path $rootPath "crates/wokrouter-platform/tests/wokcore_runtime.rs"
+$wokcoreClientPath = Join-Path $rootPath "crates/wokrouter-wokcore-client/src/lib.rs"
 $wokcorePublicKeyPath = Join-Path $rootPath "crates/wokrouter-platform/src/wokcore_install/wokcore-minisign.pub"
 $commandModelPath = Join-Path $rootPath "apps/cli/src/commands/mod.rs"
 $desktopControlPath = Join-Path $rootPath "apps/desktop/src-tauri/src/control.rs"
@@ -39,6 +40,7 @@ $windowsPackagerPath = Join-Path $rootPath "tests/release/package-windows-assets
 $coreOperationParserPath = Join-Path $rootPath "apps/desktop/src-tauri/src/core_operation/parser.rs"
 $wokcoreInstallTestsPath = Join-Path $rootPath "crates/wokrouter-platform/tests/wokcore_install.rs"
 $cliStartTestsPath = Join-Path $rootPath "apps/cli/src/commands/start/tests.rs"
+$cliStartPath = Join-Path $rootPath "apps/cli/src/commands/start.rs"
 $failures = [System.Collections.Generic.List[string]]::new()
 
 function Add-ContractFailure {
@@ -2218,6 +2220,7 @@ $deny = Get-Content -LiteralPath $denyPath -Raw -Encoding UTF8
 $development = Get-Content -LiteralPath $developmentPath -Raw -Encoding UTF8
 $runtimeSelector = Get-Content -LiteralPath $runtimeSelectorPath -Raw -Encoding UTF8
 $runtimeSelectorTests = Get-Content -LiteralPath $runtimeSelectorTestsPath -Raw -Encoding UTF8
+$wokcoreClient = Get-Content -LiteralPath $wokcoreClientPath -Raw -Encoding UTF8
 $wokcorePublicKey = Get-Content -LiteralPath $wokcorePublicKeyPath -Raw -Encoding UTF8
 $commandModel = Get-Content -LiteralPath $commandModelPath -Raw -Encoding UTF8
 $desktopControl = Get-Content -LiteralPath $desktopControlPath -Raw -Encoding UTF8
@@ -2240,6 +2243,7 @@ $windowsPackager = Get-Content -LiteralPath $windowsPackagerPath -Raw -Encoding 
 $coreOperationParser = Get-Content -LiteralPath $coreOperationParserPath -Raw -Encoding UTF8
 $wokcoreInstallTests = Get-Content -LiteralPath $wokcoreInstallTestsPath -Raw -Encoding UTF8
 $cliStartTests = Get-Content -LiteralPath $cliStartTestsPath -Raw -Encoding UTF8
+$cliStart = Get-Content -LiteralPath $cliStartPath -Raw -Encoding UTF8
 $jobs = Get-WorkflowJobs -Lines $workflowLines
 
 $requiredJobs = @(
@@ -4047,7 +4051,7 @@ else {
     $debugSelectOnceCandidateFlow = $debugSelectOnce.CodeBody -replace '\s', ''
     if (
         $debugSelectOnceCandidateFlow -ne
-        'letcandidate=development::candidate_from_environment();select_with_dependencies(paths,candidate,&crate::system::process_executable_matches,&probe_connection,&discover_wokcore_executable,).await'
+        'letcandidate=development::candidate_from_environment();select_with_dependencies(paths,candidate,Arc::new(crate::system::process_executable_matches),&probe_connection,Arc::new(discover_wokcore_executable),).await'
     ) {
         Add-ContractFailure `
             -Message "Debug select_once candidate flow must pass the environment candidate unchanged into select_with_dependencies."
@@ -4062,7 +4066,7 @@ else {
         -Body $releaseSelectOnce.Body
     if (
         ($releaseSelectOnceTopLevel -replace '\s', '') -ne
-        'select_production(paths,&discover_wokcore_executable)'
+        'select_production(paths,Arc::new(crate::system::process_executable_matches),Arc::new(discover_wokcore_executable),)'
     ) {
         Add-ContractFailure `
             -Message "Release select_once must directly call select_production with production discovery."
@@ -4132,21 +4136,21 @@ if ($null -ne $dependencySelector) {
 
         $selectionIf = Get-UniqueBracedItem `
             -Source $selectionLoop.Body `
-            -SignaturePattern '(?ms)^[ \t]*if[ \t]+let[ \t]+Some\(process_id\)[ \t]*=[ \t]*client\.discovered_process_id\(\)[ \t\r\n]*&&[ \t\r\n]*process_matches\([ \t]*process_id[ \t]*,[ \t]*&candidate[ \t]*\)[ \t]*' `
+            -SignaturePattern '(?ms)^[ \t]*if[ \t]+let[ \t]+Some\(identity\)[ \t]*=[ \t]*client\.discovered_runtime_identity\(\)[ \t\r\n]*&&[ \t\r\n]*process_matches\([ \t]*identity\.process_id\(\)[ \t]*,[ \t]*&candidate[ \t]*\)[ \t]*' `
             -Description "select_with_dependencies selection loop initial process identity check" `
             -DirectStatement
         if ($null -ne $selectionIf) {
             $boundClientIndex = Get-UniqueDirectStatementIndex `
                 -Source $selectionIf.Body `
-                -Pattern 'let[ \t]+bound[ \t]*=[ \t]*client\.bound_to_process\([ \t]*process_id[ \t]*\)[ \t]*;' `
-                -Description "select_with_dependencies selection loop in order PID-bound client"
+                -Pattern '(?s)let[ \t]+bound[ \t]*=[ \t]*client\.bound_to_runtime\([ \t\r\n]*identity[ \t]*,[ \t\r\n]*Arc::new\([ \t]*move[ \t]*\|process_id\|[ \t]*\{[ \t\r\n]*matcher_for_validator\([ \t]*process_id[ \t]*,[ \t]*&candidate_for_validator[ \t]*\)[ \t\r\n]*\}[ \t]*\)[ \t]*,[ \t\r\n]*\)[ \t]*;' `
+                -Description "select_with_dependencies selection loop in order runtime-bound client"
             $connectionIndex = Get-UniqueDirectStatementIndex `
                 -Source $selectionIf.Body `
                 -Pattern '(?s)let[ \t]+Ok\(connection\)[ \t\r\n]*=[ \t\r\n]*tokio::time::timeout_at\([ \t\r\n]*deadline[ \t\r\n]*,[ \t\r\n]*connection_probe\([ \t\r\n]*bound\.clone\(\)[ \t\r\n]*\)[ \t\r\n]*\)\.await' `
                 -Description "select_with_dependencies selection loop in order deadline-bound connection probe"
             $secondIdentityIndex = Get-UniqueDirectStatementIndex `
                 -Source $selectionIf.Body `
-                -Pattern 'let[ \t]+still_matches[ \t]*=[ \t]*process_matches\([ \t]*process_id[ \t]*,[ \t]*&candidate[ \t]*\)[ \t]*;' `
+                -Pattern '(?s)let[ \t]+still_matches[ \t]*=[ \t]*client\.discovered_runtime_identity\(\)[ \t]*==[ \t]*Some\(identity\)[ \t\r\n]*&&[ \t\r\n]*process_matches\([ \t]*identity\.process_id\(\)[ \t]*,[ \t]*&candidate[ \t]*\)[ \t]*;' `
                 -Description "select_with_dependencies selection loop in order post-connection process identity check"
 
             if (
@@ -4161,9 +4165,104 @@ if ($null -ne $dependencySelector) {
                 )
             ) {
                 Add-ContractFailure `
-                    -Message "select_with_dependencies selection loop must bind the PID, probe before the deadline, then recheck identity in order."
+                    -Message "select_with_dependencies selection loop must bind PID plus instance identity, probe before the deadline, then recheck identity in order."
             }
         }
+    }
+}
+
+$runtimeIdentity = Get-UniqueBracedItem `
+    -Source $wokcoreClient `
+    -SignaturePattern '(?m)^[ \t]*pub[ \t]+struct[ \t]+WokCoreRuntimeIdentity[ \t]*' `
+    -Description "WokCore runtime identity" `
+    -TopLevel
+if ($null -ne $runtimeIdentity) {
+    if (
+        ($runtimeIdentity.CodeBody -replace '\s', '') -ne
+        'process_id:NonZeroU32,instance_id:Uuid,'
+    ) {
+        Add-ContractFailure `
+            -Message "WokCore runtime identity must bind exactly the process ID and instance ID."
+    }
+    $identityAttributes = Get-RustOuterAttributesBeforeItem `
+        -Source $wokcoreClient `
+        -ItemStart $runtimeIdentity.SignatureIndex `
+        -Description "WokCore runtime identity attributes"
+    if (
+        $null -ne $identityAttributes -and
+        ($identityAttributes.Code -match '(?<![A-Za-z0-9_])(?:Serialize|Deserialize)(?![A-Za-z0-9_])')
+    ) {
+        Add-ContractFailure `
+            -Message "WokCore runtime identity must not be serializable to frontend contracts."
+    }
+}
+
+$runtimeAuthorization = Get-UniqueBracedItem `
+    -Source $wokcoreClient `
+    -SignaturePattern '(?m)^[ \t]*pub\(crate\)[ \t]+fn[ \t]+runtime_authorized[ \t]*\(' `
+    -Description "WokCore runtime authorization"
+if ($null -ne $runtimeAuthorization) {
+    $authorizationFlow = $runtimeAuthorization.CodeBody -replace '\s', ''
+    if (
+        $authorizationFlow -notmatch
+        'identity\.process_id==record\.process_id&&identity\.instance_id==record\.instance_id&&validator\(record\.process_id\)'
+    ) {
+        Add-ContractFailure `
+            -Message "Development runtime authorization must jointly recheck PID, instance ID, and executable identity."
+    }
+    if (
+        $authorizationFlow -notmatch
+        'RuntimePolicy::PendingTrustedExecutable\(validator\)=>validator\.get\(\)\.is_some_and\(\|validator\|validator\(record\.process_id\)\)'
+    ) {
+        Add-ContractFailure `
+            -Message "Production runtime authorization must validate every discovered PID against the trusted executable."
+    }
+}
+
+$productionSelector = Get-UniqueBracedItem `
+    -Source $runtimeSelector `
+    -SignaturePattern '(?m)^[ \t]*fn[ \t]+select_production[ \t]*\(' `
+    -Description "production WokCore selector" `
+    -TopLevel
+if ($null -ne $productionSelector) {
+    $productionFlow = $productionSelector.CodeBody -replace '\s', ''
+    if (
+        $productionFlow -notmatch
+        'let\(bound_client,runtime_binder\)=probe_client\.pending_trusted_executable_runtime\(\);.*ifletSome\(executable\)=executable\{.*bind_trusted_executable\(&runtime_binder,Arc::clone\(&process_matches\),executable,?\);.*client:bound_client,.*production_authority:Some\('
+    ) {
+        Add-ContractFailure `
+            -Message "Production selection must keep Missing pending and bind only a trusted executable authority."
+    }
+}
+
+$productionBinding = Get-UniqueBracedItem `
+    -Source $runtimeSelector `
+    -SignaturePattern '(?m)^[ \t]*pub[ \t]+fn[ \t]+establish_production_binding[ \t]*\(' `
+    -Description "production WokCore binding"
+if ($null -ne $productionBinding) {
+    $bindingFlow = $productionBinding.CodeBody -replace '\s', ''
+    if (
+        $bindingFlow -notmatch
+        'letSome\(identity\)=self\.probe_client\.discovered_runtime_identity\(\)else\{returnfalse;\};if!\(self\.process_matches\)\(identity\.process_id\(\),executable\)\{returnfalse;\}bind_trusted_executable\('
+    ) {
+        Add-ContractFailure `
+            -Message "Production binding must verify the current discovery PID against the trusted executable before atomic authorization."
+    }
+}
+
+$startReadiness = Get-UniqueBracedItem `
+    -Source $cliStart `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+wait_until_running[ \t]*\(' `
+    -Description "production start readiness" `
+    -TopLevel
+if ($null -ne $startReadiness) {
+    $startReadinessFlow = $startReadiness.CodeBody -replace '\s', ''
+    if (
+        $startReadinessFlow -notmatch
+        'letconnection=ifruntime\.establish_production_binding\(executable\)\{dependencies\.service\.connection\(runtime\.client\(\)\)\.await\}else\{Ok\(CoreConnection::Missing\)\};matchconnection\{'
+    ) {
+        Add-ContractFailure `
+            -Message "Production start must establish trusted runtime binding before readiness requests."
     }
 }
 

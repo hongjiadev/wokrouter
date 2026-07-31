@@ -176,7 +176,7 @@ impl WokCoreClient {
         if !valid_identifier(client_id) {
             return Err(ManagementError::InvalidInput);
         }
-        if self.expected_process_id.is_some() {
+        if self.has_runtime_policy() {
             let current_runtime = self.integration_runtime().await?;
             if current_runtime != *runtime {
                 return Err(ManagementError::InvalidRuntime);

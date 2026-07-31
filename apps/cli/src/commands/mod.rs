@@ -25,6 +25,7 @@ pub(crate) trait CommandRuntime {
     fn channel(&self) -> WokCoreRuntimeChannel;
     fn executable(&self) -> Option<&std::path::Path>;
     fn client(&self) -> &WokCoreClient;
+    fn establish_production_binding(&self, executable: &std::path::Path) -> bool;
     async fn connection(&self) -> CoreConnection;
 }
 
@@ -39,6 +40,10 @@ impl CommandRuntime for SelectedWokCoreRuntime {
 
     fn client(&self) -> &WokCoreClient {
         self.client()
+    }
+
+    fn establish_production_binding(&self, executable: &std::path::Path) -> bool {
+        self.establish_production_binding(executable)
     }
 
     async fn connection(&self) -> CoreConnection {

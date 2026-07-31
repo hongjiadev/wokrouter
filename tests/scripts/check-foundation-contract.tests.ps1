@@ -31,6 +31,7 @@ function New-ContractFixture {
     $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-platform/src") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-platform/src/system") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-platform/tests") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-wokcore-client/src") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "docs/operations") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "tests/release") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "tests/scripts") -Force
@@ -104,6 +105,9 @@ function New-ContractFixture {
         -LiteralPath (Join-Path $repositoryRoot "crates/wokrouter-platform/src/wokcore_runtime.rs") `
         -Destination (Join-Path $root "crates/wokrouter-platform/src/wokcore_runtime.rs")
     Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "crates/wokrouter-wokcore-client/src/lib.rs") `
+        -Destination (Join-Path $root "crates/wokrouter-wokcore-client/src/lib.rs")
+    Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "crates/wokrouter-platform/src/system/locale.rs") `
         -Destination (Join-Path $root "crates/wokrouter-platform/src/system/locale.rs")
     Copy-Item `
@@ -118,6 +122,9 @@ function New-ContractFixture {
     Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "apps/cli/src/commands/start/tests.rs") `
         -Destination (Join-Path $root "apps/cli/src/commands/start/tests.rs")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/cli/src/commands/start.rs") `
+        -Destination (Join-Path $root "apps/cli/src/commands/start.rs")
     Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "crates/wokrouter-platform/src/wokcore_install/wokcore-minisign.pub") `
         -Destination (Join-Path $root "crates/wokrouter-platform/src/wokcore_install/wokcore-minisign.pub")
@@ -658,8 +665,8 @@ export async function bootstrap(): Promise<void> {
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "apps/desktop/src/main.tsx" `
-            -OldText "  const systemLocale = await invoke<string>(`"system_locale`").catch(`n" `
-            -NewText "  if (false) {`n    const systemLocale = await invoke<string>(`"system_locale`").catch(`n"
+            -OldText "  const systemLocale = await invoke<string | null>(`"system_locale`").catch(`n" `
+            -NewText "  if (false) {`n    const systemLocale = await invoke<string | null>(`"system_locale`").catch(`n"
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "apps/desktop/src/main.tsx" `
@@ -701,8 +708,8 @@ export async function bootstrap(): Promise<void> {
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "apps/desktop/src/main.tsx" `
-            -OldText "  const systemLocale = await invoke<string>(`"system_locale`").catch(`n" `
-            -NewText "  return;`n  const systemLocale = await invoke<string>(`"system_locale`").catch(`n"
+            -OldText "  const systemLocale = await invoke<string | null>(`"system_locale`").catch(`n" `
+            -NewText "  return;`n  const systemLocale = await invoke<string | null>(`"system_locale`").catch(`n"
         Assert-ContractRejects `
             -Root $root `
             -ExpectedText "reachable direct bootstrap statements" `
@@ -714,8 +721,8 @@ export async function bootstrap(): Promise<void> {
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "apps/desktop/src/main.tsx" `
-            -OldText "  const systemLocale = await invoke<string>(`"system_locale`").catch(`n" `
-            -NewText "  if (true) { return; }`n  const systemLocale = await invoke<string>(`"system_locale`").catch(`n"
+            -OldText "  const systemLocale = await invoke<string | null>(`"system_locale`").catch(`n" `
+            -NewText "  if (true) { return; }`n  const systemLocale = await invoke<string | null>(`"system_locale`").catch(`n"
         Assert-ContractRejects `
             -Root $root `
             -ExpectedText "reachable direct bootstrap statements" `
@@ -1859,14 +1866,22 @@ static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
             -OldText @"
 #[cfg(not(debug_assertions))]
 async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
-    select_production(paths, &discover_wokcore_executable)
+    select_production(
+        paths,
+        Arc::new(crate::system::process_executable_matches),
+        Arc::new(discover_wokcore_executable),
+    )
 }
 "@ `
             -NewText @"
 #[cfg(not(debug_assertions))]
 async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
     let _ = std::env::var_os("WOKROUTER_DEV_WOKCORE_EXECUTABLE");
-    select_production(paths, &discover_wokcore_executable)
+    select_production(
+        paths,
+        Arc::new(crate::system::process_executable_matches),
+        Arc::new(discover_wokcore_executable),
+    )
 }
 "@
         Assert-ContractRejects `
@@ -1883,7 +1898,11 @@ async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, Platfor
             -OldText @"
 #[cfg(not(debug_assertions))]
 async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
-    select_production(paths, &discover_wokcore_executable)
+    select_production(
+        paths,
+        Arc::new(crate::system::process_executable_matches),
+        Arc::new(discover_wokcore_executable),
+    )
 }
 "@ `
             -NewText @"
@@ -1891,7 +1910,11 @@ async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, Platfor
 async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
     const RELEASE_EXECUTABLE_ENV: &str = "WOKROUTER_DEV_WOKCORE_EXECUTABLE";
     let _ = std::env::var_os(RELEASE_EXECUTABLE_ENV);
-    select_production(paths, &discover_wokcore_executable)
+    select_production(
+        paths,
+        Arc::new(crate::system::process_executable_matches),
+        Arc::new(discover_wokcore_executable),
+    )
 }
 "@
         Assert-ContractRejects `
@@ -1908,7 +1931,11 @@ async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, Platfor
             -OldText @"
 #[cfg(not(debug_assertions))]
 async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
-    select_production(paths, &discover_wokcore_executable)
+    select_production(
+        paths,
+        Arc::new(crate::system::process_executable_matches),
+        Arc::new(discover_wokcore_executable),
+    )
 }
 "@ `
             -NewText @"
@@ -1916,7 +1943,11 @@ async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, Platfor
 async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
     let _ = std::env::var_os(development::EXECUTABLE_ENV);
     let _ = development::candidate_from_environment();
-    select_production(paths, &discover_wokcore_executable)
+    select_production(
+        paths,
+        Arc::new(crate::system::process_executable_matches),
+        Arc::new(discover_wokcore_executable),
+    )
 }
 "@
         Assert-ContractRejects `
@@ -1933,14 +1964,22 @@ async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, Platfor
             -OldText @"
 #[cfg(not(debug_assertions))]
 async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
-    select_production(paths, &discover_wokcore_executable)
+    select_production(
+        paths,
+        Arc::new(crate::system::process_executable_matches),
+        Arc::new(discover_wokcore_executable),
+    )
 }
 "@ `
             -NewText @"
 #[cfg(not(debug_assertions))]
 #[cfg(any())]
 async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
-    select_production(paths, &discover_wokcore_executable)
+    select_production(
+        paths,
+        Arc::new(crate::system::process_executable_matches),
+        Arc::new(discover_wokcore_executable),
+    )
 }
 
 #[cfg(all(not(debug_assertions), not(any())))]
@@ -1966,9 +2005,9 @@ async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, Platfor
     select_with_dependencies(
         paths,
         candidate,
-        &crate::system::process_executable_matches,
+        Arc::new(crate::system::process_executable_matches),
         &probe_connection,
-        &discover_wokcore_executable,
+        Arc::new(discover_wokcore_executable),
     )
     .await
 }
@@ -1981,16 +2020,20 @@ async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, Platfor
     select_with_dependencies(
         paths,
         candidate,
-        &crate::system::process_executable_matches,
+        Arc::new(crate::system::process_executable_matches),
         &probe_connection,
-        &discover_wokcore_executable,
+        Arc::new(discover_wokcore_executable),
     )
     .await
 }
 
 #[cfg(all(debug_assertions, not(any())))]
 async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
-    select_production(paths, &discover_wokcore_executable)
+    select_production(
+        paths,
+        Arc::new(crate::system::process_executable_matches),
+        Arc::new(discover_wokcore_executable),
+    )
 }
 "@
         Assert-ContractRejects `
@@ -2181,8 +2224,14 @@ async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, Platfor
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
-            -OldText "            && process_matches(process_id, &candidate)" `
-            -NewText "            && true"
+            -OldText @"
+        if let Some(identity) = client.discovered_runtime_identity()
+            && process_matches(identity.process_id(), &candidate)
+"@ `
+            -NewText @"
+        if let Some(identity) = client.discovered_runtime_identity()
+            && true
+"@
         Assert-ContractRejects `
             -Root $root `
             -ExpectedText "process identity" `
@@ -2194,24 +2243,33 @@ async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, Platfor
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
-            -OldText "            let still_matches = process_matches(process_id, &candidate);" `
-            -NewText "            let still_matches = true;"
+            -OldText "                && process_matches(identity.process_id(), &candidate);" `
+            -NewText "                && true;"
         Assert-ContractRejects `
             -Root $root `
             -ExpectedText "process identity" `
             -Scenario "missing process identity recheck"
     }
 
-    Invoke-Scenario -Name "development client must remain bound to the discovered PID" -Test {
+    Invoke-Scenario -Name "development client must remain bound to the discovered runtime identity" -Test {
         $root = New-ContractFixture
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
-            -OldText "            let bound = client.bound_to_process(process_id);" `
+            -OldText @"
+            let candidate_for_validator = candidate.clone();
+            let matcher_for_validator = Arc::clone(&process_matches);
+            let bound = client.bound_to_runtime(
+                identity,
+                Arc::new(move |process_id| {
+                    matcher_for_validator(process_id, &candidate_for_validator)
+                }),
+            );
+"@ `
             -NewText "            let bound = client.clone();"
         Assert-ContractRejects `
             -Root $root `
-            -ExpectedText "PID-bound" `
+            -ExpectedText "runtime-bound" `
             -Scenario "unbound development client"
     }
 
@@ -2230,12 +2288,27 @@ async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, Platfor
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
-            -OldText "            && process_matches(process_id, &candidate)" `
-            -NewText "            && true"
+            -OldText @"
+        if let Some(identity) = client.discovered_runtime_identity()
+            && process_matches(identity.process_id(), &candidate)
+"@ `
+            -NewText @"
+        if let Some(identity) = client.discovered_runtime_identity()
+            && true
+"@
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
-            -OldText "            let bound = client.bound_to_process(process_id);" `
+            -OldText @"
+            let candidate_for_validator = candidate.clone();
+            let matcher_for_validator = Arc::clone(&process_matches);
+            let bound = client.bound_to_runtime(
+                identity,
+                Arc::new(move |process_id| {
+                    matcher_for_validator(process_id, &candidate_for_validator)
+                }),
+            );
+"@ `
             -NewText "            let bound = client.clone();"
         Edit-FixtureFile `
             -Root $root `
@@ -2245,8 +2318,8 @@ async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, Platfor
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
-            -OldText "            let still_matches = process_matches(process_id, &candidate);" `
-            -NewText "            let still_matches = true;"
+            -OldText "                && process_matches(identity.process_id(), &candidate);" `
+            -NewText "                && true;"
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
@@ -2254,10 +2327,10 @@ async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, Platfor
             -NewText @"
 // Duration::from_secs(5)
 // Duration::from_millis(50)
-// false && process_matches(process_id, &candidate)
-// let bound = client.bound_to_process(process_id);
+// false && process_matches(identity.process_id(), &candidate)
+// let bound = client.bound_to_runtime(identity, validator);
 // tokio::time::timeout_at(deadline, connection_probe(bound.clone())).await
-// let still_matches = process_matches(process_id, &candidate);
+// client.discovered_runtime_identity() == Some(identity)
 static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
 "@
         Assert-ContractRejects `
@@ -2313,12 +2386,27 @@ static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
-            -OldText "            && process_matches(process_id, &candidate)" `
-            -NewText "            && true"
+            -OldText @"
+        if let Some(identity) = client.discovered_runtime_identity()
+            && process_matches(identity.process_id(), &candidate)
+"@ `
+            -NewText @"
+        if let Some(identity) = client.discovered_runtime_identity()
+            && true
+"@
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
-            -OldText "            let bound = client.bound_to_process(process_id);" `
+            -OldText @"
+            let candidate_for_validator = candidate.clone();
+            let matcher_for_validator = Arc::clone(&process_matches);
+            let bound = client.bound_to_runtime(
+                identity,
+                Arc::new(move |process_id| {
+                    matcher_for_validator(process_id, &candidate_for_validator)
+                }),
+            );
+"@ `
             -NewText "            let bound = client.clone();"
         Edit-FixtureFile `
             -Root $root `
@@ -2328,19 +2416,19 @@ static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
-            -OldText "            let still_matches = process_matches(process_id, &candidate);" `
-            -NewText "            let still_matches = true;"
+            -OldText "                && process_matches(identity.process_id(), &candidate);" `
+            -NewText "                && true;"
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
             -OldText "    loop {" `
             -NewText @"
     let _inert = || {
-        let _ = false && process_matches(process_id, &candidate);
-        let bound = client.bound_to_process(process_id);
+        let _ = false && process_matches(identity.process_id(), &candidate);
+        let bound = client.bound_to_runtime(identity, validator);
         let Ok(connection) =
             tokio::time::timeout_at(deadline, connection_probe(bound.clone())).await;
-        let still_matches = process_matches(process_id, &candidate);
+        let still_matches = client.discovered_runtime_identity() == Some(identity);
     };
     loop {
 "@
@@ -2365,13 +2453,13 @@ static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
             -Root $root `
             -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
             -OldText @"
-    select_production(paths, discover)
+    select_production(paths, process_matches, discover)
 }
 "@ `
             -NewText @"
-    select_production(paths, discover)
+    select_production(paths, process_matches, discover)
     };
-    select_production(paths, discover)
+    select_production(paths, process_matches, discover)
 }
 "@
         Assert-ContractRejects `
@@ -2387,12 +2475,12 @@ static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
             -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
             -OldText @"
     loop {
-        if let Some(process_id) = client.discovered_process_id()
+        if let Some(identity) = client.discovered_runtime_identity()
 "@ `
             -NewText @"
     loop {
         let _inert = || async {
-        if let Some(process_id) = client.discovered_process_id()
+        if let Some(identity) = client.discovered_runtime_identity()
 "@
         Edit-FixtureFile `
             -Root $root `
@@ -2429,11 +2517,11 @@ static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
             -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
             -OldText @"
     }
-    select_production(paths, discover)
+    select_production(paths, process_matches, discover)
 "@ `
             -NewText @"
         };
-    select_production(paths, discover)
+    select_production(paths, process_matches, discover)
 "@
         Assert-ContractRejects `
             -Root $root `
@@ -2448,12 +2536,12 @@ static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
             -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
             -OldText @"
     loop {
-        if let Some(process_id) = client.discovered_process_id()
+        if let Some(identity) = client.discovered_runtime_identity()
 "@ `
             -NewText @"
     loop {
         let _inert = async ||
-            if let Some(process_id) = client.discovered_process_id()
+            if let Some(identity) = client.discovered_runtime_identity()
 "@
         Edit-FixtureFile `
             -Root $root `
@@ -2487,27 +2575,82 @@ static SELECTED_RUNTIME: RuntimeSelectorState = RuntimeSelectorState::new();
             -Scenario "connection probe without selector deadline"
     }
 
-    Invoke-Scenario -Name "development selector operations must retain their order" -Test {
+    Invoke-Scenario -Name "development selector operations must retain runtime binding" -Test {
         $root = New-ContractFixture
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
             -OldText @"
-        if let Some(process_id) = client.discovered_process_id()
-            && process_matches(process_id, &candidate)
-        {
-            let bound = client.bound_to_process(process_id);
+            let candidate_for_validator = candidate.clone();
+            let matcher_for_validator = Arc::clone(&process_matches);
+            let bound = client.bound_to_runtime(
+                identity,
+                Arc::new(move |process_id| {
+                    matcher_for_validator(process_id, &candidate_for_validator)
+                }),
+            );
 "@ `
+            -NewText "            let bound = client.clone();"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "runtime-bound" `
+            -Scenario "runtime binding removed from the identity branch"
+    }
+
+    Invoke-Scenario -Name "runtime identity authorization cannot be forged by comments or strings" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-wokcore-client/src/lib.rs" `
+            -OldText "                    && identity.instance_id == record.instance_id" `
+            -NewText "                    && true"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-wokcore-client/src/lib.rs" `
+            -OldText "pub type WokCoreRuntimeValidator = dyn Fn(NonZeroU32) -> bool + Send + Sync;" `
             -NewText @"
-        let bound = client.bound_to_process(process_id);
-        if let Some(process_id) = client.discovered_process_id()
-            && process_matches(process_id, &candidate)
-        {
+pub type WokCoreRuntimeValidator = dyn Fn(NonZeroU32) -> bool + Send + Sync;
+// identity.process_id == record.process_id && identity.instance_id == record.instance_id && validator(record.process_id)
+const INERT_RUNTIME_IDENTITY_DECOY: &str = r#"identity.process_id == record.process_id && identity.instance_id == record.instance_id && validator(record.process_id)"#;
 "@
         Assert-ContractRejects `
             -Root $root `
-            -ExpectedText "in order" `
-            -Scenario "PID binding moved before the initial identity check"
+            -ExpectedText "jointly recheck PID, instance ID, and executable identity" `
+            -Scenario "instance authorization retained only in comments and strings"
+    }
+
+    Invoke-Scenario -Name "production selection cannot bypass pending trusted authorization" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/wokcore_runtime.rs" `
+            -OldText "        client: bound_client," `
+            -NewText @"
+        // client: bound_client,
+        let _inert = "client: bound_client,";
+        client: probe_client.clone(),
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "keep Missing pending" `
+            -Scenario "production client replaced by an unrestricted probe clone"
+    }
+
+    Invoke-Scenario -Name "production start cannot probe before trusted binding" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/commands/start.rs" `
+            -OldText "        let connection = if runtime.establish_production_binding(executable) {" `
+            -NewText @"
+        // runtime.establish_production_binding(executable)
+        let _inert = "runtime.establish_production_binding(executable)";
+        let connection = if true {
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "establish trusted runtime binding" `
+            -Scenario "start readiness request bypassed atomic binding"
     }
 
     Invoke-Scenario -Name "IDE-managed error code cannot survive in a dead constant" -Test {
@@ -2653,8 +2796,18 @@ async fn a_selected_development_session_never_switches_to_production() {
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "crates/wokrouter-platform/tests/wokcore_runtime.rs" `
-            -OldText "    assert_eq!(selected.connection().await, CoreConnection::Stopped);" `
-            -NewText '    let _inert = b"assert_eq!(selected.connection().await, CoreConnection::Stopped);";'
+            -OldText @"
+    assert_eq!(selected.executable(), Some(development.as_path()));
+    assert_eq!(selected.connection().await, CoreConnection::Stopped);
+    assert!(replacement.received_requests().await.unwrap().is_empty());
+    assert_eq!(discoveries.load(Ordering::SeqCst), 0);
+"@ `
+            -NewText @'
+    assert_eq!(selected.executable(), Some(development.as_path()));
+    let _inert = b"assert_eq!(selected.connection().await, CoreConnection::Stopped);";
+    assert!(replacement.received_requests().await.unwrap().is_empty());
+    assert_eq!(discoveries.load(Ordering::SeqCst), 0);
+'@
         Assert-ContractRejects `
             -Root $root `
             -ExpectedText "stopped retained connection" `
@@ -2666,8 +2819,18 @@ async fn a_selected_development_session_never_switches_to_production() {
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "crates/wokrouter-platform/tests/wokcore_runtime.rs" `
-            -OldText "    assert!(replacement.received_requests().await.unwrap().is_empty());" `
-            -NewText '    let _inert = br##"assert!(replacement.received_requests().await.unwrap().is_empty());"##;'
+            -OldText @"
+    assert_eq!(selected.executable(), Some(development.as_path()));
+    assert_eq!(selected.connection().await, CoreConnection::Stopped);
+    assert!(replacement.received_requests().await.unwrap().is_empty());
+    assert_eq!(discoveries.load(Ordering::SeqCst), 0);
+"@ `
+            -NewText @'
+    assert_eq!(selected.executable(), Some(development.as_path()));
+    assert_eq!(selected.connection().await, CoreConnection::Stopped);
+    let _inert = br##"assert!(replacement.received_requests().await.unwrap().is_empty());"##;
+    assert_eq!(discoveries.load(Ordering::SeqCst), 0);
+'@
         Assert-ContractRejects `
             -Root $root `
             -ExpectedText "replacement zero requests" `
@@ -2702,13 +2865,31 @@ async fn a_selected_development_session_never_switches_to_production() {
         },
         @{
             Name = "stopped retained connection"
-            OldText = "    assert_eq!(selected.connection().await, CoreConnection::Stopped);"
-            NewText = ""
+            OldText = @"
+    assert_eq!(selected.executable(), Some(development.as_path()));
+    assert_eq!(selected.connection().await, CoreConnection::Stopped);
+    assert!(replacement.received_requests().await.unwrap().is_empty());
+    assert_eq!(discoveries.load(Ordering::SeqCst), 0);
+"@
+            NewText = @"
+    assert_eq!(selected.executable(), Some(development.as_path()));
+    assert!(replacement.received_requests().await.unwrap().is_empty());
+    assert_eq!(discoveries.load(Ordering::SeqCst), 0);
+"@
         },
         @{
             Name = "replacement zero requests"
-            OldText = "    assert!(replacement.received_requests().await.unwrap().is_empty());"
-            NewText = ""
+            OldText = @"
+    assert_eq!(selected.executable(), Some(development.as_path()));
+    assert_eq!(selected.connection().await, CoreConnection::Stopped);
+    assert!(replacement.received_requests().await.unwrap().is_empty());
+    assert_eq!(discoveries.load(Ordering::SeqCst), 0);
+"@
+            NewText = @"
+    assert_eq!(selected.executable(), Some(development.as_path()));
+    assert_eq!(selected.connection().await, CoreConnection::Stopped);
+    assert_eq!(discoveries.load(Ordering::SeqCst), 0);
+"@
         },
         @{
             Name = "production discovery zero calls"

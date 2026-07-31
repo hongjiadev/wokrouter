@@ -1,6 +1,6 @@
 mod support;
 
-use std::{fs, num::NonZeroU32};
+use std::{fs, num::NonZeroU32, sync::Arc};
 
 use serde_json::json;
 use tempfile::tempdir;
@@ -9,15 +9,27 @@ use wokrouter_wokcore_client::{CoreConnection, WokCoreClient};
 use support::{INSTANCE_ID, write_discovery, write_discovery_with_pid};
 
 #[tokio::test]
-async fn discovered_process_id_binds_client_to_one_runtime() {
+async fn runtime_identity_binding_rejects_a_replaced_instance_with_the_same_process_id() {
     let fixture = tempdir().unwrap();
     let path = fixture.path().join("discovery.json");
-    write_discovery_with_pid(&path, "http://127.0.0.1:9", INSTANCE_ID, 41, 1, None);
+    write_discovery_with_pid(&path, "http://127.0.0.1:9", INSTANCE_ID, 41, 2, None);
 
     let client = WokCoreClient::new(&path).unwrap();
     assert_eq!(client.discovered_process_id(), NonZeroU32::new(41));
+    let bound = client.bound_to_runtime(
+        client.discovered_runtime_identity().unwrap(),
+        Arc::new(|_| true),
+    );
 
-    let bound = client.bound_to_process(NonZeroU32::new(42).unwrap());
+    write_discovery_with_pid(
+        &path,
+        "http://127.0.0.1:9",
+        "fedcba98-7654-4321-8fed-cba987654321",
+        41,
+        2,
+        None,
+    );
+
     assert_eq!(bound.connection().await, CoreConnection::Missing);
 }
 

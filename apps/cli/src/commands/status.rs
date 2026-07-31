@@ -125,6 +125,10 @@ mod tests {
             &self.client
         }
 
+        fn establish_production_binding(&self, _executable: &Path) -> bool {
+            false
+        }
+
         async fn connection(&self) -> CoreConnection {
             self.connection.clone()
         }

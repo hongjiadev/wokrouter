@@ -118,6 +118,7 @@ async fn missing_production_runtime_installs_starts_authorizes_and_reports_struc
 
     server.verify().await;
     assert_eq!(service.spawn_count(), 1);
+    assert_eq!(runtime.binding_count(), 1);
     assert_eq!(service.authorization_count(), 1);
     assert_eq!(service.selected_client(), runtime.client_address());
     assert!(
@@ -992,6 +993,7 @@ struct FakeRuntime {
     channel: WokCoreRuntimeChannel,
     executable: Option<PathBuf>,
     client: WokCoreClient,
+    binding_count: AtomicUsize,
 }
 
 impl FakeRuntime {
@@ -1000,6 +1002,7 @@ impl FakeRuntime {
             channel: WokCoreRuntimeChannel::Production,
             executable,
             client: WokCoreClient::new(&paths.wokcore_discovery_file).unwrap(),
+            binding_count: AtomicUsize::new(0),
         }
     }
 
@@ -1007,11 +1010,16 @@ impl FakeRuntime {
         &self.client as *const WokCoreClient as usize
     }
 
+    fn binding_count(&self) -> usize {
+        self.binding_count.load(Ordering::SeqCst)
+    }
+
     fn development(executable: PathBuf, paths: &AppPaths) -> Self {
         Self {
             channel: WokCoreRuntimeChannel::Development,
             executable: Some(executable),
             client: WokCoreClient::new(&paths.wokcore_discovery_file).unwrap(),
+            binding_count: AtomicUsize::new(0),
         }
     }
 }
@@ -1027,6 +1035,11 @@ impl CommandRuntime for FakeRuntime {
 
     fn client(&self) -> &WokCoreClient {
         &self.client
+    }
+
+    fn establish_production_binding(&self, _executable: &Path) -> bool {
+        self.binding_count.fetch_add(1, Ordering::SeqCst);
+        true
     }
 
     async fn connection(&self) -> CoreConnection {

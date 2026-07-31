@@ -1,6 +1,6 @@
 mod support;
 
-use std::{fs, num::NonZeroU32, path::PathBuf};
+use std::{fs, path::PathBuf, sync::Arc};
 
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
@@ -304,9 +304,11 @@ async fn bound_client_with_runtime(
     let fixture = tempdir().unwrap();
     let discovery = fixture.path().join("discovery.json");
     write_discovery_with_pid(&discovery, &server.uri(), INSTANCE_ID, 41, 1, None);
-    let client = WokCoreClient::new(&discovery)
-        .unwrap()
-        .bound_to_process(NonZeroU32::new(41).unwrap());
+    let client = WokCoreClient::new(&discovery).unwrap();
+    let client = client.bound_to_runtime(
+        client.discovered_runtime_identity().unwrap(),
+        Arc::new(|_| true),
+    );
     let runtime = client.integration_runtime().await.unwrap();
     (fixture, discovery, client, runtime)
 }

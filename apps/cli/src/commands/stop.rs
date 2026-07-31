@@ -116,6 +116,10 @@ mod tests {
             &self.client
         }
 
+        fn establish_production_binding(&self, _executable: &Path) -> bool {
+            false
+        }
+
         async fn connection(&self) -> CoreConnection {
             CoreConnection::Running(wokrouter_wokcore_client::CoreHandshake {
                 instance_id: "test-instance".to_owned(),

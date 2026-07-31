@@ -5,11 +5,12 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
+use secrecy::SecretString;
 use tempfile::{TempDir, tempdir};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -22,7 +23,7 @@ use wokrouter_platform::{
         secure_private_file,
     },
 };
-use wokrouter_wokcore_client::CoreConnection;
+use wokrouter_wokcore_client::{CoreConnection, ManagementError, ServiceError};
 
 static ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
 
@@ -176,6 +177,7 @@ async fn a_matching_process_that_appears_before_the_deadline_selects_development
     assert_eq!(
         *matcher_arguments.lock().unwrap(),
         vec![
+            (41, development.clone()),
             (41, development.clone()),
             (41, development.clone()),
             (41, development.clone())
@@ -394,6 +396,215 @@ async fn a_selected_development_session_never_switches_to_production() {
 }
 
 #[tokio::test]
+async fn runtime_identity_rejects_same_pid_replacement_before_status_manage_start_or_stop() {
+    let fixture = RuntimeFixture::new();
+    let development = fixture.create_file("development/wokcore");
+    let original = MockServer::start().await;
+    mount_running_runtime(&original).await;
+    fixture.write_discovery_at(41, 1, &original.uri());
+    let selector = selector(
+        Some(development.into_os_string()),
+        true,
+        None,
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let selected = selector.select(&fixture.paths).await.unwrap();
+
+    let replacement = MockServer::start().await;
+    mount_running_runtime_with_instance(&replacement, "fedcba98-7654-4321-8fed-cba987654321").await;
+    mount_protected_runtime(&replacement).await;
+    fixture.write_discovery_at_with_instance(
+        41,
+        1,
+        &replacement.uri(),
+        "fedcba98-7654-4321-8fed-cba987654321",
+    );
+    let token = SecretString::from("opaque-test-token".to_owned());
+
+    assert_eq!(selected.connection().await, CoreConnection::Stopped);
+    assert_eq!(
+        selected.client().provider_catalog(&token).await,
+        Err(ManagementError::Missing)
+    );
+    assert_eq!(
+        selected.client().service_status(&token).await,
+        Err(ServiceError::Missing)
+    );
+    assert_eq!(
+        selected.client().stop(&token).await,
+        Err(ServiceError::Missing)
+    );
+    assert!(replacement.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn runtime_identity_rechecks_the_development_executable_before_every_request() {
+    let fixture = RuntimeFixture::new();
+    let development = fixture.create_file("development/wokcore");
+    let server = MockServer::start().await;
+    mount_running_runtime(&server).await;
+    mount_protected_runtime(&server).await;
+    fixture.write_discovery_at(41, 1, &server.uri());
+    let executable_matches = Arc::new(AtomicBool::new(true));
+    let selector = RuntimeSelectorHarness::new(
+        Some(development.into_os_string()),
+        {
+            let executable_matches = Arc::clone(&executable_matches);
+            move |_process_id, _candidate| executable_matches.load(Ordering::SeqCst)
+        },
+        |_record| Ok(None),
+    );
+    let selected = selector.select(&fixture.paths).await.unwrap();
+    let requests_after_selection = server.received_requests().await.unwrap().len();
+    executable_matches.store(false, Ordering::SeqCst);
+    let token = SecretString::from("opaque-test-token".to_owned());
+
+    assert_eq!(selected.connection().await, CoreConnection::Stopped);
+    assert_eq!(
+        selected.client().provider_catalog(&token).await,
+        Err(ManagementError::Missing)
+    );
+    assert_eq!(
+        selected.client().service_status(&token).await,
+        Err(ServiceError::Missing)
+    );
+    assert_eq!(
+        selected.client().stop(&token).await,
+        Err(ServiceError::Missing)
+    );
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        requests_after_selection
+    );
+}
+
+#[tokio::test]
+async fn runtime_identity_rejects_a_production_executable_mismatch() {
+    let fixture = RuntimeFixture::new();
+    let production = fixture.create_file("production/wokcore");
+    let server = MockServer::start().await;
+    mount_running_runtime(&server).await;
+    mount_protected_runtime(&server).await;
+    fixture.write_discovery_at(41, 1, &server.uri());
+    let selected = selector(None, false, Some(production), Arc::new(AtomicUsize::new(0)))
+        .select(&fixture.paths)
+        .await
+        .unwrap();
+    let token = SecretString::from("opaque-test-token".to_owned());
+
+    assert_eq!(selected.connection().await, CoreConnection::Missing);
+    assert_eq!(
+        selected.client().provider_catalog(&token).await,
+        Err(ManagementError::Missing)
+    );
+    assert_eq!(
+        selected.client().service_status(&token).await,
+        Err(ServiceError::Missing)
+    );
+    assert_eq!(
+        selected.client().stop(&token).await,
+        Err(ServiceError::Missing)
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_identity_fallback_never_accepts_late_ide_discovery() {
+    let fixture = RuntimeFixture::new();
+    let development = fixture.create_file("development/wokcore");
+    let production = fixture.create_file("production/wokcore");
+    let selected = selector(
+        Some(development.into_os_string()),
+        false,
+        Some(production),
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .select(&fixture.paths)
+    .await
+    .unwrap();
+    assert_eq!(selected.channel(), WokCoreRuntimeChannel::Production);
+
+    let late_ide = MockServer::start().await;
+    mount_running_runtime(&late_ide).await;
+    mount_protected_runtime(&late_ide).await;
+    fixture.write_discovery_at(41, 1, &late_ide.uri());
+    let token = SecretString::from("opaque-test-token".to_owned());
+
+    assert_eq!(selected.connection().await, CoreConnection::Missing);
+    assert_eq!(
+        selected.client().provider_catalog(&token).await,
+        Err(ManagementError::Missing)
+    );
+    assert_eq!(
+        selected.client().service_status(&token).await,
+        Err(ServiceError::Missing)
+    );
+    assert_eq!(
+        selected.client().stop(&token).await,
+        Err(ServiceError::Missing)
+    );
+    assert!(late_ide.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn runtime_identity_missing_production_binds_only_after_a_trusted_start_matches() {
+    let fixture = RuntimeFixture::new();
+    let production = fixture.create_file("production/wokcore");
+    let server = MockServer::start().await;
+    mount_running_runtime(&server).await;
+    fixture.write_discovery_at(41, 1, &server.uri());
+    let executable_matches = Arc::new(AtomicBool::new(false));
+    let selector = RuntimeSelectorHarness::new(
+        None,
+        {
+            let executable_matches = Arc::clone(&executable_matches);
+            move |_process_id, _candidate| executable_matches.load(Ordering::SeqCst)
+        },
+        |_record| Ok(None),
+    );
+    let selected = selector.select(&fixture.paths).await.unwrap();
+
+    assert_eq!(selected.executable(), None);
+    assert!(!selected.establish_production_binding(&production));
+    assert_eq!(selected.connection().await, CoreConnection::Missing);
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    executable_matches.store(true, Ordering::SeqCst);
+    assert!(selected.establish_production_binding(&production));
+    assert_eq!(selected.executable(), Some(production.as_path()));
+    assert!(matches!(
+        selected.connection().await,
+        CoreConnection::Running(_)
+    ));
+}
+
+#[tokio::test]
+async fn runtime_identity_missing_session_refreshes_only_from_a_trusted_install_record() {
+    let fixture = RuntimeFixture::new();
+    let production = fixture.create_file("production/wokcore");
+    make_production_executable(&production);
+    let server = MockServer::start().await;
+    mount_running_runtime(&server).await;
+    fixture.write_discovery_at(41, 1, &server.uri());
+    let selector = RuntimeSelectorHarness::new(
+        None,
+        |_process_id, _candidate| true,
+        |record| wokrouter_platform::discover_wokcore_executable(record),
+    );
+    let selected = selector.select(&fixture.paths).await.unwrap();
+
+    assert_eq!(selected.connection().await, CoreConnection::Missing);
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    fixture.write_install_record(&production);
+    assert!(matches!(
+        selected.client().connection().await,
+        CoreConnection::Running(_)
+    ));
+    assert_eq!(selected.executable(), Some(production.as_path()));
+}
+
+#[tokio::test]
 async fn production_selection_preserves_install_record_priority_over_path() {
     let fixture = RuntimeFixture::new();
     let managed = fixture.create_file("managed/wokcore");
@@ -454,11 +665,15 @@ fn selector(
 }
 
 async fn mount_running_runtime(server: &MockServer) {
+    mount_running_runtime_with_instance(server, "01234567-89ab-4cde-8fab-0123456789ab").await;
+}
+
+async fn mount_running_runtime_with_instance(server: &MockServer, instance_id: &str) {
     Mock::given(method("GET"))
         .and(path("/wokcore/v1/health"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "status": "ok",
-            "instance_id": "01234567-89ab-4cde-8fab-0123456789ab"
+            "instance_id": instance_id
         })))
         .mount(server)
         .await;
@@ -471,10 +686,34 @@ async fn mount_running_runtime(server: &MockServer) {
             "maximum_management_api_major": 1,
             "provider_protocols": ["openai_responses"],
             "capabilities": ["discovery.v1"],
-            "instance_id": "01234567-89ab-4cde-8fab-0123456789ab"
+            "instance_id": instance_id
         })))
         .mount(server)
         .await;
+}
+
+async fn mount_protected_runtime(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/wokcore/v1/providers/catalog"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/wokcore/v1/service/status"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(server)
+        .await;
+    for endpoint in [
+        "/wokcore/v1/service/drain",
+        "/wokcore/v1/service/stop",
+        "/wokcore/v1/service/drain/cancel",
+    ] {
+        Mock::given(method("POST"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(server)
+            .await;
+    }
 }
 
 struct RuntimeFixture {
@@ -510,12 +749,27 @@ impl RuntimeFixture {
     }
 
     fn write_discovery_at(&self, process_id: u32, api_major: u32, base_url: &str) {
+        self.write_discovery_at_with_instance(
+            process_id,
+            api_major,
+            base_url,
+            "01234567-89ab-4cde-8fab-0123456789ab",
+        );
+    }
+
+    fn write_discovery_at_with_instance(
+        &self,
+        process_id: u32,
+        api_major: u32,
+        base_url: &str,
+        instance_id: &str,
+    ) {
         fs::write(
             &self.paths.wokcore_discovery_file,
             serde_json::to_vec(&serde_json::json!({
                 "base_url": base_url,
                 "pid": process_id,
-                "instance_id": "01234567-89ab-4cde-8fab-0123456789ab",
+                "instance_id": instance_id,
                 "wokcore_version": "0.1.0",
                 "api_major": api_major
             }))

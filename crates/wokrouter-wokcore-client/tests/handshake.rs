@@ -1,6 +1,6 @@
 mod support;
 
-use std::{net::TcpListener, num::NonZeroU32};
+use std::{net::TcpListener, sync::Arc};
 
 use serde_json::json;
 use tempfile::tempdir;
@@ -43,12 +43,14 @@ async fn client_bound_to_discovered_process_keeps_running_handshake() {
     let discovery = fixture.path().join("discovery.json");
     write_discovery_with_pid(&discovery, &server.uri(), INSTANCE_ID, 41, 1, None);
 
+    let client = WokCoreClient::new(discovery).unwrap();
+    let client = client.bound_to_runtime(
+        client.discovered_runtime_identity().unwrap(),
+        Arc::new(|_| true),
+    );
+
     assert!(matches!(
-        WokCoreClient::new(discovery)
-            .unwrap()
-            .bound_to_process(NonZeroU32::new(41).unwrap())
-            .connection()
-            .await,
+        client.connection().await,
         CoreConnection::Running(_)
     ));
 }
@@ -62,9 +64,11 @@ async fn bound_management_client_rejects_replaced_process_before_http() {
     let fixture = tempdir().unwrap();
     let discovery = fixture.path().join("discovery.json");
     write_discovery_with_pid(&discovery, &first.uri(), INSTANCE_ID, 41, 1, None);
-    let client = WokCoreClient::new(&discovery)
-        .unwrap()
-        .bound_to_process(NonZeroU32::new(41).unwrap());
+    let client = WokCoreClient::new(&discovery).unwrap();
+    let client = client.bound_to_runtime(
+        client.discovered_runtime_identity().unwrap(),
+        Arc::new(|_| true),
+    );
     write_discovery_with_pid(&discovery, &second.uri(), INSTANCE_ID, 42, 1, None);
 
     assert_eq!(

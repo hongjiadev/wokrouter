@@ -1,11 +1,13 @@
 use std::{
     future::Future,
+    num::NonZeroU32,
     path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
 };
 
 use serde::Serialize;
 use tokio::sync::OnceCell;
-use wokrouter_wokcore_client::{CoreConnection, WokCoreClient};
+use wokrouter_wokcore_client::{CoreConnection, WokCoreClient, WokCoreRuntimeBinder};
 
 use crate::{AppPaths, PlatformError, system::wokcore::discover_wokcore_executable};
 
@@ -38,11 +40,18 @@ pub enum WokCoreRuntimeChannel {
     Production,
 }
 
-#[derive(Clone, Debug)]
+type ProcessMatcher = dyn Fn(NonZeroU32, &Path) -> bool + Send + Sync;
+type ProductionDiscoverer = dyn Fn(&Path) -> Result<Option<PathBuf>, PlatformError> + Send + Sync;
+
+#[derive(Clone)]
 pub struct SelectedWokCoreRuntime {
     channel: WokCoreRuntimeChannel,
-    executable: Option<PathBuf>,
+    executable: Arc<OnceLock<PathBuf>>,
     client: WokCoreClient,
+    probe_client: WokCoreClient,
+    runtime_binder: Option<WokCoreRuntimeBinder>,
+    process_matches: Arc<ProcessMatcher>,
+    production_authority: Option<(PathBuf, Arc<ProductionDiscoverer>)>,
 }
 
 impl SelectedWokCoreRuntime {
@@ -51,20 +60,73 @@ impl SelectedWokCoreRuntime {
     }
 
     pub fn executable(&self) -> Option<&Path> {
-        self.executable.as_deref()
+        self.executable.get().map(PathBuf::as_path)
     }
 
     pub fn client(&self) -> &WokCoreClient {
+        self.refresh_production_binding();
         &self.client
     }
 
     pub async fn connection(&self) -> CoreConnection {
-        match (self.channel, self.client.connection().await) {
+        match (self.channel, self.client().connection().await) {
             (WokCoreRuntimeChannel::Development, CoreConnection::Missing) => {
                 CoreConnection::Stopped
             }
             (_, connection) => connection,
         }
+    }
+
+    pub fn establish_production_binding(&self, executable: &Path) -> bool {
+        if self.channel != WokCoreRuntimeChannel::Production {
+            return false;
+        }
+        if let Some(selected) = self.executable.get() {
+            if selected != executable {
+                return false;
+            }
+        } else if self.executable.set(executable.to_path_buf()).is_err() {
+            return false;
+        }
+
+        let Some(binder) = &self.runtime_binder else {
+            return false;
+        };
+        let Some(identity) = self.probe_client.discovered_runtime_identity() else {
+            return false;
+        };
+        if !(self.process_matches)(identity.process_id(), executable) {
+            return false;
+        }
+        bind_trusted_executable(
+            binder,
+            Arc::clone(&self.process_matches),
+            executable.to_path_buf(),
+        )
+    }
+
+    fn refresh_production_binding(&self) {
+        let Some((install_record, discover)) = &self.production_authority else {
+            return;
+        };
+        let executable = match self.executable() {
+            Some(executable) => executable.to_path_buf(),
+            None => match discover(install_record) {
+                Ok(Some(executable)) => executable,
+                Ok(None) | Err(_) => return,
+            },
+        };
+        let _ = self.establish_production_binding(&executable);
+    }
+}
+
+impl std::fmt::Debug for SelectedWokCoreRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SelectedWokCoreRuntime")
+            .field("channel", &self.channel)
+            .field("executable", &self.executable())
+            .finish_non_exhaustive()
     }
 }
 
@@ -80,16 +142,20 @@ async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, Platfor
     select_with_dependencies(
         paths,
         candidate,
-        &crate::system::process_executable_matches,
+        Arc::new(crate::system::process_executable_matches),
         &probe_connection,
-        &discover_wokcore_executable,
+        Arc::new(discover_wokcore_executable),
     )
     .await
 }
 
 #[cfg(not(debug_assertions))]
 async fn select_once(paths: &AppPaths) -> Result<SelectedWokCoreRuntime, PlatformError> {
-    select_production(paths, &discover_wokcore_executable)
+    select_production(
+        paths,
+        Arc::new(crate::system::process_executable_matches),
+        Arc::new(discover_wokcore_executable),
+    )
 }
 
 fn client(paths: &AppPaths) -> Result<WokCoreClient, PlatformError> {
@@ -99,13 +165,36 @@ fn client(paths: &AppPaths) -> Result<WokCoreClient, PlatformError> {
 
 fn select_production(
     paths: &AppPaths,
-    discover: &(dyn Fn(&Path) -> Result<Option<PathBuf>, PlatformError> + Send + Sync),
+    process_matches: Arc<ProcessMatcher>,
+    discover: Arc<ProductionDiscoverer>,
 ) -> Result<SelectedWokCoreRuntime, PlatformError> {
+    let probe_client = client(paths)?;
+    let (bound_client, runtime_binder) = probe_client.pending_trusted_executable_runtime();
+    let executable = discover(&paths.wokcore_install_record)?;
+    let executable_cell = Arc::new(OnceLock::new());
+    if let Some(executable) = executable {
+        let _ = executable_cell.set(executable.clone());
+        bind_trusted_executable(&runtime_binder, Arc::clone(&process_matches), executable);
+    }
     Ok(SelectedWokCoreRuntime {
         channel: WokCoreRuntimeChannel::Production,
-        executable: discover(&paths.wokcore_install_record)?,
-        client: client(paths)?,
+        executable: executable_cell,
+        client: bound_client,
+        probe_client,
+        runtime_binder: Some(runtime_binder),
+        process_matches,
+        production_authority: Some((paths.wokcore_install_record.clone(), Arc::clone(&discover))),
     })
+}
+
+fn bind_trusted_executable(
+    binder: &WokCoreRuntimeBinder,
+    process_matches: Arc<ProcessMatcher>,
+    executable: PathBuf,
+) -> bool {
+    binder.bind_trusted_executable(Arc::new(move |process_id| {
+        process_matches(process_id, &executable)
+    }))
 }
 
 #[cfg(debug_assertions)]
@@ -123,9 +212,9 @@ fn probe_connection(client: WokCoreClient) -> ConnectionProbeFuture {
 async fn select_with_dependencies(
     paths: &AppPaths,
     candidate: Option<PathBuf>,
-    process_matches: &(dyn Fn(std::num::NonZeroU32, &Path) -> bool + Send + Sync),
+    process_matches: Arc<ProcessMatcher>,
     connection_probe: &ConnectionProbe,
-    discover: &(dyn Fn(&Path) -> Result<Option<PathBuf>, PlatformError> + Send + Sync),
+    discover: Arc<ProductionDiscoverer>,
 ) -> Result<SelectedWokCoreRuntime, PlatformError> {
     use std::time::Duration;
 
@@ -135,15 +224,22 @@ async fn select_with_dependencies(
     const DEVELOPMENT_RETRY_DELAY: Duration = Duration::from_millis(50);
 
     let Some(candidate) = candidate else {
-        return select_production(paths, discover);
+        return select_production(paths, process_matches, discover);
     };
     let client = client(paths)?;
     let deadline = Instant::now() + DEVELOPMENT_TIMEOUT;
     loop {
-        if let Some(process_id) = client.discovered_process_id()
-            && process_matches(process_id, &candidate)
+        if let Some(identity) = client.discovered_runtime_identity()
+            && process_matches(identity.process_id(), &candidate)
         {
-            let bound = client.bound_to_process(process_id);
+            let candidate_for_validator = candidate.clone();
+            let matcher_for_validator = Arc::clone(&process_matches);
+            let bound = client.bound_to_runtime(
+                identity,
+                Arc::new(move |process_id| {
+                    matcher_for_validator(process_id, &candidate_for_validator)
+                }),
+            );
             let Ok(connection) =
                 tokio::time::timeout_at(deadline, connection_probe(bound.clone())).await
             else {
@@ -152,12 +248,19 @@ async fn select_with_dependencies(
             if Instant::now() >= deadline {
                 break;
             }
-            let still_matches = process_matches(process_id, &candidate);
+            let still_matches = client.discovered_runtime_identity() == Some(identity)
+                && process_matches(identity.process_id(), &candidate);
             if still_matches && !matches!(connection, CoreConnection::Missing) {
+                let executable = Arc::new(OnceLock::new());
+                let _ = executable.set(candidate);
                 return Ok(SelectedWokCoreRuntime {
                     channel: WokCoreRuntimeChannel::Development,
-                    executable: Some(candidate),
+                    executable,
                     client: bound,
+                    probe_client: client,
+                    runtime_binder: None,
+                    process_matches,
+                    production_authority: None,
                 });
             }
         }
@@ -171,7 +274,7 @@ async fn select_with_dependencies(
             break;
         }
     }
-    select_production(paths, discover)
+    select_production(paths, process_matches, discover)
 }
 
 #[cfg(debug_assertions)]
@@ -241,15 +344,12 @@ pub(crate) mod test_support {
     };
 
     use super::{
-        ConnectionProbe, ConnectionProbeFuture, RuntimeSelectorState, SelectedWokCoreRuntime,
-        development, probe_connection, select_with_dependencies,
+        ConnectionProbe, ConnectionProbeFuture, ProcessMatcher, ProductionDiscoverer,
+        RuntimeSelectorState, SelectedWokCoreRuntime, development, probe_connection,
+        select_with_dependencies,
     };
     use crate::{AppPaths, PlatformError};
     use wokrouter_wokcore_client::{CoreConnection, WokCoreClient};
-
-    type ProcessMatcher = dyn Fn(NonZeroU32, &Path) -> bool + Send + Sync;
-    type ProductionDiscoverer =
-        dyn Fn(&Path) -> Result<Option<PathBuf>, PlatformError> + Send + Sync;
 
     #[derive(Clone)]
     pub struct RuntimeSelectorHarness {
@@ -306,9 +406,9 @@ pub(crate) mod test_support {
                     select_with_dependencies(
                         paths,
                         self.inner.candidate.clone(),
-                        self.inner.process_matches.as_ref(),
+                        Arc::clone(&self.inner.process_matches),
                         self.inner.connection_probe.as_ref(),
-                        self.inner.discover.as_ref(),
+                        Arc::clone(&self.inner.discover),
                     )
                 })
                 .await

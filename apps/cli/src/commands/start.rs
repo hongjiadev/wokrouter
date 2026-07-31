@@ -317,8 +317,13 @@ async fn run_start_workflow(
                         .spawn(&executable)
                         .map_err(|error| StartFailure::start(error, "starting"))?,
                 );
-                wait_until_running(runtime.client(), dependencies, started.as_mut().unwrap())
-                    .await?;
+                wait_until_running(
+                    runtime,
+                    &executable,
+                    dependencies,
+                    started.as_mut().unwrap(),
+                )
+                .await?;
             }
             CoreConnection::Running(_) => unreachable!(),
         }
@@ -415,13 +420,19 @@ async fn verify_authenticated_status(
 }
 
 async fn wait_until_running(
-    client: &WokCoreClient,
+    runtime: &(impl CommandRuntime + Sync),
+    executable: &Path,
     dependencies: &StartDependencies,
     child: &mut Box<dyn StartedCore>,
 ) -> Result<(), StartFailure> {
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
-        match dependencies.service.connection(client).await {
+        let connection = if runtime.establish_production_binding(executable) {
+            dependencies.service.connection(runtime.client()).await
+        } else {
+            Ok(CoreConnection::Missing)
+        };
+        match connection {
             Ok(CoreConnection::Running(_)) => return Ok(()),
             Ok(CoreConnection::Incompatible(_)) => {
                 stop_started_core(Some(child.as_mut()));
