@@ -16,8 +16,21 @@ const expectedManagementNamespaces = [
   "sessions",
   "usage",
 ];
-const htmlMarkup = /<(?:[!?/]|[A-Za-z])/u;
+const htmlElementMarkup =
+  /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s+[^<>]*?)?\s*\/?>/u;
+const htmlCommentMarkup = /<!--[\s\S]*?-->/u;
+const htmlDoctypeMarkup = /<!doctype(?:\s+[^<>]*?)?>/iu;
+const htmlProcessingMarkup = /<\?[A-Za-z][\s\S]*?\?>/u;
 const interpolationPlaceholder = /{{\s*([A-Za-z0-9_.-]+)\s*}}/g;
+
+function containsHtmlMarkup(value) {
+  return (
+    htmlElementMarkup.test(value) ||
+    htmlCommentMarkup.test(value) ||
+    htmlDoctypeMarkup.test(value) ||
+    htmlProcessingMarkup.test(value)
+  );
+}
 
 function isPlainObject(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -74,7 +87,7 @@ function flattenCatalog(catalog, locale, prefix = "", leaves = new Map()) {
         `Catalog "${locale}" key "${path}" must be a non-empty string.`,
       );
     }
-    if (htmlMarkup.test(value)) {
+    if (containsHtmlMarkup(value)) {
       throw new Error(
         `Catalog "${locale}" key "${path}" must not contain HTML markup.`,
       );

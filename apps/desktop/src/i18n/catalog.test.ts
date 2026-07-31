@@ -309,8 +309,16 @@ describe("desktop translation catalogs", () => {
     );
   });
 
-  it.each(["<!-- translator note -->", "<!doctype html>", "<?catalog note?>"])(
-    "rejects HTML declaration-like markup %s",
+  it.each([
+    "<strong>Retry</strong>",
+    "</strong>",
+    "<br />",
+    '<custom-element data-state="ready">',
+    "<!-- translator note -->",
+    "<!doctype html>",
+    "<?catalog note?>",
+  ])(
+    "rejects complete HTML-like markup %s",
     (value) => {
       const [english, chinese] = markup(value);
       expect(() => validateCatalogs(english, chinese)).toThrow(
@@ -326,6 +334,31 @@ describe("desktop translation catalogs", () => {
         fixture({ greeting: "你好 {{name}}" }),
       ),
     ).toBe(1);
+  });
+
+  it.each([
+    "A<B",
+    "Run wokrouter <input.json",
+    "<input.json>",
+    "<!-- unfinished",
+    "<!doctype html",
+    "<?catalog note",
+  ])("allows non-markup technical angle text %s", (value) => {
+    const [english, chinese] = markup(value);
+    expect(validateCatalogs(english, chinese)).toBe(1);
+  });
+
+  it.each([
+    "A<B",
+    "Run wokrouter <input.json",
+    "<input.json>",
+    "<!-- unfinished",
+    "<!doctype html",
+    "<?catalog note",
+  ])("allows the real CLI technical angle text: %s", (value) => {
+    const result = runCatalogChecker(markup(value));
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Translation catalogs match (1 keys).");
   });
 
   it.each([
