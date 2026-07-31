@@ -448,6 +448,75 @@ createRoot(root).render()
             -Scenario "bootstrap contract text retained only in a template literal"
     }
 
+    Invoke-Scenario -Name "desktop bootstrap requirements cannot survive in a nested template interpolation" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/main.tsx" `
+            -OldText @'
+export async function bootstrap(): Promise<void> {
+  const systemLocale = await invoke<string>("system_locale").catch(
+    () => undefined,
+  );
+  const locale = resolveSupportedLocale(
+    systemLocale,
+    browserLocaleCandidates(window.navigator),
+  );
+  await initializeI18n(locale);
+  initializeDocumentLocale(document.documentElement, locale);
+
+  const root = document.getElementById("root");
+  if (!root) {
+    throw new Error("WokRouter desktop root is missing.");
+  }
+
+  createRoot(root).render(
+    <StrictMode>
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
+    </StrictMode>,
+  );
+}
+'@ `
+            -NewText @'
+export async function bootstrap(): Promise<void> {
+  const decoy = `outer \` ${/* block comment */
+// line comment
+`
+;
+  const systemLocale = await invoke<string>("system_locale").catch(
+    () => undefined,
+  );
+  const locale = resolveSupportedLocale(
+    systemLocale,
+    browserLocaleCandidates(window.navigator),
+  );
+  await initializeI18n(locale);
+  initializeDocumentLocale(document.documentElement, locale);
+
+  const root = document.getElementById("root");
+  if (!root) {
+    throw new Error("WokRouter desktop root is missing.");
+  }
+
+  createRoot(root).render(
+    <StrictMode>
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
+    </StrictMode>,
+  );
+`}`;
+  void decoy;
+}
+'@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "reachable direct bootstrap statements" `
+            -Scenario "bootstrap contract text retained in a nested interpolation template"
+    }
+
     Invoke-Scenario -Name "desktop bootstrap requirements cannot live under if false" -Test {
         $root = New-ContractFixture
         Edit-FixtureFile `
@@ -504,6 +573,19 @@ export async function bootstrap(): Promise<void> {
             -Scenario "bootstrap returning before locale initialization"
     }
 
+    Invoke-Scenario -Name "desktop bootstrap cannot continue after literal true return" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/main.tsx" `
+            -OldText "  const systemLocale = await invoke<string>(`"system_locale`").catch(`n" `
+            -NewText "  if (true) { return; }`n  const systemLocale = await invoke<string>(`"system_locale`").catch(`n"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "reachable direct bootstrap statements" `
+            -Scenario "bootstrap continuing after a literal-true terminal branch"
+    }
+
     Invoke-Scenario -Name "desktop module must invoke bootstrap" -Test {
         $root = New-ContractFixture
         Edit-FixtureFile `
@@ -546,6 +628,24 @@ export async function bootstrap(): Promise<void> {
             -Root $root `
             -ExpectedText "awaited i18n.init options" `
             -Scenario "supported languages retained only in an unrelated object"
+    }
+
+    Invoke-Scenario -Name "desktop supported languages cannot be overridden by spread" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/i18n/index.ts" `
+            -OldText "  await i18n.use(initReactI18next).init({`n" `
+            -NewText "  const override = { supportedLngs: [`"fr`"] };`n  await i18n.use(initReactI18next).init({`n"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/i18n/index.ts" `
+            -OldText "    supportedLngs: [`"en`", `"zh-CN`"],`n" `
+            -NewText "    supportedLngs: [`"en`", `"zh-CN`"],`n    ...override,`n"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "awaited i18n.init options" `
+            -Scenario "desktop supported language list overridden by a later spread"
     }
 
     Invoke-Scenario -Name "Simplified Chinese catalog cannot be removed" -Test {

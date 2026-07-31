@@ -428,6 +428,188 @@ function Get-RustCodeView {
     }
 }
 
+function Get-TypeScriptQuotedLiteralEnd {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [int]$Start,
+
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $quote = $Source[$Start]
+    $index = $Start + 1
+    while ($index -lt $Source.Length) {
+        if ($Source[$index] -eq "\") {
+            $index += 2
+            continue
+        }
+        if ($Source[$index] -eq $quote) {
+            return $index + 1
+        }
+        if ($Source[$index] -eq "`r" -or $Source[$index] -eq "`n") {
+            break
+        }
+        $index += 1
+    }
+
+    Add-ContractFailure `
+        -Message "$Description must be lexically valid: unterminated string literal."
+    return -1
+}
+
+function Get-TypeScriptBlockCommentEnd {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [int]$Start,
+
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $index = $Start + 2
+    while ($index + 1 -lt $Source.Length) {
+        if ($Source[$index] -eq "*" -and $Source[$index + 1] -eq "/") {
+            return $index + 2
+        }
+        $index += 1
+    }
+
+    Add-ContractFailure `
+        -Message "$Description must be lexically valid: unterminated block comment."
+    return -1
+}
+
+function Get-TypeScriptTemplateInterpolationEnd {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [int]$Start,
+
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $braceDepth = 1
+    $index = $Start
+    while ($index -lt $Source.Length) {
+        $current = $Source[$index]
+        $next = if ($index + 1 -lt $Source.Length) {
+            $Source[$index + 1]
+        }
+        else {
+            [char]0
+        }
+
+        if ($current -eq "/" -and $next -eq "/") {
+            $index += 2
+            while (
+                $index -lt $Source.Length -and
+                $Source[$index] -ne "`r" -and
+                $Source[$index] -ne "`n"
+            ) {
+                $index += 1
+            }
+            continue
+        }
+        if ($current -eq "/" -and $next -eq "*") {
+            $index = Get-TypeScriptBlockCommentEnd `
+                -Source $Source `
+                -Start $index `
+                -Description $Description
+            if ($index -lt 0) {
+                return -1
+            }
+            continue
+        }
+        if ($current -eq "'" -or $current -eq '"') {
+            $index = Get-TypeScriptQuotedLiteralEnd `
+                -Source $Source `
+                -Start $index `
+                -Description $Description
+            if ($index -lt 0) {
+                return -1
+            }
+            continue
+        }
+        if ($current -eq "``") {
+            $index = Get-TypeScriptTemplateLiteralEnd `
+                -Source $Source `
+                -Start $index `
+                -Description $Description
+            if ($index -lt 0) {
+                return -1
+            }
+            continue
+        }
+        if ($current -eq "{") {
+            $braceDepth += 1
+        }
+        elseif ($current -eq "}") {
+            $braceDepth -= 1
+            if ($braceDepth -eq 0) {
+                return $index + 1
+            }
+        }
+        $index += 1
+    }
+
+    Add-ContractFailure `
+        -Message "$Description must be lexically valid: unterminated template interpolation."
+    return -1
+}
+
+function Get-TypeScriptTemplateLiteralEnd {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [int]$Start,
+
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $index = $Start + 1
+    while ($index -lt $Source.Length) {
+        if ($Source[$index] -eq "\") {
+            $index += 2
+            continue
+        }
+        if ($Source[$index] -eq "``") {
+            return $index + 1
+        }
+        if (
+            $Source[$index] -eq '$' -and
+            $index + 1 -lt $Source.Length -and
+            $Source[$index + 1] -eq "{"
+        ) {
+            $index = Get-TypeScriptTemplateInterpolationEnd `
+                -Source $Source `
+                -Start ($index + 2) `
+                -Description $Description
+            if ($index -lt 0) {
+                return -1
+            }
+            continue
+        }
+        $index += 1
+    }
+
+    Add-ContractFailure `
+        -Message "$Description must be lexically valid: unterminated template literal."
+    return -1
+}
+
 function Get-TypeScriptCodeView {
     param(
         [Parameter(Mandatory)]
@@ -464,53 +646,37 @@ function Get-TypeScriptCodeView {
         }
 
         if ($current -eq "/" -and $next -eq "*") {
-            $end = $index + 2
-            while (
-                $end + 1 -lt $Source.Length -and
-                -not (
-                    $Source[$end] -eq "*" -and
-                    $Source[$end + 1] -eq "/"
-                )
-            ) {
-                $end += 1
-            }
-            if ($end + 1 -ge $Source.Length) {
-                Add-ContractFailure `
-                    -Message "$Description must be lexically valid: unterminated block comment."
+            $end = Get-TypeScriptBlockCommentEnd `
+                -Source $Source `
+                -Start $index `
+                -Description $Description
+            if ($end -lt 0) {
                 return $null
             }
-            $end += 2
             Set-RustMaskedRange -View $view -Start $index -End $end
             $index = $end
             continue
         }
 
-        if ($current -eq "'" -or $current -eq '"' -or $current -eq "``") {
-            $quote = $current
-            $end = $index + 1
-            $closed = $false
-            while ($end -lt $Source.Length) {
-                if ($Source[$end] -eq "\") {
-                    $end += 2
-                    continue
-                }
-                if ($Source[$end] -eq $quote) {
-                    $end += 1
-                    $closed = $true
-                    break
-                }
-                if (
-                    $quote -ne "``" -and
-                    ($Source[$end] -eq "`r" -or $Source[$end] -eq "`n")
-                ) {
-                    break
-                }
-                $end += 1
+        if ($current -eq "'" -or $current -eq '"') {
+            $end = Get-TypeScriptQuotedLiteralEnd `
+                -Source $Source `
+                -Start $index `
+                -Description $Description
+            if ($end -lt 0) {
+                return $null
             }
-            if (-not $closed) {
-                $kind = if ($quote -eq "``") { "template literal" } else { "string literal" }
-                Add-ContractFailure `
-                    -Message "$Description must be lexically valid: unterminated $kind."
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            $index = $end
+            continue
+        }
+
+        if ($current -eq "``") {
+            $end = Get-TypeScriptTemplateLiteralEnd `
+                -Source $Source `
+                -Start $index `
+                -Description $Description
+            if ($end -lt 0) {
                 return $null
             }
             Set-RustMaskedRange -View $view -Start $index -End $end
@@ -2160,7 +2326,11 @@ if ($null -ne $bootstrap) {
             )
         })
     $unconditionalTerminators = @($bootstrapStatements | Where-Object {
-            $_.Code -match '^(?:return|throw)\b'
+            [regex]::IsMatch($_.Code, '^(?:return|throw)\b') -or
+            [regex]::IsMatch(
+                $_.Code,
+                '(?s)^if\s*\(\s*true\s*\)\s*\{\s*(?:return(?:\s+[^;]*)?|throw\s+[^;]+)\s*;\s*\}\s*$'
+            )
         })
     $requiredBootstrapStatementsPresent = (
         $systemLocaleCalls.Count -eq 1 -and
@@ -2297,9 +2467,22 @@ if ($null -ne $i18nInitializer) {
                         )
                     }
                 )
+                $topLevelSpreadProperties = @()
+                foreach ($candidate in @([regex]::Matches(
+                            $optionsCodeBody,
+                            '\.\.\.'
+                        ))) {
+                    $ownership = Get-RustOwnershipAtIndex `
+                        -Structure $optionsCodeBody `
+                        -Index $candidate.Index
+                    if ($ownership.AllDelimiterDepthsZero) {
+                        $topLevelSpreadProperties += $candidate
+                    }
+                }
                 $supportedLanguagesAreExact = (
                     $supportedLanguageProperties.Count -eq 1 -and
-                    $exactSupportedLanguageProperties.Count -eq 1
+                    $exactSupportedLanguageProperties.Count -eq 1 -and
+                    $topLevelSpreadProperties.Count -eq 0
                 )
             }
         }
@@ -2347,14 +2530,14 @@ if ($null -ne $windowsPackagerAst) {
             -Condition '(Get-PeSubsystem -Path $desktop) -ne 2' `
             -ThrowStatement 'throw "Windows desktop executable must use the GUI subsystem."'
     )
-    $sourceDesktopGuardIsActive = (
+    $sourceDesktopGuardIsInvalid = (
         $sourceDesktopGuards.Count -ne 1 -or
         -not [object]::ReferenceEquals(
             $sourceDesktopGuards[0].Parent,
             $windowsPackagerAst.EndBlock
         )
     )
-    if ($sourceDesktopGuardIsActive) {
+    if ($sourceDesktopGuardIsInvalid) {
         Add-ContractFailure `
             -Message "Windows packager must retain the active script-scope source desktop GUI subsystem check."
     }
