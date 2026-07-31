@@ -28,7 +28,7 @@ function matchCandidate(candidate: string): SupportedLocale {
 }
 
 export function resolveSupportedLocale(
-  systemLocale: string | undefined,
+  systemLocale: string | null | undefined,
   browserLocales: readonly string[],
 ): SupportedLocale {
   if (systemLocale?.trim()) {

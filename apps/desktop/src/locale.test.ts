@@ -19,6 +19,7 @@ describe("supported locale resolution", () => {
     ["zh-Hant", ["zh-CN"], "en"],
     ["zh-MO", ["zh-CN"], "en"],
     ["fr-FR", ["zh-CN"], "en"],
+    [null, ["zh-CN", "en-US"], "zh-CN"],
     [undefined, ["zh-CN", "en-US"], "zh-CN"],
     [undefined, ["zh-TW", "zh-CN"], "en"],
     [undefined, ["", "zh-Hans"], "zh-CN"],

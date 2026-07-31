@@ -22,6 +22,7 @@ function New-ReleaseFixture {
     $null = New-Item -ItemType Directory -Path (Join-Path $root ".github/workflows") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri/src") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri/capabilities") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "docs/operations") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "tests/release") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "release") -Force
@@ -32,6 +33,7 @@ function New-ReleaseFixture {
             "Cargo.lock",
             "apps/desktop/package.json",
             "apps/desktop/src-tauri/src/main.rs",
+            "apps/desktop/src-tauri/capabilities/main.json",
             "apps/desktop/src-tauri/tauri.conf.json",
             "docs/operations/development.md",
             "tests/release/WokRouter.ReleaseContract.psm1",
@@ -192,6 +194,24 @@ try {
     Invoke-Scenario -Name "real release workflow satisfies the contract" -Test {
         $root = New-ReleaseFixture
         Assert-Passes -Root $root -Scenario "real release fixture"
+    }
+
+    Invoke-Scenario -Name "release event capability cannot become empty" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src-tauri/capabilities/main.json" `
+            -OldText @'
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+'@ `
+            -NewText '  "permissions": []'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "exact event listen/unlisten capability" `
+            -Scenario "empty release event capability"
     }
 
     Invoke-Scenario -Name "release workflow identity accepts CRLF and LF only" -Test {

@@ -118,6 +118,24 @@ describe("desktop bootstrap", () => {
     expect(mocks.render).toHaveBeenCalledOnce();
   });
 
+  it("falls back to navigator candidates when the system locale is unavailable", async () => {
+    vi.spyOn(window.navigator, "languages", "get").mockReturnValue([
+      "zh-Hans",
+      "en-US",
+    ]);
+    vi.spyOn(window.navigator, "language", "get").mockReturnValue("en-US");
+    mocks.invoke.mockResolvedValueOnce(null);
+    mocks.initializeI18n.mockResolvedValueOnce(undefined);
+
+    await import("./main");
+
+    await vi.waitFor(() => {
+      expect(mocks.createRoot).toHaveBeenCalledOnce();
+    });
+    expect(mocks.initializeI18n).toHaveBeenCalledWith("zh-CN");
+    expect(document.documentElement.lang).toBe("zh-CN");
+  });
+
   it("rejects and never renders when i18n initialization fails", async () => {
     const initializationError = new Error("catalog initialization failed");
     const { bootstrap } = await importMainWithPendingAutomaticBootstrap();

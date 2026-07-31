@@ -17,14 +17,12 @@ pub fn detect_system_context(ui: &UiConfig) -> SystemContext {
     context_from_candidates(ui, system_locale.as_deref(), system_timezone.as_deref())
 }
 
-pub fn detect_system_locale() -> String {
+pub fn detect_system_locale() -> Option<String> {
     locale_from_candidate(sys_locale::get_locale().as_deref())
 }
 
-fn locale_from_candidate(candidate: Option<&str>) -> String {
-    candidate
-        .and_then(normalize_locale)
-        .unwrap_or_else(|| FALLBACK_LOCALE.into())
+fn locale_from_candidate(candidate: Option<&str>) -> Option<String> {
+    candidate.and_then(normalize_locale)
 }
 
 fn context_from_candidates(
@@ -214,11 +212,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn system_locale_candidate_is_normalized_without_ui_configuration() {
-        assert_eq!(locale_from_candidate(Some("zh_CN")), "zh-CN");
-        assert_eq!(locale_from_candidate(Some("en-us")), "en-US");
-        assert_eq!(locale_from_candidate(Some("not a locale")), "en");
-        assert_eq!(locale_from_candidate(None), "en");
+    fn system_locale_candidate_preserves_absence_for_browser_fallback() {
+        assert_eq!(locale_from_candidate(Some("zh_CN")), Some("zh-CN".into()));
+        assert_eq!(locale_from_candidate(Some("en-us")), Some("en-US".into()));
+        assert_eq!(locale_from_candidate(Some("not a locale")), None);
+        assert_eq!(locale_from_candidate(None), None);
     }
 
     #[test]

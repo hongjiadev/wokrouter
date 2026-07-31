@@ -36,6 +36,9 @@ $desktopMainPath = Join-Path $rootPath "apps/desktop/src-tauri/src/main.rs"
 $tauriConfigurationPath = Join-Path `
     $rootPath `
     "apps/desktop/src-tauri/tauri.conf.json"
+$eventCapabilityPath = Join-Path `
+    $rootPath `
+    "apps/desktop/src-tauri/capabilities/main.json"
 $failures = [System.Collections.Generic.List[string]]::new()
 
 function Add-Failure {
@@ -539,7 +542,8 @@ foreach ($path in @(
         $cargoLockPath,
         $packageManifestPath,
         $desktopMainPath,
-        $tauriConfigurationPath
+        $tauriConfigurationPath,
+        $eventCapabilityPath
     )) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         Add-Failure -Message "Required release contract file is missing: $path"
@@ -547,6 +551,39 @@ foreach ($path in @(
 }
 
 if ($failures.Count -eq 0) {
+    try {
+        $eventCapability = Read-BoundedUtf8Text `
+            -Path $eventCapabilityPath `
+            -MaximumBytes 16384 |
+            ConvertFrom-Json
+        $properties = @($eventCapability.PSObject.Properties.Name | Sort-Object)
+        $expectedProperties = @(
+            '$schema',
+            'description',
+            'identifier',
+            'permissions',
+            'windows'
+        )
+        $windows = @($eventCapability.windows)
+        $permissions = @($eventCapability.permissions)
+        if (
+            (Compare-Object $properties $expectedProperties) -or
+            $eventCapability.'$schema' -cne '../gen/schemas/desktop-schema.json' -or
+            $eventCapability.identifier -cne 'main-event-listener' -or
+            $windows.Count -ne 1 -or
+            $windows[0] -cne 'main' -or
+            $permissions.Count -ne 2 -or
+            $permissions[0] -cne 'core:event:allow-listen' -or
+            $permissions[1] -cne 'core:event:allow-unlisten'
+        ) {
+            throw "unexpected capability shape"
+        }
+    }
+    catch {
+        Add-Failure `
+            -Message "Release desktop must package the main window's exact event listen/unlisten capability."
+    }
+
     $desktopMain = Read-BoundedUtf8Text `
         -Path $desktopMainPath `
         -MaximumBytes 131072

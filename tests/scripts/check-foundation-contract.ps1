@@ -26,8 +26,12 @@ $coreLifecyclePath = Join-Path $rootPath "apps/desktop/src/components/CoreLifecy
 $coreLifecycleTestsPath = Join-Path $rootPath "apps/desktop/src/components/CoreLifecycle.test.tsx"
 $localeTestsPath = Join-Path $rootPath "apps/desktop/src/locale.test.ts"
 $desktopPackagePath = Join-Path $rootPath "apps/desktop/package.json"
+$eventCapabilityPath = Join-Path $rootPath "apps/desktop/src-tauri/capabilities/main.json"
 $desktopBootstrapPath = Join-Path $rootPath "apps/desktop/src/main.tsx"
+$frontendLocalePath = Join-Path $rootPath "apps/desktop/src/locale.ts"
 $desktopI18nPath = Join-Path $rootPath "apps/desktop/src/i18n/index.ts"
+$systemLocalePath = Join-Path $rootPath "crates/wokrouter-platform/src/system/locale.rs"
+$packagedEventSmokePath = Join-Path $rootPath "tests/scripts/smoke-packaged-event-bridge.ps1"
 $englishCatalogPath = Join-Path $rootPath "apps/desktop/src/i18n/locales/en.json"
 $simplifiedChineseCatalogPath = Join-Path $rootPath "apps/desktop/src/i18n/locales/zh-CN.json"
 $desktopMainPath = Join-Path $rootPath "apps/desktop/src-tauri/src/main.rs"
@@ -2225,8 +2229,12 @@ $coreLifecycle = Get-Content -LiteralPath $coreLifecyclePath -Raw -Encoding UTF8
 $coreLifecycleTests = Get-Content -LiteralPath $coreLifecycleTestsPath -Raw -Encoding UTF8
 $localeTests = Get-Content -LiteralPath $localeTestsPath -Raw -Encoding UTF8
 $desktopPackageSource = Get-Content -LiteralPath $desktopPackagePath -Raw -Encoding UTF8
+$eventCapabilitySource = Get-Content -LiteralPath $eventCapabilityPath -Raw -Encoding UTF8
 $desktopBootstrap = Get-Content -LiteralPath $desktopBootstrapPath -Raw -Encoding UTF8
+$frontendLocale = Get-Content -LiteralPath $frontendLocalePath -Raw -Encoding UTF8
 $desktopI18n = Get-Content -LiteralPath $desktopI18nPath -Raw -Encoding UTF8
+$systemLocale = Get-Content -LiteralPath $systemLocalePath -Raw -Encoding UTF8
+$packagedEventSmoke = Get-Content -LiteralPath $packagedEventSmokePath -Raw -Encoding UTF8
 $desktopMain = Get-Content -LiteralPath $desktopMainPath -Raw -Encoding UTF8
 $windowsPackager = Get-Content -LiteralPath $windowsPackagerPath -Raw -Encoding UTF8
 $coreOperationParser = Get-Content -LiteralPath $coreOperationParserPath -Raw -Encoding UTF8
@@ -2264,6 +2272,121 @@ if (
         -Message "Desktop package must expose the standalone i18n:check catalog command."
 }
 
+$eventCapability = $null
+try {
+    $eventCapability = $eventCapabilitySource | ConvertFrom-Json
+}
+catch {
+    Add-ContractFailure -Message "Desktop event capability must contain valid JSON."
+}
+if ($null -ne $eventCapability) {
+    $capabilityProperties = @($eventCapability.PSObject.Properties.Name | Sort-Object)
+    $expectedCapabilityProperties = @(
+        '$schema',
+        'description',
+        'identifier',
+        'permissions',
+        'windows'
+    )
+    $capabilityWindows = @($eventCapability.windows)
+    $capabilityPermissions = @($eventCapability.permissions)
+    if (
+        (Compare-Object $capabilityProperties $expectedCapabilityProperties) -or
+        $eventCapability.'$schema' -cne '../gen/schemas/desktop-schema.json' -or
+        $eventCapability.identifier -cne 'main-event-listener' -or
+        $eventCapability.description -cne
+        'Allows the main window to monitor WokCore operations.' -or
+        $capabilityWindows.Count -ne 1 -or
+        $capabilityWindows[0] -cne 'main' -or
+        $capabilityPermissions.Count -ne 2 -or
+        $capabilityPermissions[0] -cne 'core:event:allow-listen' -or
+        $capabilityPermissions[1] -cne 'core:event:allow-unlisten'
+    ) {
+        Add-ContractFailure `
+            -Message "Desktop main window must receive only core event listen and unlisten permissions."
+    }
+}
+
+$systemLocaleCodeView = Get-RustCodeView `
+    -Source $systemLocale `
+    -Description "System locale module"
+$detectSystemLocale = Get-UniqueBracedItem `
+    -Source $systemLocale `
+    -SignaturePattern '(?m)^pub\s+fn\s+detect_system_locale\s*\(\s*\)\s*->\s*Option\s*<\s*String\s*>' `
+    -Description "System locale detector" `
+    -TopLevel `
+    -CodeView $systemLocaleCodeView
+$localeFromCandidate = Get-UniqueBracedItem `
+    -Source $systemLocale `
+    -SignaturePattern '(?m)^fn\s+locale_from_candidate\s*\(\s*candidate\s*:\s*Option\s*<\s*&str\s*>\s*\)\s*->\s*Option\s*<\s*String\s*>' `
+    -Description "System locale candidate normalizer" `
+    -TopLevel `
+    -CodeView $systemLocaleCodeView
+if (
+    $null -eq $detectSystemLocale -or
+    ($detectSystemLocale.CodeBody -replace '\s', '') -cne
+    'locale_from_candidate(sys_locale::get_locale().as_deref())' -or
+    $null -eq $localeFromCandidate -or
+    ($localeFromCandidate.CodeBody -replace '\s', '') -cne
+    'candidate.and_then(normalize_locale)'
+) {
+    Add-ContractFailure `
+        -Message "System locale detection must preserve a missing or invalid OS candidate as Option::None."
+}
+
+$desktopLibCodeViewForLocale = Get-RustCodeView `
+    -Source $desktopLib `
+    -Description "Desktop Tauri library"
+$systemLocaleCommand = Get-UniqueBracedItem `
+    -Source $desktopLib `
+    -SignaturePattern '(?m)^fn\s+system_locale\s*\(\s*\)\s*->\s*Option\s*<\s*String\s*>' `
+    -Description "Desktop system locale command" `
+    -TopLevel `
+    -CodeView $desktopLibCodeViewForLocale
+if (
+    $null -eq $systemLocaleCommand -or
+    ($systemLocaleCommand.CodeBody -replace '\s', '') -cne
+    'wokrouter_platform::detect_system_locale()'
+) {
+    Add-ContractFailure `
+        -Message "Desktop system_locale command must preserve the optional OS locale candidate."
+}
+
+$frontendLocaleCodeView = Get-TypeScriptCodeView `
+    -Source $frontendLocale `
+    -Description "Desktop locale resolver"
+$supportedLocaleResolver = Get-UniqueBracedItem `
+    -Source $frontendLocale `
+    -SignaturePattern '(?m)^export\s+function\s+resolveSupportedLocale\s*\(\s*systemLocale\s*:\s*string\s*\|\s*null\s*\|\s*undefined\s*,' `
+    -Description "Desktop supported locale resolver" `
+    -TopLevel `
+    -CodeView $frontendLocaleCodeView
+if ($null -eq $supportedLocaleResolver) {
+    Add-ContractFailure `
+        -Message "Desktop locale resolver must accept a null OS candidate for navigator fallback."
+}
+
+$packagedEventSmokeAst = Get-PowerShellAst `
+    -Source $packagedEventSmoke `
+    -Description "Packaged desktop event bridge smoke"
+$smokeCommands = @($packagedEventSmokeAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst]
+        }, $true) | ForEach-Object { $_.GetCommandName() })
+if (
+    $smokeCommands -notcontains 'Start-Process' -or
+    $smokeCommands -notcontains 'Invoke-RestMethod' -or
+    $packagedEventSmoke -notmatch 'ClientWebSocket' -or
+    $packagedEventSmoke -notmatch 'Runtime\.evaluate' -or
+    $packagedEventSmoke -notmatch 'document\.querySelector\([^\r\n]*role="progressbar"' -or
+    $packagedEventSmoke -notmatch
+    '-not\s*\(\s*Test-Path\s+-LiteralPath\s+\$sidecarMarker\s+-PathType\s+Leaf\s*\)' -or
+    $packagedEventSmoke -notmatch 'WOKROUTER_EVENT_SMOKE_MARKER'
+) {
+    Add-ContractFailure `
+        -Message "Packaged desktop smoke must launch the real EXE and observe a started sidecar plus WebView progress."
+}
+
 foreach ($catalog in @(
         @{
             Path = $englishCatalogPath
@@ -2298,7 +2421,7 @@ if ($null -ne $bootstrap) {
     $systemLocaleCalls = @($bootstrapStatements | Where-Object {
             [regex]::IsMatch(
                 $_.Source,
-                '(?s)^const\s+systemLocale\s*=\s*await\s+invoke\s*<\s*string\s*>\s*\(\s*"system_locale"\s*\)\s*\.\s*catch\s*\(\s*\(\s*\)\s*=>\s*undefined\s*,?\s*\)\s*;$'
+                '(?s)^const\s+systemLocale\s*=\s*await\s+invoke\s*<\s*string\s*\|\s*null\s*>\s*\(\s*"system_locale"\s*\)\s*\.\s*catch\s*\(\s*\(\s*\)\s*=>\s*undefined\s*,?\s*\)\s*;$'
             )
         })
     $localeResolutionCalls = @($bootstrapStatements | Where-Object {

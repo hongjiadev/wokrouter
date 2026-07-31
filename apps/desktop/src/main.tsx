@@ -24,7 +24,7 @@ const queryClient = new QueryClient({
 });
 
 export async function bootstrap(): Promise<void> {
-  const systemLocale = await invoke<string>("system_locale").catch(
+  const systemLocale = await invoke<string | null>("system_locale").catch(
     () => undefined,
   );
   const locale = resolveSupportedLocale(

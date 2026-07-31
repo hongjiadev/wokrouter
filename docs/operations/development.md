@@ -181,12 +181,31 @@ observations.
    relaunch. Verify locale selection falls back first to
    `navigator.languages`/`navigator.language`; repeat with no supported
    navigator locale and verify the final English fallback. Do not ship the
-   bridge-disabled test build.
+   bridge-disabled test build. A missing or invalid operating-system locale is
+   returned as `null` and follows the same navigator fallback; a valid but
+   unsupported OS locale such as `fr-FR` still wins priority and selects
+   English.
 5. In both `en` and `zh-CN`, walk the shell, WokCore lifecycle states, Provider
    and Session flows, usage, diagnostics, errors, confirmation dialogs, and
    recovery paths. Inspect visible copy, placeholders, titles, and every
    screen-reader label or live announcement. Brand names and reviewed technical
    identifiers may remain unchanged; untranslated current UI copy is a failure.
+
+After producing a Windows packaged executable with
+`pnpm --dir apps/desktop tauri build --no-bundle`, exercise the real WebView
+event ACL and first-start coordination path:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File tests/scripts/smoke-packaged-event-bridge.ps1 `
+  -DesktopExecutable target/release/wokrouter-desktop.exe
+```
+
+The smoke test copies the packaged executable into isolated temporary app-data,
+builds a temporary protocol-valid sidecar, launches the real WebView, and
+requires both the sidecar-start marker and an observable operation progressbar.
+It does not use production WokCore data or claim the wider manual acceptance
+scenarios have passed.
 
 ## Foundation quality gate
 

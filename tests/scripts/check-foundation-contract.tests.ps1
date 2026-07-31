@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$ScenarioPattern = ""
 )
@@ -24,13 +24,16 @@ function New-ContractFixture {
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src/i18n/locales") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri/src") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri/capabilities") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri/src/core_operation") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/cli/src/commands/start") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-platform/src/wokcore_install") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-platform/src") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-platform/src/system") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-platform/tests") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "docs/operations") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "tests/release") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "tests/scripts") -Force
     Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot ".github/workflows/ci.yml") `
         -Destination (Join-Path $root ".github/workflows/ci.yml")
@@ -59,6 +62,9 @@ function New-ContractFixture {
         -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src/locale.test.ts") `
         -Destination (Join-Path $root "apps/desktop/src/locale.test.ts")
     Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src/locale.ts") `
+        -Destination (Join-Path $root "apps/desktop/src/locale.ts")
+    Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "apps/desktop/package.json") `
         -Destination (Join-Path $root "apps/desktop/package.json")
     Copy-Item `
@@ -86,6 +92,9 @@ function New-ContractFixture {
         -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/src/lib.rs") `
         -Destination (Join-Path $root "apps/desktop/src-tauri/src/lib.rs")
     Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/capabilities/main.json") `
+        -Destination (Join-Path $root "apps/desktop/src-tauri/capabilities/main.json")
+    Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/src/main.rs") `
         -Destination (Join-Path $root "apps/desktop/src-tauri/src/main.rs")
     Copy-Item `
@@ -94,6 +103,12 @@ function New-ContractFixture {
     Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "crates/wokrouter-platform/src/wokcore_runtime.rs") `
         -Destination (Join-Path $root "crates/wokrouter-platform/src/wokcore_runtime.rs")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "crates/wokrouter-platform/src/system/locale.rs") `
+        -Destination (Join-Path $root "crates/wokrouter-platform/src/system/locale.rs")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "tests/scripts/smoke-packaged-event-bridge.ps1") `
+        -Destination (Join-Path $root "tests/scripts/smoke-packaged-event-bridge.ps1")
     Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "crates/wokrouter-platform/tests/wokcore_runtime.rs") `
         -Destination (Join-Path $root "crates/wokrouter-platform/tests/wokcore_runtime.rs")
@@ -109,7 +124,6 @@ function New-ContractFixture {
     $fixtureRoots.Add($root)
     return $root
 }
-
 function Edit-FixtureFile {
     param(
         [Parameter(Mandatory)]
@@ -345,6 +359,128 @@ try {
         Assert-ContractPasses -Root $root -Scenario "real workflow fixture"
     }
 
+    Invoke-Scenario -Name "desktop event capability cannot omit unlisten" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src-tauri/capabilities/main.json" `
+            -OldText '    "core:event:allow-unlisten"' `
+            -NewText '    "core:event:allow-emit"'
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "only core event listen and unlisten" `
+            -Scenario "desktop event capability without unlisten"
+    }
+
+    Invoke-Scenario -Name "desktop event capability cannot grant event emission" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src-tauri/capabilities/main.json" `
+            -OldText '    "core:event:allow-unlisten"' `
+            -NewText "    `"core:event:allow-unlisten`",`n    `"core:event:allow-emit`""
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "only core event listen and unlisten" `
+            -Scenario "desktop event capability with emit permission"
+    }
+
+    Invoke-Scenario -Name "desktop event capability cannot target every window" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src-tauri/capabilities/main.json" `
+            -OldText '  "windows": ["main"],' `
+            -NewText '  "windows": ["*"],'
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "only core event listen and unlisten" `
+            -Scenario "desktop event capability targeting every window"
+    }
+
+    Invoke-Scenario -Name "system locale cannot turn an invalid OS candidate into English" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "crates/wokrouter-platform/src/system/locale.rs" `
+            -OldText "    candidate.and_then(normalize_locale)`n" `
+            -NewText "    candidate.and_then(normalize_locale).or_else(|| Some(FALLBACK_LOCALE.into()))`n"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "Option::None" `
+            -Scenario "system locale invalid candidate coerced to English"
+    }
+
+    Invoke-Scenario -Name "Tauri locale command cannot erase candidate absence" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src-tauri/src/lib.rs" `
+            -OldText @'
+fn system_locale() -> Option<String> {
+    wokrouter_platform::detect_system_locale()
+}
+'@ `
+            -NewText @'
+fn system_locale() -> String {
+    wokrouter_platform::detect_system_locale().unwrap_or_else(|| "en".into())
+}
+'@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "preserve the optional OS locale" `
+            -Scenario "Tauri locale command erasing candidate absence"
+    }
+
+    Invoke-Scenario -Name "frontend locale resolver must accept null" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/locale.ts" `
+            -OldText "  systemLocale: string | null | undefined,`n" `
+            -NewText "  systemLocale: string | undefined,`n"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "accept a null OS candidate" `
+            -Scenario "frontend locale resolver rejecting null"
+    }
+
+    Invoke-Scenario -Name "desktop bootstrap invoke must preserve null" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/main.tsx" `
+            -OldText 'invoke<string | null>("system_locale")' `
+            -NewText 'invoke<string>("system_locale")'
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "reachable direct bootstrap statements" `
+            -Scenario "desktop bootstrap invoke erasing null"
+    }
+
+    Invoke-Scenario -Name "packaged event smoke cannot skip the sidecar marker" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/scripts/smoke-packaged-event-bridge.ps1" `
+            -OldText @'
+            -not $progressVisible -or
+            -not (Test-Path -LiteralPath $sidecarMarker -PathType Leaf)
+'@ `
+            -NewText @'
+            -not $progressVisible
+'@
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/scripts/smoke-packaged-event-bridge.ps1" `
+            -OldText 'if (-not $progressVisible -or -not (Test-Path -LiteralPath $sidecarMarker -PathType Leaf)) {' `
+            -NewText 'if (-not $progressVisible) {'
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "observe a started sidecar plus WebView progress" `
+            -Scenario "packaged event smoke without sidecar marker assertion"
+    }
+
     Invoke-Scenario -Name "fixture mutations require one exact source occurrence" -Test {
         $root = New-ContractFixture
         $rejected = $false
@@ -408,7 +544,7 @@ try {
             -RelativePath "apps/desktop/src/main.tsx" `
             -OldText @'
 export async function bootstrap(): Promise<void> {
-  const systemLocale = await invoke<string>("system_locale").catch(
+  const systemLocale = await invoke<string | null>("system_locale").catch(
     () => undefined,
   );
   const locale = resolveSupportedLocale(
@@ -435,7 +571,7 @@ export async function bootstrap(): Promise<void> {
             -NewText @'
 export async function bootstrap(): Promise<void> {
   const decoy = `
-invoke<string>("system_locale")
+invoke<string | null>("system_locale")
 await initializeI18n(locale)
 createRoot(root).render()
 `;
@@ -455,7 +591,7 @@ createRoot(root).render()
             -RelativePath "apps/desktop/src/main.tsx" `
             -OldText @'
 export async function bootstrap(): Promise<void> {
-  const systemLocale = await invoke<string>("system_locale").catch(
+  const systemLocale = await invoke<string | null>("system_locale").catch(
     () => undefined,
   );
   const locale = resolveSupportedLocale(
@@ -485,7 +621,7 @@ export async function bootstrap(): Promise<void> {
 // line comment
 `
 ;
-  const systemLocale = await invoke<string>("system_locale").catch(
+  const systemLocale = await invoke<string | null>("system_locale").catch(
     () => undefined,
   );
   const locale = resolveSupportedLocale(
@@ -542,12 +678,12 @@ export async function bootstrap(): Promise<void> {
             -RelativePath "apps/desktop/src/main.tsx" `
             -OldText @'
 export async function bootstrap(): Promise<void> {
-  const systemLocale = await invoke<string>("system_locale").catch(
+  const systemLocale = await invoke<string | null>("system_locale").catch(
 '@ `
             -NewText @'
 export async function bootstrap(): Promise<void> {
   async function decoy(): Promise<void> {
-    const systemLocale = await invoke<string>("system_locale").catch(
+    const systemLocale = await invoke<string | null>("system_locale").catch(
 '@
         Edit-FixtureFile `
             -Root $root `

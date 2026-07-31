@@ -105,7 +105,7 @@ async fn install_core_update_for(
 }
 
 #[tauri::command]
-fn system_locale() -> String {
+fn system_locale() -> Option<String> {
     wokrouter_platform::detect_system_locale()
 }
 
@@ -196,11 +196,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn system_locale_command_returns_a_safe_non_empty_candidate() {
-        let locale = system_locale();
-
-        assert!(!locale.is_empty());
-        assert!(!locale.contains(['/', '\\']));
-        assert!(!locale.chars().any(char::is_control));
+    fn system_locale_command_returns_only_a_safe_candidate() {
+        if let Some(locale) = system_locale() {
+            assert!(!locale.is_empty());
+            assert!(!locale.contains(['/', '\\']));
+            assert!(!locale.chars().any(char::is_control));
+        }
     }
 }
