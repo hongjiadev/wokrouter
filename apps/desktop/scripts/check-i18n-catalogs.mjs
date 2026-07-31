@@ -16,17 +16,27 @@ const expectedManagementNamespaces = [
   "sessions",
   "usage",
 ];
-const htmlMarkup = /<\/?[A-Za-z][^>]*>/u;
+const htmlMarkup = /<(?:[!?/]|[A-Za-z])/u;
 const interpolationPlaceholder = /{{\s*([A-Za-z0-9_.-]+)\s*}}/g;
 
 function isPlainObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function requirePlainNamespace(value, locale, path) {
+  if (!isPlainObject(value)) {
+    throw new Error(
+      `Catalog "${locale}" namespace "${path}" must be a plain object.`,
+    );
+  }
 }
 
 function requireExactNamespaces(catalog, locale, path, expected) {
-  if (!isPlainObject(catalog)) {
-    throw new Error(`Catalog "${locale}" namespace "${path}" must be an object.`);
-  }
+  requirePlainNamespace(catalog, locale, path);
   const actual = Object.keys(catalog).sort();
   if (
     actual.length !== expected.length ||
@@ -42,6 +52,17 @@ function requireExactNamespaces(catalog, locale, path, expected) {
 
 function flattenCatalog(catalog, locale, prefix = "", leaves = new Map()) {
   for (const key of Object.keys(catalog).sort()) {
+    const namespace = prefix || "<root>";
+    if (key === "") {
+      throw new Error(
+        `Catalog "${locale}" namespace "${namespace}" contains an empty key segment.`,
+      );
+    }
+    if (key.includes(".")) {
+      throw new Error(
+        `Catalog "${locale}" namespace "${namespace}" contains dotted key segment "${key}".`,
+      );
+    }
     const value = catalog[key];
     const path = prefix ? `${prefix}.${key}` : key;
     if (isPlainObject(value)) {
@@ -91,6 +112,10 @@ export function validateCatalogs(english, simplifiedChinese) {
     "<root>",
     expectedTopLevelNamespaces,
   );
+  for (const namespace of expectedTopLevelNamespaces) {
+    requirePlainNamespace(english[namespace], "en", namespace);
+    requirePlainNamespace(simplifiedChinese[namespace], "zh-CN", namespace);
+  }
   requireExactNamespaces(
     english.management,
     "en",
@@ -103,6 +128,15 @@ export function validateCatalogs(english, simplifiedChinese) {
     "management",
     expectedManagementNamespaces,
   );
+  for (const namespace of expectedManagementNamespaces) {
+    const path = `management.${namespace}`;
+    requirePlainNamespace(english.management[namespace], "en", path);
+    requirePlainNamespace(
+      simplifiedChinese.management[namespace],
+      "zh-CN",
+      path,
+    );
+  }
 
   const catalogs = [
     ["en", flattenCatalog(english, "en")],
@@ -138,13 +172,31 @@ async function readCatalog(path) {
   return JSON.parse(await readFile(path, "utf8"));
 }
 
-async function main() {
+function resolveCatalogPaths(desktopDirectory, arguments_) {
+  const paths = arguments_[0] === "--" ? arguments_.slice(1) : arguments_;
+  if (paths.length === 0) {
+    const localeDirectory = resolve(desktopDirectory, "src", "i18n", "locales");
+    return [
+      resolve(localeDirectory, "en.json"),
+      resolve(localeDirectory, "zh-CN.json"),
+    ];
+  }
+  if (paths.length !== 2) {
+    throw new Error(
+      "Usage: check-i18n-catalogs.mjs [<en.json> <zh-CN.json>]",
+    );
+  }
+  return paths.map((path) => resolve(path));
+}
+
+async function main(arguments_ = process.argv.slice(2)) {
   const desktopDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const localeDirectory = resolve(desktopDirectory, "src", "i18n", "locales");
-  const english = await readCatalog(resolve(localeDirectory, "en.json"));
-  const simplifiedChinese = await readCatalog(
-    resolve(localeDirectory, "zh-CN.json"),
+  const [englishPath, chinesePath] = resolveCatalogPaths(
+    desktopDirectory,
+    arguments_,
   );
+  const english = await readCatalog(englishPath);
+  const simplifiedChinese = await readCatalog(chinesePath);
   const keyCount = validateCatalogs(english, simplifiedChinese);
   process.stdout.write(`Translation catalogs match (${keyCount} keys).\n`);
 }

@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
 
+// @ts-expect-error Node types are intentionally not a direct desktop dependency.
+import { spawnSync } from "node:child_process";
+// @ts-expect-error Node types are intentionally not a direct desktop dependency.
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+// @ts-expect-error Node types are intentionally not a direct desktop dependency.
+import { tmpdir } from "node:os";
+// @ts-expect-error Node types are intentionally not a direct desktop dependency.
+import { join } from "node:path";
 import packageManifest from "../../package.json";
 // @ts-expect-error The standalone checker is native ESM without declarations.
 import { validateCatalogs } from "../../scripts/check-i18n-catalogs.mjs";
@@ -8,6 +16,7 @@ import en from "./locales/en.json";
 import zhCN from "./locales/zh-CN.json";
 
 type Catalog = Record<string, unknown>;
+type CatalogPair = readonly [Catalog, Catalog];
 
 const topLevelNamespaces = [
   "app",
@@ -27,6 +36,9 @@ const managementNamespaces = [
 function flattenKeys(catalog: Catalog, prefix = ""): string[] {
   return Object.entries(catalog)
     .flatMap(([key, value]) => {
+      if (key === "" || key.includes(".")) {
+        throw new Error(`Invalid catalog key segment: ${JSON.stringify(key)}`);
+      }
       const path = prefix ? `${prefix}.${key}` : key;
       return value !== null && typeof value === "object" && !Array.isArray(value)
         ? flattenKeys(value as Catalog, path)
@@ -72,6 +84,75 @@ function fixture(common: Catalog): Catalog {
     errors: {},
     common,
   };
+}
+
+function dottedCollision(): CatalogPair {
+  return [
+    fixture({
+      a: { b: "Nested {{nested}}" },
+      "a.b": "Literal {{kept}}",
+    }),
+    fixture({
+      a: { b: "嵌套 {{wrong}}" },
+      "a.b": "字面 {{kept}}",
+    }),
+  ];
+}
+
+function collapsedRootNamespace(value: unknown): CatalogPair {
+  const english = fixture({ retry: "Try again" });
+  const chinese = fixture({ retry: "重试" });
+  english.core = value;
+  chinese.core = value;
+  return [english, chinese];
+}
+
+function collapsedManagementNamespace(value: unknown): CatalogPair {
+  const english = fixture({ retry: "Try again" });
+  const chinese = fixture({ retry: "重试" });
+  (english.management as Catalog).providers = value;
+  (chinese.management as Catalog).providers = value;
+  return [english, chinese];
+}
+
+function markup(value: string): CatalogPair {
+  return [fixture({ retry: value }), fixture({ retry: value })];
+}
+
+function runCatalogChecker([english, chinese]: CatalogPair) {
+  const directory = mkdtempSync(join(tmpdir(), "wokrouter-i18n-"));
+  try {
+    const englishPath = join(directory, "en.json");
+    const chinesePath = join(directory, "zh-CN.json");
+    writeFileSync(englishPath, JSON.stringify(english), "utf8");
+    writeFileSync(chinesePath, JSON.stringify(chinese), "utf8");
+    const runtime = (
+      globalThis as unknown as { process: { cwd(): string; platform: string } }
+    ).process;
+    const desktopDirectory = runtime.cwd();
+    const platform = runtime.platform;
+    const packageArguments = [
+      "--dir",
+      desktopDirectory,
+      "i18n:check",
+      "--",
+      englishPath,
+      chinesePath,
+    ];
+    return platform === "win32"
+      ? spawnSync(
+          "cmd.exe",
+          ["/d", "/s", "/c", "pnpm.cmd", ...packageArguments],
+          { encoding: "utf8" },
+        )
+      : spawnSync(
+          "pnpm",
+          packageArguments,
+          { encoding: "utf8" },
+        );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 function assertCatalogKeyTypes() {
@@ -192,6 +273,80 @@ describe("desktop translation catalogs", () => {
     ],
   ])("rejects %s", (_name, english, chinese, message) => {
     expect(() => validateCatalogs(english, chinese)).toThrow(message);
+  });
+
+  it("rejects a dotted key segment before it can hide placeholder drift", () => {
+    const [english, chinese] = dottedCollision();
+    expect(() => validateCatalogs(english, chinese)).toThrow(
+      'Catalog "en" namespace "common" contains dotted key segment "a.b".',
+    );
+  });
+
+  it("rejects an empty key segment", () => {
+    expect(() =>
+      validateCatalogs(fixture({ "": "Empty" }), fixture({ "": "空" })),
+    ).toThrow(
+      'Catalog "en" namespace "common" contains an empty key segment.',
+    );
+  });
+
+  it.each([
+    ["root string", collapsedRootNamespace("not a namespace"), "core"],
+    ["root array", collapsedRootNamespace([]), "core"],
+    [
+      "management string",
+      collapsedManagementNamespace("not a namespace"),
+      "management.providers",
+    ],
+    [
+      "management array",
+      collapsedManagementNamespace([]),
+      "management.providers",
+    ],
+  ])("rejects a collapsed %s namespace", (_name, [english, chinese], path) => {
+    expect(() => validateCatalogs(english, chinese)).toThrow(
+      `Catalog "en" namespace "${path}" must be a plain object.`,
+    );
+  });
+
+  it.each(["<!-- translator note -->", "<!doctype html>", "<?catalog note?>"])(
+    "rejects HTML declaration-like markup %s",
+    (value) => {
+      const [english, chinese] = markup(value);
+      expect(() => validateCatalogs(english, chinese)).toThrow(
+        'Catalog "en" key "common.retry" must not contain HTML markup.',
+      );
+    },
+  );
+
+  it("allows ordinary i18next interpolation", () => {
+    expect(
+      validateCatalogs(
+        fixture({ greeting: "Hello {{name}}" }),
+        fixture({ greeting: "你好 {{name}}" }),
+      ),
+    ).toBe(1);
+  });
+
+  it.each([
+    ["dotted-key collision", dottedCollision(), /dotted key segment/],
+    [
+      "collapsed root namespace",
+      collapsedRootNamespace("not a namespace"),
+      /namespace "core" must be a plain object/,
+    ],
+    [
+      "collapsed management namespace",
+      collapsedManagementNamespace("not a namespace"),
+      /namespace "management\.providers" must be a plain object/,
+    ],
+    ["HTML comment", markup("<!-- translator note -->"), /HTML markup/],
+    ["HTML doctype", markup("<!doctype html>"), /HTML markup/],
+    ["processing-like markup", markup("<?catalog note?>"), /HTML markup/],
+  ])("rejects the real CLI mutation: %s", (_name, catalogs, error) => {
+    const result = runCatalogChecker(catalogs);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(error);
   });
 
   it("registers the standalone catalog check command", () => {
