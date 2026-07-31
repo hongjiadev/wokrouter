@@ -139,6 +139,83 @@ textarea:focus-visible,
   background: var(--surface);
 }
 
+.core-operation-panel {
+  display: grid;
+  min-width: 0;
+  gap: 1rem;
+}
+
+.core-operation-panel .section-label,
+.core-operation-panel .health-summary {
+  margin: 0;
+}
+
+.core-operation-panel > h1 {
+  margin: 0;
+  font-size: 1.7rem;
+  font-weight: 670;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+  text-wrap: balance;
+}
+
+.core-progress {
+  position: relative;
+  width: 100%;
+  height: 0.75rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-subtle);
+}
+
+.core-progress__bar {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 180ms ease-out;
+}
+
+.core-progress__bar--indeterminate {
+  width: 38%;
+  animation: core-progress-slide 1.35s ease-in-out infinite;
+}
+
+.core-progress__bytes {
+  margin: -0.4rem 0 0;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8rem;
+  text-align: end;
+}
+
+.core-operation__versions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  margin: 0;
+  border-block: 1px solid var(--border);
+}
+
+.core-operation__versions > div {
+  display: grid;
+  gap: 0.3rem;
+  padding-block: 0.875rem;
+}
+
+.core-operation__versions dt {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.core-operation__versions dd {
+  margin: 0;
+}
+
+.core-operation__versions code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 0.875rem;
+}
+
 .management-panel {
   width: 100%;
   overflow: hidden;
@@ -743,6 +820,15 @@ textarea {
   }
 }
 
+@keyframes core-progress-slide {
+  from {
+    transform: translateX(-105%);
+  }
+  to {
+    transform: translateX(275%);
+  }
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     --canvas: oklch(0.15 0.008 340);
@@ -829,5 +915,16 @@ textarea {
 
   .button:active:not(:disabled) {
     translate: none;
+  }
+
+  .core-progress__bar--indeterminate {
+    width: 100%;
+    animation: none;
+    background-image: repeating-linear-gradient(
+      135deg,
+      transparent 0 0.5rem,
+      color-mix(in oklch, white, transparent 78%) 0.5rem 1rem
+    );
+    transform: none;
   }
 }
