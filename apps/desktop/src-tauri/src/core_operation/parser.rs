@@ -35,7 +35,14 @@ pub(super) struct ProgressParser {
     operation: CoreOperationKind,
     next_sequence: u64,
     terminal: bool,
+    download: Option<DownloadState>,
     buffer: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DownloadState {
+    bytes_completed: u64,
+    bytes_total: u64,
 }
 
 impl ProgressParser {
@@ -44,6 +51,7 @@ impl ProgressParser {
             operation,
             next_sequence: 0,
             terminal: false,
+            download: None,
             buffer: Vec::new(),
         }
     }
@@ -94,10 +102,19 @@ impl ProgressParser {
         let event =
             serde_json::from_value::<ChildProgress>(value).map_err(|_| ProgressParseError)?;
         self.validate(&event)?;
-        self.next_sequence = self
+        let next_sequence = self
             .next_sequence
             .checked_add(1)
             .ok_or(ProgressParseError)?;
+        if let (CoreOperationPhase::Downloading, Some(bytes_completed), Some(bytes_total)) =
+            (event.phase, event.bytes_completed, event.bytes_total)
+        {
+            self.download = Some(DownloadState {
+                bytes_completed,
+                bytes_total,
+            });
+        }
+        self.next_sequence = next_sequence;
         self.terminal = event.state != CoreOperationState::Running;
         Ok(event)
     }
@@ -109,13 +126,28 @@ impl ProgressParser {
             || !phase_is_valid(event.operation, event.phase)
             || !state_is_valid(event.state, event.phase, event.error_code.as_deref())
             || !versions_are_valid(event)
-            || !bytes_are_valid(event)
+            || !self.bytes_are_valid(event)
             || !active_requests_are_valid(event)
             || !error_code_is_valid(event)
         {
             return Err(ProgressParseError);
         }
         Ok(())
+    }
+
+    fn bytes_are_valid(&self, event: &ChildProgress) -> bool {
+        match (event.phase, event.bytes_completed, event.bytes_total) {
+            (CoreOperationPhase::Downloading, Some(completed), Some(total)) => {
+                total > 0
+                    && completed <= total
+                    && self.download.is_none_or(|previous| {
+                        previous.bytes_total == total && previous.bytes_completed <= completed
+                    })
+            }
+            (CoreOperationPhase::Downloading, _, _) => false,
+            (_, None, None) => true,
+            (_, _, _) => false,
+        }
     }
 }
 
@@ -172,26 +204,10 @@ fn versions_are_valid(event: &ChildProgress) -> bool {
         .all(|version| Version::parse(version).is_ok())
 }
 
-fn bytes_are_valid(event: &ChildProgress) -> bool {
-    match (event.phase, event.bytes_completed, event.bytes_total) {
-        (CoreOperationPhase::Downloading, Some(completed), Some(total)) => completed <= total,
-        (CoreOperationPhase::Downloading, _, _) => false,
-        (_, None, None) => true,
-        (_, _, _) => false,
-    }
-}
-
 fn active_requests_are_valid(event: &ChildProgress) -> bool {
     match event.active_requests {
         None => true,
-        Some(count) => {
-            count <= MAX_ACTIVE_REQUESTS
-                && event.operation == CoreOperationKind::Update
-                && matches!(
-                    event.phase,
-                    CoreOperationPhase::Draining | CoreOperationPhase::Completed
-                )
-        }
+        Some(count) => count <= MAX_ACTIVE_REQUESTS && event.operation == CoreOperationKind::Update,
     }
 }
 
@@ -345,6 +361,7 @@ mod tests {
             VALID_DOWNLOAD.replace("0.1.23", "not-semver"),
             r#"{"schema_version":1,"sequence":0,"operation":"install","state":"running","phase":"starting","bytes_completed":1,"bytes_total":2}"#.to_owned(),
             r#"{"schema_version":1,"sequence":0,"operation":"install","state":"running","phase":"downloading","bytes_completed":1}"#.to_owned(),
+            r#"{"schema_version":1,"sequence":0,"operation":"install","state":"running","phase":"installing","active_requests":1}"#.to_owned(),
             r#"{"schema_version":1,"sequence":0,"operation":"update","state":"running","phase":"draining","active_requests":1000001}"#.to_owned(),
         ] {
             let operation = if line.contains(r#""operation":"update""#) {
@@ -361,6 +378,82 @@ mod tests {
         )
         .unwrap();
         assert_eq!(event.active_requests, Some(1_000_000));
+    }
+
+    #[test]
+    fn downloading_requires_a_positive_total() {
+        assert!(
+            parse_one(
+                CoreOperationKind::Update,
+                r#"{"schema_version":1,"sequence":0,"operation":"update","state":"running","phase":"downloading","bytes_completed":0,"bytes_total":0}"#,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn download_progress_never_retreats_and_keeps_one_total() {
+        for invalid_second in [
+            r#"{"schema_version":1,"sequence":1,"operation":"update","state":"running","phase":"downloading","bytes_completed":4,"bytes_total":10}"#,
+            r#"{"schema_version":1,"sequence":1,"operation":"update","state":"running","phase":"downloading","bytes_completed":6,"bytes_total":11}"#,
+        ] {
+            let mut parser = ProgressParser::new(CoreOperationKind::Update);
+            assert!(
+                parser
+                    .push(
+                        br#"{"schema_version":1,"sequence":0,"operation":"update","state":"running","phase":"downloading","bytes_completed":5,"bytes_total":10}
+"#,
+                    )
+                    .is_ok()
+            );
+            assert!(
+                parser
+                    .push(format!("{invalid_second}\n").as_bytes())
+                    .is_err(),
+                "accepted {invalid_second}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_download_events_do_not_advance_download_state() {
+        let mut parser = ProgressParser::new(CoreOperationKind::Update);
+        assert!(
+            parser
+                .push(
+                    br#"{"schema_version":1,"sequence":0,"operation":"update","state":"running","phase":"downloading","bytes_completed":5,"bytes_total":10}
+"#,
+                )
+                .is_ok()
+        );
+        assert!(
+            parser
+                .push(
+                    br#"{"schema_version":1,"sequence":1,"operation":"update","state":"running","phase":"downloading","bytes_completed":9,"bytes_total":10,"active_requests":1000001}
+"#,
+                )
+                .is_err()
+        );
+        assert!(
+            parser
+                .push(
+                    br#"{"schema_version":1,"sequence":1,"operation":"update","state":"running","phase":"downloading","bytes_completed":6,"bytes_total":10}
+"#,
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn update_active_requests_are_valid_during_rolling_back() {
+        let event = parse_one(
+            CoreOperationKind::Update,
+            r#"{"schema_version":1,"sequence":0,"operation":"update","state":"failed","phase":"rolling_back","active_requests":2,"error_code":"update_install_failed"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(event.state, CoreOperationState::Failed);
+        assert_eq!(event.active_requests, Some(2));
     }
 
     #[test]
