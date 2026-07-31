@@ -2,8 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
   const render = vi.fn();
+  const documentLocaleAtRootCreation: Array<{ lang: string; dir: string }> = [];
   return {
-    createRoot: vi.fn(() => ({ render })),
+    createRoot: vi.fn(() => {
+      documentLocaleAtRootCreation.push({
+        lang: document.documentElement.lang,
+        dir: document.documentElement.dir,
+      });
+      return { render };
+    }),
+    documentLocaleAtRootCreation,
     initializeI18n: vi.fn(),
     invoke: vi.fn(),
     render,
@@ -28,10 +36,23 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve };
 }
 
+async function importMainWithPendingAutomaticBootstrap() {
+  const automaticLocaleRequest = deferred<string>();
+  mocks.invoke.mockReturnValueOnce(automaticLocaleRequest.promise);
+
+  const main = await import("./main");
+
+  expect(mocks.invoke).toHaveBeenCalledOnce();
+  expect(mocks.initializeI18n).not.toHaveBeenCalled();
+  expect(mocks.createRoot).not.toHaveBeenCalled();
+  return main;
+}
+
 describe("desktop bootstrap", () => {
   beforeEach(() => {
     vi.resetModules();
     mocks.createRoot.mockClear();
+    mocks.documentLocaleAtRootCreation.length = 0;
     mocks.initializeI18n.mockReset();
     mocks.invoke.mockReset();
     mocks.render.mockClear();
@@ -71,6 +92,9 @@ describe("desktop bootstrap", () => {
 
     expect(document.documentElement.lang).toBe("zh-CN");
     expect(document.documentElement.dir).toBe("ltr");
+    expect(mocks.documentLocaleAtRootCreation).toEqual([
+      { lang: "zh-CN", dir: "ltr" },
+    ]);
     expect(mocks.render).toHaveBeenCalledOnce();
   });
 
@@ -92,5 +116,39 @@ describe("desktop bootstrap", () => {
     expect(document.documentElement.lang).toBe("zh-CN");
     expect(document.documentElement.dir).toBe("ltr");
     expect(mocks.render).toHaveBeenCalledOnce();
+  });
+
+  it("rejects and never renders when i18n initialization fails", async () => {
+    const initializationError = new Error("catalog initialization failed");
+    const { bootstrap } = await importMainWithPendingAutomaticBootstrap();
+    document.documentElement.lang = "existing-locale";
+    document.documentElement.dir = "rtl";
+    mocks.invoke.mockResolvedValueOnce("zh-CN");
+    mocks.initializeI18n.mockRejectedValueOnce(initializationError);
+
+    await expect(bootstrap()).rejects.toBe(initializationError);
+
+    expect(mocks.invoke).toHaveBeenCalledTimes(2);
+    expect(mocks.initializeI18n).toHaveBeenCalledOnce();
+    expect(mocks.createRoot).not.toHaveBeenCalled();
+    expect(mocks.render).not.toHaveBeenCalled();
+    expect(document.documentElement.lang).toBe("existing-locale");
+    expect(document.documentElement.dir).toBe("rtl");
+  });
+
+  it("rejects the exact missing-root error without rendering elsewhere", async () => {
+    const { bootstrap } = await importMainWithPendingAutomaticBootstrap();
+    document.body.innerHTML = "";
+    mocks.invoke.mockResolvedValueOnce("en-US");
+    mocks.initializeI18n.mockResolvedValueOnce(undefined);
+
+    await expect(bootstrap()).rejects.toThrowError(
+      /^WokRouter desktop root is missing\.$/,
+    );
+
+    expect(mocks.invoke).toHaveBeenCalledTimes(2);
+    expect(mocks.initializeI18n).toHaveBeenCalledWith("en");
+    expect(mocks.createRoot).not.toHaveBeenCalled();
+    expect(mocks.render).not.toHaveBeenCalled();
   });
 });
