@@ -1214,6 +1214,51 @@ OperationInProgress,
             Expected = "explicitly reaped"
         },
         @{
+            Name = "helper readiness timeout cannot replace the operation lease fence"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+fn fence_helper_timeout(
+    journal: &OperationJournal,
+    expected: &CoreOperationSnapshot,
+) -> Result<HelperTimeoutResolution, CoreOperationError> {
+    match journal.try_operation_lease()? {
+"@
+            New = @"
+fn fence_helper_timeout(
+    journal: &OperationJournal,
+    expected: &CoreOperationSnapshot,
+) -> Result<HelperTimeoutResolution, CoreOperationError> {
+    match journal.try_claim()? {
+"@
+            Expected = "atomically attach"
+        },
+        @{
+            Name = "helper timeout fence cannot overwrite a newly written terminal"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = '            if current != *expected {'
+            New = '            if false {'
+            Expected = "atomically attach"
+        },
+        @{
+            Name = "initial helper timeout cannot skip its final lease fence"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+            Err(_) => {
+                let resolution = match fence_helper_timeout(journal, &snapshot) {
+                    Ok(resolution) => resolution,
+                    Err(error) => {
+                        drop(claim);
+"@
+            New = @"
+            Err(_) => {
+                let resolution = match skip_helper_timeout_fence(journal, &snapshot) {
+                    Ok(resolution) => resolution,
+                    Err(error) => {
+                        drop(claim);
+"@
+            Expected = "readiness timeout must fence"
+        },
+        @{
             Name = "released initial handoff cannot skip the same-id restart"
             Path = "apps/desktop/src-tauri/src/core_operation.rs"
             Old = 'self.restart_initial_handoff(journal, &snapshot).await?'
@@ -1226,6 +1271,76 @@ OperationInProgress,
             Old = 'let recovery_lease = match journal.try_operation_lease()? {'
             New = 'let recovery_lease = match journal.try_claim()? {'
             Expected = "fence terminal recovery"
+        },
+        @{
+            Name = "reopened helper timeout cannot skip its final lease fence"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+        match observed {
+            Ok(result) => {
+                reap_helper(helper);
+                result
+            }
+            Err(_) => {
+                let resolution = match fence_helper_timeout(journal, snapshot) {
+"@
+            New = @"
+        match observed {
+            Ok(result) => {
+                reap_helper(helper);
+                result
+            }
+            Err(_) => {
+                let resolution = match skip_helper_timeout_fence(journal, snapshot) {
+"@
+            Expected = "Initial helper handoff recovery"
+        },
+        @{
+            Name = "active external install cannot disappear from operation arbitration"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+            return Ok(self.persistent_status().await?.is_some_and(|snapshot| {
+                snapshot.state == CoreOperationState::Running
+                    || (snapshot.operation == CoreOperationKind::Install
+                        && snapshot.state == CoreOperationState::Failed
+                        && snapshot.error_code.as_deref() == Some("install_in_progress"))
+            }));
+"@
+            New = @"
+            return Ok(self
+                .persistent_status()
+                .await?
+                .is_some_and(|snapshot| snapshot.state == CoreOperationState::Running));
+"@
+            Expected = "active external install lease"
+        },
+        @{
+            Name = "active external install cannot allow a persistent update start"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+            if existing.operation == CoreOperationKind::Install
+                && existing.state == CoreOperationState::Failed
+                && existing.error_code.as_deref() == Some("install_in_progress")
+            {
+                drop(claim);
+                self.store_persistent_snapshot(existing.clone()).await;
+                if operation == CoreOperationKind::Install {
+                    return Ok(existing);
+                }
+                return Err(CoreOperationError::OperationInProgress);
+            }
+"@
+            New = @"
+            if existing.operation == CoreOperationKind::Install
+                && existing.state == CoreOperationState::Failed
+                && existing.error_code.as_deref() == Some("install_in_progress")
+            {
+                drop(claim);
+                self.store_persistent_snapshot(existing.clone()).await;
+                return Ok(existing);
+            }
+"@
+            Expected = "active external install lease"
         },
         @{
             Name = "recovered update cannot accept a non-target running version"

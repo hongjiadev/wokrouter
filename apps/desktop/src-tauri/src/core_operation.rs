@@ -454,6 +454,41 @@ fn reap_helper(mut helper: tokio::process::Child) {
     });
 }
 
+enum HelperTimeoutResolution {
+    Active(CoreOperationSnapshot),
+    Fenced(JournalLease),
+}
+
+fn fence_helper_timeout(
+    journal: &OperationJournal,
+    expected: &CoreOperationSnapshot,
+) -> Result<HelperTimeoutResolution, CoreOperationError> {
+    match journal.try_operation_lease()? {
+        LeaseAttempt::Busy => {
+            let current = journal.read()?.ok_or(CoreOperationError::InvalidProgress)?;
+            if current.operation_id != expected.operation_id
+                || current.operation != expected.operation
+            {
+                return Err(CoreOperationError::InvalidProgress);
+            }
+            Ok(HelperTimeoutResolution::Active(current))
+        }
+        LeaseAttempt::Acquired(fence) => {
+            let current = journal.read()?.ok_or(CoreOperationError::InvalidProgress)?;
+            if current.operation_id != expected.operation_id
+                || current.operation != expected.operation
+            {
+                return Err(CoreOperationError::InvalidProgress);
+            }
+            if current != *expected {
+                drop(fence);
+                return Ok(HelperTimeoutResolution::Active(current));
+            }
+            Ok(HelperTimeoutResolution::Fenced(fence))
+        }
+    }
+}
+
 pub(crate) fn run_operation_helper_if_requested() -> Option<u8> {
     helper::run_operation_helper_if_requested()
 }
@@ -706,10 +741,12 @@ impl CoreOperationCoordinator {
 
     async fn operation_is_active(&self) -> Result<bool, CoreOperationError> {
         if self.persistent_operations {
-            return Ok(self
-                .persistent_status()
-                .await?
-                .is_some_and(|snapshot| snapshot.state == CoreOperationState::Running));
+            return Ok(self.persistent_status().await?.is_some_and(|snapshot| {
+                snapshot.state == CoreOperationState::Running
+                    || (snapshot.operation == CoreOperationKind::Install
+                        && snapshot.state == CoreOperationState::Failed
+                        && snapshot.error_code.as_deref() == Some("install_in_progress"))
+            }));
         }
         Ok(self.state.lock().await.active.is_some())
     }
@@ -782,13 +819,16 @@ impl CoreOperationCoordinator {
                 }
                 return Err(CoreOperationError::OperationInProgress);
             }
-            if operation == CoreOperationKind::Install
-                && existing.operation == CoreOperationKind::Install
+            if existing.operation == CoreOperationKind::Install
+                && existing.state == CoreOperationState::Failed
                 && existing.error_code.as_deref() == Some("install_in_progress")
             {
                 drop(claim);
                 self.store_persistent_snapshot(existing.clone()).await;
-                return Ok(existing);
+                if operation == CoreOperationKind::Install {
+                    return Ok(existing);
+                }
+                return Err(CoreOperationError::OperationInProgress);
             }
         }
 
@@ -842,16 +882,34 @@ impl CoreOperationCoordinator {
                 return Err(error);
             }
             Err(_) => {
-                let _ = helper.kill().await;
-                let _ = helper.wait().await;
-                let failed = CoreOperationSnapshot::failed(
-                    snapshot.operation_id,
-                    snapshot.sequence + 1,
-                    operation,
-                    operation_failure_code(operation),
-                );
-                journal.write(&failed)?;
-                failed
+                let resolution = match fence_helper_timeout(journal, &snapshot) {
+                    Ok(resolution) => resolution,
+                    Err(error) => {
+                        drop(claim);
+                        reap_helper(helper);
+                        return Err(error);
+                    }
+                };
+                match resolution {
+                    HelperTimeoutResolution::Active(current) => current,
+                    HelperTimeoutResolution::Fenced(fence) => {
+                        let _ = helper.kill().await;
+                        let _ = helper.wait().await;
+                        let failed = CoreOperationSnapshot::failed(
+                            snapshot.operation_id,
+                            snapshot.sequence + 1,
+                            operation,
+                            operation_failure_code(operation),
+                        );
+                        let write_result = journal.write(&failed);
+                        drop(fence);
+                        write_result?;
+                        drop(claim);
+                        self.store_persistent_snapshot(failed.clone()).await;
+                        sink.emit(&failed).await;
+                        return Ok(failed);
+                    }
+                }
             }
         };
         drop(claim);
@@ -997,9 +1055,25 @@ impl CoreOperationCoordinator {
                 result
             }
             Err(_) => {
-                let _ = helper.kill().await;
-                let _ = helper.wait().await;
-                Ok(None)
+                let resolution = match fence_helper_timeout(journal, snapshot) {
+                    Ok(resolution) => resolution,
+                    Err(error) => {
+                        reap_helper(helper);
+                        return Err(error);
+                    }
+                };
+                match resolution {
+                    HelperTimeoutResolution::Active(current) => {
+                        reap_helper(helper);
+                        Ok(Some(current))
+                    }
+                    HelperTimeoutResolution::Fenced(fence) => {
+                        let _ = helper.kill().await;
+                        let _ = helper.wait().await;
+                        drop(fence);
+                        Ok(None)
+                    }
+                }
             }
         }
     }
@@ -2157,6 +2231,73 @@ mod tests {
         }
     }
 
+    #[test]
+    fn helper_timeout_attaches_when_the_bound_operation_lease_is_owned() {
+        let fixture = RuntimeFixture::new();
+        let journal = OperationJournal::open(&fixture.paths.runtime_dir).unwrap();
+        let snapshot = CoreOperationSnapshot::initial(CoreOperationKind::Install);
+        journal.write(&snapshot).unwrap();
+        let owner = match journal.try_operation_lease().unwrap() {
+            super::journal::LeaseAttempt::Acquired(owner) => owner,
+            super::journal::LeaseAttempt::Busy => panic!("operation lease should be free"),
+        };
+
+        let resolution = super::fence_helper_timeout(&journal, &snapshot).unwrap();
+
+        assert!(matches!(
+            resolution,
+            super::HelperTimeoutResolution::Active(current) if current == snapshot
+        ));
+        assert!(journal.operation_lease_active().unwrap());
+        drop(owner);
+    }
+
+    #[test]
+    fn helper_timeout_fence_blocks_a_late_operation_owner() {
+        let fixture = RuntimeFixture::new();
+        let journal = OperationJournal::open(&fixture.paths.runtime_dir).unwrap();
+        let snapshot = CoreOperationSnapshot::initial(CoreOperationKind::Update);
+        journal.write(&snapshot).unwrap();
+
+        let fence = match super::fence_helper_timeout(&journal, &snapshot).unwrap() {
+            super::HelperTimeoutResolution::Fenced(fence) => fence,
+            super::HelperTimeoutResolution::Active(_) => {
+                panic!("operation lease should be free")
+            }
+        };
+        assert!(matches!(
+            journal.try_operation_lease().unwrap(),
+            super::journal::LeaseAttempt::Busy
+        ));
+
+        drop(fence);
+        assert!(matches!(
+            journal.try_operation_lease().unwrap(),
+            super::journal::LeaseAttempt::Acquired(_)
+        ));
+    }
+
+    #[test]
+    fn helper_timeout_fence_preserves_a_terminal_written_before_fencing() {
+        let fixture = RuntimeFixture::new();
+        let journal = OperationJournal::open(&fixture.paths.runtime_dir).unwrap();
+        let initial = CoreOperationSnapshot::initial(CoreOperationKind::Install);
+        let terminal = CoreOperationSnapshot {
+            sequence: 1,
+            state: CoreOperationState::Succeeded,
+            phase: CoreOperationPhase::Completed,
+            ..initial.clone()
+        };
+        journal.write(&terminal).unwrap();
+
+        let resolution = super::fence_helper_timeout(&journal, &initial).unwrap();
+
+        assert!(matches!(
+            resolution,
+            super::HelperTimeoutResolution::Active(current) if current == terminal
+        ));
+    }
+
     #[tokio::test]
     async fn real_helper_survives_coordinator_reopen_and_prevents_a_second_launch() {
         let fixture = RuntimeFixture::new();
@@ -2300,6 +2441,38 @@ mod tests {
             "unexpected retry terminal: {retry_terminal:?}"
         );
         assert_eq!(launch_count(&marker), 2);
+    }
+
+    #[tokio::test]
+    async fn active_external_install_lease_blocks_update_checks_and_installs() {
+        let fixture = RuntimeFixture::new();
+        let marker = fixture.root.path().join("helper-launches.txt");
+        let coordinator = persistent_coordinator(
+            &fixture,
+            ProcessHelperLauncher::new(&fixture, &marker, HelperScenario::InstallConflict),
+            Arc::new(FixedRecoveryProbe::missing(true)),
+            None,
+        )
+        .await;
+        coordinator
+            .install_and_start(Arc::new(RecordingSink::default()))
+            .await
+            .unwrap();
+        let conflict = wait_for_terminal(&coordinator).await;
+        assert_eq!(conflict.error_code.as_deref(), Some("install_in_progress"));
+
+        assert_eq!(
+            coordinator.check_update().await.unwrap_err(),
+            CoreOperationError::OperationInProgress
+        );
+        assert_eq!(
+            coordinator
+                .install_update("0.1.23", Arc::new(RecordingSink::default()))
+                .await
+                .unwrap_err(),
+            CoreOperationError::OperationInProgress
+        );
+        assert_eq!(launch_count(&marker), 1);
     }
 
     #[tokio::test]

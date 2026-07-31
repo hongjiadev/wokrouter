@@ -3206,9 +3206,13 @@ $lifecycleAcceptanceFixtures = @(
             "unavailable_production_journal_fails_closed_before_runner_or_authority",
             "hidden_helper_request_requires_the_exact_safe_argument_shape",
             "operation_journal_round_trips_only_the_strict_safe_snapshot",
+            "helper_timeout_attaches_when_the_bound_operation_lease_is_owned",
+            "helper_timeout_fence_blocks_a_late_operation_owner",
+            "helper_timeout_fence_preserves_a_terminal_written_before_fencing",
             "real_helper_survives_coordinator_reopen_and_prevents_a_second_launch",
             "reopened_coordinator_recovers_a_real_helper_failure",
             "released_external_lease_with_missing_core_becomes_install_failed_and_retryable",
+            "active_external_install_lease_blocks_update_checks_and_installs",
             "reopened_coordinator_recovers_a_real_update_terminal"
         )
     },
@@ -3669,10 +3673,45 @@ if ($null -ne $startPersistentOperation) {
     if (
         $startPersistentOperationBody -notmatch 'Ok\(Err\(error\)\)=>\{drop\(claim\);reap_helper\(helper\);returnErr\(error\);\}' -or
         $startPersistentOperationBody -notmatch 'drop\(claim\);reap_helper\(helper\);self\.store_persistent_snapshot' -or
+        $startPersistentOperationBody -notmatch 'Err\(_\)=>\{letresolution=matchfence_helper_timeout\(journal,&snapshot\)' -or
+        $startPersistentOperationBody -notmatch 'HelperTimeoutResolution::Active\(current\)=>current' -or
+        $startPersistentOperationBody -notmatch 'HelperTimeoutResolution::Fenced\(fence\)=>\{let_=helper\.kill\(\)\.await;let_=helper\.wait\(\)\.await;.*letwrite_result=journal\.write\(&failed\);drop\(fence\);write_result\?;' -or
         $coreOperationBody -notmatch 'fnreap_helper\(muthelper:tokio::process::Child\)\{tauri::async_runtime::spawn\(asyncmove\{let_=helper\.wait\(\)\.await;\}\);\}'
     ) {
         Add-ContractFailure `
-            -Message "A launched core-operation helper must be explicitly reaped after both readiness success and readiness errors."
+            -Message "A launched core-operation helper must be explicitly reaped, and readiness timeout must fence the operation lease before killing it."
+    }
+
+    $externalInstallConflict = Get-UniqueBracedItem `
+        -Source $startPersistentOperation.Body `
+        -SignaturePattern '(?m)^[ \t]*if[ \t]+existing\.operation[ \t]*==[ \t]*CoreOperationKind::Install[ \t]*$' `
+        -Description "Persistent external-install arbitration"
+    if ($null -ne $externalInstallConflict) {
+        $externalInstallConflictBody = $externalInstallConflict.CodeBody -replace '\s', ''
+        if (
+            $externalInstallConflictBody -notmatch 'drop\(claim\);self\.store_persistent_snapshot\(existing\.clone\(\)\)\.await;ifoperation==CoreOperationKind::Install\{returnOk\(existing\);\}returnErr\(CoreOperationError::OperationInProgress\);'
+        ) {
+            Add-ContractFailure `
+                -Message "An active external install lease must coalesce install and reject update work without replacing its journal."
+        }
+    }
+}
+
+$helperTimeoutFence = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^fn[ \t]+fence_helper_timeout[ \t]*\(' `
+    -Description "Helper readiness timeout operation-lease fence" `
+    -TopLevel `
+    -CodeView $coreOperationCodeView
+if ($null -ne $helperTimeoutFence) {
+    $helperTimeoutFenceBody = $helperTimeoutFence.CodeBody -replace '\s', ''
+    if (
+        $helperTimeoutFenceBody -notmatch 'matchjournal\.try_operation_lease\(\)\?\{' -or
+        $helperTimeoutFenceBody -notmatch 'LeaseAttempt::Busy=>\{letcurrent=journal\.read\(\)\?\.ok_or\(CoreOperationError::InvalidProgress\)\?;ifcurrent\.operation_id!=expected\.operation_id\|\|current\.operation!=expected\.operation\{returnErr\(CoreOperationError::InvalidProgress\);\}Ok\(HelperTimeoutResolution::Active\(current\)\)\}' -or
+        $helperTimeoutFenceBody -notmatch 'LeaseAttempt::Acquired\(fence\)=>\{letcurrent=journal\.read\(\)\?\.ok_or\(CoreOperationError::InvalidProgress\)\?;ifcurrent\.operation_id!=expected\.operation_id\|\|current\.operation!=expected\.operation\{returnErr\(CoreOperationError::InvalidProgress\);\}ifcurrent!=\*expected\{drop\(fence\);returnOk\(HelperTimeoutResolution::Active\(current\)\);\}Ok\(HelperTimeoutResolution::Fenced\(fence\)\)\}'
+    ) {
+        Add-ContractFailure `
+            -Message "Helper readiness timeout must atomically attach to the bound lease owner or hold the operation lease as a terminal-recovery fence."
     }
 }
 
@@ -3717,7 +3756,9 @@ if ($null -ne $restartInitialHandoff) {
         $restartInitialHandoffBody -notmatch 'tokio::time::timeout\(Duration::from_secs\(3\),async\{' -or
         $restartInitialHandoffBody -notmatch 'current\.state!=CoreOperationState::Running\|\|current\.sequence!=0\|\|journal\.operation_lease_active\(\)\?' -or
         $restartInitialHandoffBody -notmatch 'helper\.try_wait\(\)' -or
-        $restartInitialHandoffBody -notmatch 'let_=helper\.kill\(\)\.await;let_=helper\.wait\(\)\.await;Ok\(None\)'
+        $restartInitialHandoffBody -notmatch 'fence_helper_timeout\(journal,snapshot\)' -or
+        $restartInitialHandoffBody -notmatch 'HelperTimeoutResolution::Active\(current\)=>\{reap_helper\(helper\);Ok\(Some\(current\)\)\}' -or
+        $restartInitialHandoffBody -notmatch 'HelperTimeoutResolution::Fenced\(fence\)=>\{let_=helper\.kill\(\)\.await;let_=helper\.wait\(\)\.await;drop\(fence\);Ok\(None\)\}'
     ) {
         Add-ContractFailure `
             -Message "Initial helper handoff recovery must relaunch the same operation id and wait on lease, journal, or child-exit conditions within a bounded window."
@@ -4169,13 +4210,24 @@ $operationIsActive = Get-UniqueBracedItem `
     -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+operation_is_active[ \t]*\(' `
     -Description "Cross-process active operation check" `
     -CodeView $coreOperationCodeView
-if (
-    $null -ne $operationIsActive -and
-    ($operationIsActive.CodeBody -replace '\s', '') -cne
-    'ifself.persistent_operations{returnOk(self.persistent_status().await?.is_some_and(|snapshot|snapshot.state==CoreOperationState::Running));}Ok(self.state.lock().await.active.is_some())'
-) {
-    Add-ContractFailure `
-        -Message "Production update checks and installs must determine active operations from the persistent cross-process journal."
+if ($null -ne $operationIsActive) {
+    $operationIsActiveBody = (
+        $coreOperationCodeView.CommentStripped.Substring(
+            $operationIsActive.OpeningBraceIndex + 1,
+            $operationIsActive.ClosingBraceIndex -
+                $operationIsActive.OpeningBraceIndex -
+                1
+        ) -replace '\s', ''
+    )
+    if (
+        $operationIsActiveBody -notmatch 'persistent_status\(\)\.await\?\.is_some_and\(\|snapshot\|\{' -or
+        $operationIsActiveBody -notmatch 'snapshot\.state==CoreOperationState::Running' -or
+        $operationIsActiveBody -notmatch 'snapshot\.operation==CoreOperationKind::Install&&snapshot\.state==CoreOperationState::Failed&&snapshot\.error_code\.as_deref\(\)==Some\("install_in_progress"\)' -or
+        $operationIsActiveBody -notmatch 'Ok\(self\.state\.lock\(\)\.await\.active\.is_some\(\)\)'
+    ) {
+        Add-ContractFailure `
+            -Message "Production update checks and installs must treat running work and an active external install lease as persistent cross-process conflicts."
+    }
 }
 
 $frontendEligibility = Get-UniqueBracedItem `
