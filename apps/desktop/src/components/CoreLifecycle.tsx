@@ -368,18 +368,29 @@ export function CoreLifecycle() {
       return;
     }
     const poll = window.setInterval(() => {
-      void status.refetch().then((result) => {
-        if (
-          mounted.current &&
-          result.data &&
-          result.data.state !== "missing"
-        ) {
-          setOperation(undefined);
+      void Promise.allSettled([getCoreOperation(), status.refetch()]).then(
+        ([operationResult, statusResult]) => {
+          if (!mounted.current) {
+            return;
+          }
+          if (
+            operationResult.status === "fulfilled" &&
+            operationResult.value
+          ) {
+            acceptOperation(operationResult.value);
+          }
+          if (
+            statusResult.status === "fulfilled" &&
+            statusResult.value.data &&
+            statusResult.value.data.state !== "missing"
+          ) {
+            setOperation(undefined);
+          }
         }
-      });
+      );
     }, 1_000);
     return () => window.clearInterval(poll);
-  }, [status.data, status.refetch, waitsForAnotherProcess]);
+  }, [acceptOperation, status.data, status.refetch, waitsForAnotherProcess]);
 
   const retryInstall = useCallback(() => {
     if (retryPending.current) {

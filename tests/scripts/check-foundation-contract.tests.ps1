@@ -87,6 +87,12 @@ function New-ContractFixture {
         -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/src/core_operation.rs") `
         -Destination (Join-Path $root "apps/desktop/src-tauri/src/core_operation.rs")
     Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/src/core_operation/helper.rs") `
+        -Destination (Join-Path $root "apps/desktop/src-tauri/src/core_operation/helper.rs")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/src/core_operation/journal.rs") `
+        -Destination (Join-Path $root "apps/desktop/src-tauri/src/core_operation/journal.rs")
+    Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/src/core_operation/parser.rs") `
         -Destination (Join-Path $root "apps/desktop/src-tauri/src/core_operation/parser.rs")
     Copy-Item `
@@ -364,6 +370,26 @@ try {
     Invoke-Scenario -Name "real workflow satisfies the structural contract" -Test {
         $root = New-ContractFixture
         Assert-ContractPasses -Root $root -Scenario "real workflow fixture"
+    }
+
+    Invoke-Scenario -Name "an unrelated timer does not obscure the external install poll" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/components/CoreLifecycle.tsx" `
+            -OldText '  const waitsForAnotherProcess =' `
+            -NewText @'
+  useEffect(() => {
+    const poll = window.setInterval(() => {
+      void Promise.resolve();
+    }, 1_000);
+    return () => window.clearInterval(poll);
+  }, []);
+  const waitsForAnotherProcess =
+'@
+        Assert-ContractPasses `
+            -Root $root `
+            -Scenario "core lifecycle with an unrelated timer"
     }
 
     Invoke-Scenario -Name "desktop event capability cannot omit unlisten" -Test {
@@ -1050,7 +1076,7 @@ OperationInProgress,
         if let Some(check) = self.state.lock().await.update_check.clone() {
             return Ok(check);
         }
-        if self.state.lock().await.active.is_some() {
+        if self.operation_is_active().await? {
             return Err(CoreOperationError::OperationInProgress);
         }
         let executable = self.trusted_production_executable().await?;
@@ -1059,7 +1085,7 @@ OperationInProgress,
         if let Some(check) = self.state.lock().await.update_check.clone() {
             return Ok(check);
         }
-        if self.state.lock().await.active.is_some() {
+        if self.operation_is_active().await? {
             return Err(CoreOperationError::InvalidProgress);
         }
         let executable = self.trusted_production_executable().await?;
@@ -1071,14 +1097,14 @@ OperationInProgress,
             Path = "apps/desktop/src-tauri/src/core_operation.rs"
             Old = @"
         Version::parse(expected_version).map_err(|_| CoreOperationError::InvalidProgress)?;
-        if self.state.lock().await.active.is_some() {
+        if self.operation_is_active().await? {
             return Err(CoreOperationError::OperationInProgress);
         }
         let executable = self.trusted_production_executable().await?;
 "@
             New = @"
         Version::parse(expected_version).map_err(|_| CoreOperationError::InvalidProgress)?;
-        if self.state.lock().await.active.is_some() {
+        if self.operation_is_active().await? {
             return Err(CoreOperationError::InvalidProgress);
         }
         let executable = self.trusted_production_executable().await?;
@@ -1086,19 +1112,173 @@ OperationInProgress,
             Expected = "install_update operation_in_progress return"
         },
         @{
-            Name = "operation coordinator conflict must return operation_in_progress"
+            Name = "persistent operation conflict must return operation_in_progress"
             Path = "apps/desktop/src-tauri/src/core_operation.rs"
             Old = @"
+                    return Ok(existing);
+                }
                 return Err(CoreOperationError::OperationInProgress);
             }
-            let snapshot = CoreOperationSnapshot::initial(operation);
+            if operation == CoreOperationKind::Install
 "@
             New = @"
+                    return Ok(existing);
+                }
                 return Err(CoreOperationError::InvalidProgress);
             }
-            let snapshot = CoreOperationSnapshot::initial(operation);
+            if operation == CoreOperationKind::Install
 "@
-            Expected = "start_operation operation_in_progress return"
+            Expected = "Persistent operation arbitration"
+        },
+        @{
+            Name = "production coordinator cannot disable persistent fail-closed recovery"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+            authority: Arc::new(SystemTrustedRuntimeAuthority::discover()),
+            persistent_operations: true,
+            journal,
+"@
+            New = @"
+            authority: Arc::new(SystemTrustedRuntimeAuthority::discover()),
+            persistent_operations: false,
+            journal,
+"@
+            Expected = "fail closed"
+        },
+        @{
+            Name = "journal safe snapshot must reject unknown fields"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = '#[serde(deny_unknown_fields)]'
+            New = '#[serde(default)]'
+            Expected = "strict safe projection"
+        },
+        @{
+            Name = "hidden helper cannot replace the canonical operation id argument"
+            Path = "apps/desktop/src-tauri/src/core_operation/helper.rs"
+            Old = '        .arg(operation_id.to_string())'
+            New = '        .arg("caller-supplied-path")'
+            Expected = "Hidden core-operation helper spawn"
+        },
+        @{
+            Name = "update helper cannot fall back to PATH discovery"
+            Path = "apps/desktop/src-tauri/src/core_operation/helper.rs"
+            Old = 'discover_recorded_wokcore_executable(&paths.wokcore_install_record)'
+            New = 'discover_wokcore_executable(&paths.wokcore_install_record)'
+            Expected = "trusted WokCore install record"
+        },
+        @{
+            Name = "hidden helper cannot append bulk path or token arguments"
+            Path = "apps/desktop/src-tauri/src/core_operation/helper.rs"
+            Old = @"
+        })
+        .stdin(Stdio::null())
+"@
+            New = @"
+        })
+        .args(["caller-path", "caller-token"])
+        .stdin(Stdio::null())
+"@
+            Expected = "Hidden core-operation helper spawn"
+        },
+        @{
+            Name = "hidden helper must dispatch before Tauri"
+            Path = "apps/desktop/src-tauri/src/main.rs"
+            Old = 'wokrouter_desktop::run_core_operation_helper_if_requested()'
+            New = 'wokrouter_desktop::skip_core_operation_helper()'
+            Expected = "hidden core-operation helper dispatch"
+        },
+        @{
+            Name = "journal writer cannot use a shared record lock"
+            Path = "apps/desktop/src-tauri/src/core_operation/journal.rs"
+            Old = '        let _record_lock = self.lock_record_exclusive()?;'
+            New = '        let _record_lock = self.lock_record_shared()?;'
+            Expected = "exclusive record lock"
+        },
+        @{
+            Name = "post-spawn readiness errors cannot abandon the helper child"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+            Ok(Err(error)) => {
+                drop(claim);
+                reap_helper(helper);
+                return Err(error);
+            }
+"@
+            New = @"
+            Ok(Err(error)) => {
+                drop(claim);
+                drop(helper);
+                return Err(error);
+            }
+"@
+            Expected = "explicitly reaped"
+        },
+        @{
+            Name = "released initial handoff cannot skip the same-id restart"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = 'self.restart_initial_handoff(journal, &snapshot).await?'
+            New = 'self.skip_initial_handoff(journal, &snapshot).await?'
+            Expected = "restart an unready same-id handoff"
+        },
+        @{
+            Name = "terminal recovery cannot use the claim lock as its fence"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = 'let recovery_lease = match journal.try_operation_lease()? {'
+            New = 'let recovery_lease = match journal.try_claim()? {'
+            Expected = "fence terminal recovery"
+        },
+        @{
+            Name = "recovered update cannot accept a non-target running version"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = 'if snapshot.operation == CoreOperationKind::Update && !update_matches_target {'
+            New = 'if snapshot.operation == CoreOperationKind::Update && false {'
+            Expected = "exact update target"
+        },
+        @{
+            Name = "released external install lease must become retryable"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = '            if probe.install_lease_active()? {'
+            New = '            if true {'
+            Expected = "External install recovery"
+        },
+        @{
+            Name = "missing recovered install must retain install_failed"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = '                        CoreOperationKind::Install => "install_failed",'
+            New = '                        CoreOperationKind::Install => "start_failed",'
+            Expected = "stable install/update failure code"
+        },
+        @{
+            Name = "external install frontend poll cannot omit operation recovery"
+            Path = "apps/desktop/src/components/CoreLifecycle.tsx"
+            Old = '      void Promise.allSettled([getCoreOperation(), status.refetch()]).then('
+            New = '      void Promise.allSettled([status.refetch()]).then('
+            Expected = "operation and core refresh"
+        },
+        @{
+            Name = "real helper recovery fixture cannot survive only in a comment"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = '    async fn real_helper_survives_coordinator_reopen_and_prevents_a_second_launch() {'
+            New = @'
+    // Former fixture: real_helper_survives_coordinator_reopen_and_prevents_a_second_launch
+    async fn renamed_real_helper_behavior() {
+'@
+            Expected = "lifecycle acceptance fixture"
+        },
+        @{
+            Name = "cross-platform process fixture cannot reintroduce PowerShell"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+    impl OperationRunner for ProcessFixtureRunner {
+        fn run(
+"@
+            New = @"
+    impl OperationRunner for ProcessFixtureRunner {
+        const WINDOWS_ONLY_SHELL: &str = "powershell.exe";
+
+        fn run(
+"@
+            Expected = "Windows-only shell"
         },
         @{
             Name = "transactional child cannot enable kill-on-drop"

@@ -1,6 +1,10 @@
+mod helper;
+mod journal;
 mod parser;
 
-use std::{env, future::Future, path::PathBuf, pin::Pin, process::Stdio, sync::Arc};
+use std::{
+    env, future::Future, path::PathBuf, pin::Pin, process::Stdio, sync::Arc, time::Duration,
+};
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -11,11 +15,15 @@ use tokio::{
     sync::{Mutex, mpsc},
 };
 use uuid::Uuid;
+use wokrouter_cli::commands::{CoreUiState, status::snapshot_selected};
 use wokrouter_platform::{
     AppPaths, PlatformError, WokCoreRuntimeChannel, discover_wokcore_executable,
 };
 
-use self::parser::{ChildProgress, MAX_BUFFER_BYTES, ProgressParser};
+use self::{
+    journal::{JournalLease, LeaseAttempt, OperationJournal},
+    parser::{ChildProgress, MAX_BUFFER_BYTES, ProgressParser},
+};
 use crate::runtime::DesktopRuntimeState;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -50,7 +58,8 @@ pub(crate) enum CoreOperationPhase {
     Completed,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CoreOperationSnapshot {
     pub schema_version: u8,
     pub operation_id: Uuid,
@@ -127,6 +136,122 @@ impl CoreOperationSnapshot {
             active_requests: None,
             error_code: Some(error_code.to_owned()),
         }
+    }
+
+    fn is_safe_projection(&self) -> bool {
+        if self.schema_version != 1
+            || !phase_is_valid(self.operation, self.phase)
+            || !versions_are_bounded(self)
+            || !bytes_are_valid(self)
+            || self.active_requests.is_some_and(|count| {
+                self.operation != CoreOperationKind::Update || count > 1_000_000
+            })
+        {
+            return false;
+        }
+        match self.state {
+            CoreOperationState::Running => {
+                self.phase != CoreOperationPhase::Completed && self.error_code.is_none()
+            }
+            CoreOperationState::Succeeded => {
+                self.phase == CoreOperationPhase::Completed && self.error_code.is_none()
+            }
+            CoreOperationState::Failed => self
+                .error_code
+                .as_deref()
+                .is_some_and(|code| error_code_is_valid(self.operation, code)),
+        }
+    }
+}
+
+fn phase_is_valid(operation: CoreOperationKind, phase: CoreOperationPhase) -> bool {
+    match operation {
+        CoreOperationKind::Install => matches!(
+            phase,
+            CoreOperationPhase::CheckingRelease
+                | CoreOperationPhase::Downloading
+                | CoreOperationPhase::Verifying
+                | CoreOperationPhase::Installing
+                | CoreOperationPhase::Starting
+                | CoreOperationPhase::Authorizing
+                | CoreOperationPhase::VerifyingRuntime
+                | CoreOperationPhase::Completed
+        ),
+        CoreOperationKind::Update => matches!(
+            phase,
+            CoreOperationPhase::CheckingRelease
+                | CoreOperationPhase::Downloading
+                | CoreOperationPhase::Verifying
+                | CoreOperationPhase::Installing
+                | CoreOperationPhase::PreparingService
+                | CoreOperationPhase::Draining
+                | CoreOperationPhase::Stopping
+                | CoreOperationPhase::Starting
+                | CoreOperationPhase::VerifyingRuntime
+                | CoreOperationPhase::RollingBack
+                | CoreOperationPhase::Completed
+        ),
+    }
+}
+
+fn versions_are_bounded(snapshot: &CoreOperationSnapshot) -> bool {
+    [&snapshot.current_version, &snapshot.target_version]
+        .into_iter()
+        .flatten()
+        .all(|value| {
+            value.len() <= 64
+                && value.is_ascii()
+                && Version::parse(value).is_ok_and(|version| version.to_string() == *value)
+        })
+}
+
+fn bytes_are_valid(snapshot: &CoreOperationSnapshot) -> bool {
+    match (
+        snapshot.phase,
+        snapshot.bytes_completed,
+        snapshot.bytes_total,
+    ) {
+        (CoreOperationPhase::Downloading, Some(completed), Some(total)) => {
+            total > 0 && completed <= total
+        }
+        (CoreOperationPhase::Downloading, _, _) => false,
+        (_, None, None) => true,
+        (_, _, _) => false,
+    }
+}
+
+fn error_code_is_valid(operation: CoreOperationKind, code: &str) -> bool {
+    match operation {
+        CoreOperationKind::Install => matches!(
+            code,
+            "download_failed"
+                | "invalid_install_state"
+                | "invalid_manifest"
+                | "invalid_signature"
+                | "incompatible_manifest"
+                | "artifact_size_mismatch"
+                | "artifact_hash_mismatch"
+                | "invalid_archive"
+                | "unsafe_install_location"
+                | "install_in_progress"
+                | "install_failed"
+                | "install_record_failed"
+                | "start_failed"
+                | "authorization_failed"
+                | "invalid_progress"
+        ),
+        CoreOperationKind::Update => matches!(
+            code,
+            "update_unavailable"
+                | "incompatible_manifest"
+                | "update_verification_failed"
+                | "update_install_failed"
+                | "active_requests_remain"
+                | "rolled_back"
+                | "recovery_required"
+                | "operation_in_progress"
+                | "invalid_progress"
+        ),
     }
 }
 
@@ -252,6 +377,87 @@ trait TrustedRuntimeAuthority: Send + Sync {
     fn discover(&self) -> Result<Option<PathBuf>, CoreOperationError>;
 }
 
+type RecoveryFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<RecoveryRuntimeState, CoreOperationError>> + Send + 'a>>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RecoveryRuntimeState {
+    Missing,
+    Ready { version: Option<String> },
+    Unavailable,
+}
+
+trait OperationRecoveryProbe: Send + Sync {
+    fn runtime(&self) -> RecoveryFuture<'_>;
+    fn install_lease_active(&self) -> Result<bool, CoreOperationError>;
+}
+
+struct SystemOperationRecoveryProbe {
+    runtime: Arc<DesktopRuntimeState>,
+    install_directory: PathBuf,
+}
+
+impl OperationRecoveryProbe for SystemOperationRecoveryProbe {
+    fn runtime(&self) -> RecoveryFuture<'_> {
+        Box::pin(async move {
+            let runtime = self
+                .runtime
+                .selected()
+                .await
+                .map_err(|_| CoreOperationError::Initialization)?;
+            if runtime.channel() != WokCoreRuntimeChannel::Production {
+                return Ok(RecoveryRuntimeState::Unavailable);
+            }
+            let (status, _) = snapshot_selected(runtime)
+                .await
+                .map_err(|_| CoreOperationError::Initialization)?;
+            Ok(match status.state {
+                CoreUiState::Missing => RecoveryRuntimeState::Missing,
+                CoreUiState::Running => RecoveryRuntimeState::Ready {
+                    version: status.version,
+                },
+                _ => RecoveryRuntimeState::Unavailable,
+            })
+        })
+    }
+
+    fn install_lease_active(&self) -> Result<bool, CoreOperationError> {
+        wokrouter_platform::wokcore_install_lease_active(&self.install_directory)
+            .map_err(|_| CoreOperationError::Initialization)
+    }
+}
+
+trait HelperLauncher: Send + Sync {
+    fn launch(
+        &self,
+        operation_id: Uuid,
+        operation: CoreOperationKind,
+    ) -> Result<tokio::process::Child, RunnerError>;
+}
+
+struct SystemHelperLauncher;
+
+impl HelperLauncher for SystemHelperLauncher {
+    fn launch(
+        &self,
+        operation_id: Uuid,
+        operation: CoreOperationKind,
+    ) -> Result<tokio::process::Child, RunnerError> {
+        let executable = env::current_exe().map_err(|_| RunnerError::Spawn)?;
+        helper::spawn_helper_process(&executable, operation_id, operation)
+    }
+}
+
+fn reap_helper(mut helper: tokio::process::Child) {
+    tauri::async_runtime::spawn(async move {
+        let _ = helper.wait().await;
+    });
+}
+
+pub(crate) fn run_operation_helper_if_requested() -> Option<u8> {
+    helper::run_operation_helper_if_requested()
+}
+
 struct SystemTrustedRuntimeAuthority {
     paths: Option<AppPaths>,
 }
@@ -298,17 +504,43 @@ pub(crate) struct CoreOperationCoordinator {
     update_check_gate: Arc<Mutex<()>>,
     runner: Arc<dyn OperationRunner>,
     authority: Arc<dyn TrustedRuntimeAuthority>,
+    persistent_operations: bool,
+    journal: Option<Arc<OperationJournal>>,
+    helper_launcher: Option<Arc<dyn HelperLauncher>>,
+    recovery_probe: Option<Arc<dyn OperationRecoveryProbe>>,
 }
 
 impl CoreOperationCoordinator {
     pub(crate) fn new(runtime: Arc<DesktopRuntimeState>) -> Self {
-        Self::new_with_dependencies(
+        let paths = AppPaths::discover().ok();
+        let journal = paths
+            .as_ref()
+            .and_then(|paths| OperationJournal::open(&paths.runtime_dir).ok())
+            .map(Arc::new);
+        let recovery_probe = paths.as_ref().map(|paths| {
+            Arc::new(SystemOperationRecoveryProbe {
+                runtime: runtime.clone(),
+                install_directory: paths.wokcore_install_dir.clone(),
+            }) as Arc<dyn OperationRecoveryProbe>
+        });
+        Self {
             runtime,
-            Arc::new(SystemOperationRunner),
-            Arc::new(SystemTrustedRuntimeAuthority::discover()),
-        )
+            state: Arc::new(Mutex::new(CoordinatorState {
+                active: None,
+                last_snapshot: None,
+                update_check: None,
+            })),
+            update_check_gate: Arc::new(Mutex::new(())),
+            runner: Arc::new(SystemOperationRunner),
+            authority: Arc::new(SystemTrustedRuntimeAuthority::discover()),
+            persistent_operations: true,
+            journal,
+            helper_launcher: Some(Arc::new(SystemHelperLauncher)),
+            recovery_probe,
+        }
     }
 
+    #[cfg(test)]
     fn new_with_dependencies(
         runtime: Arc<DesktopRuntimeState>,
         runner: Arc<dyn OperationRunner>,
@@ -324,11 +556,63 @@ impl CoreOperationCoordinator {
             update_check_gate: Arc::new(Mutex::new(())),
             runner,
             authority,
+            persistent_operations: false,
+            journal: None,
+            helper_launcher: None,
+            recovery_probe: None,
         }
     }
 
+    #[cfg(test)]
+    fn new_persistent_with_dependencies(
+        runtime: Arc<DesktopRuntimeState>,
+        runner: Arc<dyn OperationRunner>,
+        authority: Arc<dyn TrustedRuntimeAuthority>,
+        journal: Arc<OperationJournal>,
+        helper_launcher: Arc<dyn HelperLauncher>,
+        recovery_probe: Arc<dyn OperationRecoveryProbe>,
+    ) -> Self {
+        Self {
+            runtime,
+            state: Arc::new(Mutex::new(CoordinatorState {
+                active: None,
+                last_snapshot: None,
+                update_check: None,
+            })),
+            update_check_gate: Arc::new(Mutex::new(())),
+            runner,
+            authority,
+            persistent_operations: true,
+            journal: Some(journal),
+            helper_launcher: Some(helper_launcher),
+            recovery_probe: Some(recovery_probe),
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) async fn status(&self) -> Option<CoreOperationSnapshot> {
-        self.state.lock().await.last_snapshot.clone()
+        self.status_result().await.ok().flatten()
+    }
+
+    pub(crate) async fn status_with_sink(
+        &self,
+        sink: Arc<dyn OperationEventSink>,
+    ) -> Result<Option<CoreOperationSnapshot>, CoreOperationError> {
+        let snapshot = self.status_result().await?;
+        if let Some(snapshot) = &snapshot
+            && snapshot.state == CoreOperationState::Running
+            && self.persistent_operations
+        {
+            self.ensure_persistent_monitor(snapshot.clone(), sink).await;
+        }
+        Ok(snapshot)
+    }
+
+    async fn status_result(&self) -> Result<Option<CoreOperationSnapshot>, CoreOperationError> {
+        if self.persistent_operations {
+            return self.persistent_status().await;
+        }
+        Ok(self.state.lock().await.last_snapshot.clone())
     }
 
     pub(crate) async fn install_and_start(
@@ -345,7 +629,7 @@ impl CoreOperationCoordinator {
         if let Some(check) = self.state.lock().await.update_check.clone() {
             return Ok(check);
         }
-        if self.state.lock().await.active.is_some() {
+        if self.operation_is_active().await? {
             return Err(CoreOperationError::OperationInProgress);
         }
         let executable = self.trusted_production_executable().await?;
@@ -367,7 +651,7 @@ impl CoreOperationCoordinator {
     ) -> Result<CoreOperationSnapshot, CoreOperationError> {
         self.require_production_channel().await?;
         Version::parse(expected_version).map_err(|_| CoreOperationError::InvalidProgress)?;
-        if self.state.lock().await.active.is_some() {
+        if self.operation_is_active().await? {
             return Err(CoreOperationError::OperationInProgress);
         }
         let executable = self.trusted_production_executable().await?;
@@ -414,6 +698,28 @@ impl CoreOperationCoordinator {
         request: OperationRequest,
         sink: Arc<dyn OperationEventSink>,
     ) -> Result<CoreOperationSnapshot, CoreOperationError> {
+        if self.persistent_operations {
+            return self.start_persistent_operation(operation, sink).await;
+        }
+        self.start_legacy_operation(operation, request, sink).await
+    }
+
+    async fn operation_is_active(&self) -> Result<bool, CoreOperationError> {
+        if self.persistent_operations {
+            return Ok(self
+                .persistent_status()
+                .await?
+                .is_some_and(|snapshot| snapshot.state == CoreOperationState::Running));
+        }
+        Ok(self.state.lock().await.active.is_some())
+    }
+
+    async fn start_legacy_operation(
+        &self,
+        operation: CoreOperationKind,
+        request: OperationRequest,
+        sink: Arc<dyn OperationEventSink>,
+    ) -> Result<CoreOperationSnapshot, CoreOperationError> {
         let snapshot = {
             let mut state = self.state.lock().await;
             if let Some(active) = &state.active {
@@ -447,6 +753,384 @@ impl CoreOperationCoordinator {
                 .await;
         });
         Ok(snapshot)
+    }
+
+    async fn start_persistent_operation(
+        &self,
+        operation: CoreOperationKind,
+        sink: Arc<dyn OperationEventSink>,
+    ) -> Result<CoreOperationSnapshot, CoreOperationError> {
+        let journal = self
+            .journal
+            .as_ref()
+            .ok_or(CoreOperationError::Initialization)?;
+        let launcher = self
+            .helper_launcher
+            .as_ref()
+            .ok_or(CoreOperationError::Initialization)?;
+        let claim = self.acquire_claim(journal).await?;
+        if let Some(existing) = journal.read()? {
+            let existing = self.reconcile_locked(journal, existing).await?;
+            if existing.state == CoreOperationState::Running {
+                drop(claim);
+                self.store_persistent_snapshot(existing.clone()).await;
+                if operation == CoreOperationKind::Install
+                    && existing.operation == CoreOperationKind::Install
+                {
+                    self.ensure_persistent_monitor(existing.clone(), sink).await;
+                    return Ok(existing);
+                }
+                return Err(CoreOperationError::OperationInProgress);
+            }
+            if operation == CoreOperationKind::Install
+                && existing.operation == CoreOperationKind::Install
+                && existing.error_code.as_deref() == Some("install_in_progress")
+            {
+                drop(claim);
+                self.store_persistent_snapshot(existing.clone()).await;
+                return Ok(existing);
+            }
+        }
+
+        let snapshot = CoreOperationSnapshot::initial(operation);
+        journal.write(&snapshot)?;
+        self.store_persistent_snapshot(snapshot.clone()).await;
+        let mut helper = match launcher.launch(snapshot.operation_id, operation) {
+            Ok(helper) => helper,
+            Err(_) => {
+                let failed = CoreOperationSnapshot::failed(
+                    snapshot.operation_id,
+                    1,
+                    operation,
+                    operation_failure_code(operation),
+                );
+                journal.write(&failed)?;
+                drop(claim);
+                self.store_persistent_snapshot(failed.clone()).await;
+                sink.emit(&failed).await;
+                return Ok(failed);
+            }
+        };
+
+        let ready = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let current = journal.read()?.ok_or(CoreOperationError::InvalidProgress)?;
+                if current.operation_id != snapshot.operation_id || current.operation != operation {
+                    return Err(CoreOperationError::InvalidProgress);
+                }
+                if current.state != CoreOperationState::Running
+                    || journal.operation_lease_active()?
+                {
+                    return Ok(current);
+                }
+                if helper
+                    .try_wait()
+                    .map_err(|_| CoreOperationError::Initialization)?
+                    .is_some()
+                {
+                    return self.reconcile_locked(journal, current).await;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        let ready = match ready {
+            Ok(Ok(ready)) => ready,
+            Ok(Err(error)) => {
+                drop(claim);
+                reap_helper(helper);
+                return Err(error);
+            }
+            Err(_) => {
+                let _ = helper.kill().await;
+                let _ = helper.wait().await;
+                let failed = CoreOperationSnapshot::failed(
+                    snapshot.operation_id,
+                    snapshot.sequence + 1,
+                    operation,
+                    operation_failure_code(operation),
+                );
+                journal.write(&failed)?;
+                failed
+            }
+        };
+        drop(claim);
+        reap_helper(helper);
+        self.store_persistent_snapshot(ready.clone()).await;
+        sink.emit(&ready).await;
+        if ready.state == CoreOperationState::Running {
+            self.ensure_persistent_monitor(ready.clone(), sink).await;
+        }
+        Ok(ready)
+    }
+
+    async fn persistent_status(&self) -> Result<Option<CoreOperationSnapshot>, CoreOperationError> {
+        let journal = self
+            .journal
+            .as_ref()
+            .ok_or(CoreOperationError::Initialization)?;
+        let Some(snapshot) = journal.read()? else {
+            return Ok(None);
+        };
+        let needs_recovery = (snapshot.state == CoreOperationState::Running
+            && !journal.operation_lease_active()?)
+            || (snapshot.operation == CoreOperationKind::Install
+                && snapshot.state == CoreOperationState::Failed
+                && snapshot.error_code.as_deref() == Some("install_in_progress"));
+        let snapshot = if needs_recovery {
+            let claim = self.acquire_claim(journal).await?;
+            let current = journal.read()?.ok_or(CoreOperationError::InvalidProgress)?;
+            let current = self.reconcile_locked(journal, current).await?;
+            drop(claim);
+            current
+        } else {
+            snapshot
+        };
+        self.store_persistent_snapshot(snapshot.clone()).await;
+        Ok(Some(snapshot))
+    }
+
+    async fn reconcile_locked(
+        &self,
+        journal: &OperationJournal,
+        mut snapshot: CoreOperationSnapshot,
+    ) -> Result<CoreOperationSnapshot, CoreOperationError> {
+        if snapshot.state == CoreOperationState::Running
+            && !journal.operation_lease_active()?
+            && snapshot.sequence == 0
+            && let Some(current) = self.restart_initial_handoff(journal, &snapshot).await?
+        {
+            snapshot = current;
+        }
+        if snapshot.state == CoreOperationState::Running && !journal.operation_lease_active()? {
+            let recovery_lease = match journal.try_operation_lease()? {
+                LeaseAttempt::Busy => {
+                    return journal.read()?.ok_or(CoreOperationError::InvalidProgress);
+                }
+                LeaseAttempt::Acquired(lease) => lease,
+            };
+            let current = journal.read()?.ok_or(CoreOperationError::InvalidProgress)?;
+            if current.operation_id != snapshot.operation_id
+                || current.operation != snapshot.operation
+            {
+                return Err(CoreOperationError::InvalidProgress);
+            }
+            if current.state != CoreOperationState::Running {
+                return Ok(current);
+            }
+            let recovered = self.recover_from_runtime(&current).await;
+            journal.write(&recovered)?;
+            drop(recovery_lease);
+            return Ok(recovered);
+        }
+        if snapshot.operation == CoreOperationKind::Install
+            && snapshot.state == CoreOperationState::Failed
+            && snapshot.error_code.as_deref() == Some("install_in_progress")
+        {
+            let probe = self
+                .recovery_probe
+                .as_ref()
+                .ok_or(CoreOperationError::Initialization)?;
+            if probe.install_lease_active()? {
+                return Ok(snapshot);
+            }
+            let recovered = self.recover_from_runtime(&snapshot).await;
+            journal.write(&recovered)?;
+            return Ok(recovered);
+        }
+        Ok(snapshot)
+    }
+
+    async fn restart_initial_handoff(
+        &self,
+        journal: &OperationJournal,
+        snapshot: &CoreOperationSnapshot,
+    ) -> Result<Option<CoreOperationSnapshot>, CoreOperationError> {
+        let launcher = self
+            .helper_launcher
+            .as_ref()
+            .ok_or(CoreOperationError::Initialization)?;
+        let mut helper = match launcher.launch(snapshot.operation_id, snapshot.operation) {
+            Ok(helper) => helper,
+            Err(_) => return Ok(None),
+        };
+        let observed = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let current = journal.read()?.ok_or(CoreOperationError::InvalidProgress)?;
+                if current.operation_id != snapshot.operation_id
+                    || current.operation != snapshot.operation
+                {
+                    return Err(CoreOperationError::InvalidProgress);
+                }
+                if current.state != CoreOperationState::Running
+                    || current.sequence != 0
+                    || journal.operation_lease_active()?
+                {
+                    return Ok(Some(current));
+                }
+                if helper
+                    .try_wait()
+                    .map_err(|_| CoreOperationError::Initialization)?
+                    .is_some()
+                {
+                    let current = journal.read()?.ok_or(CoreOperationError::InvalidProgress)?;
+                    if current.operation_id != snapshot.operation_id
+                        || current.operation != snapshot.operation
+                    {
+                        return Err(CoreOperationError::InvalidProgress);
+                    }
+                    if current.state != CoreOperationState::Running
+                        || current.sequence != 0
+                        || journal.operation_lease_active()?
+                    {
+                        return Ok(Some(current));
+                    }
+                    return Ok(None);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        match observed {
+            Ok(result) => {
+                reap_helper(helper);
+                result
+            }
+            Err(_) => {
+                let _ = helper.kill().await;
+                let _ = helper.wait().await;
+                Ok(None)
+            }
+        }
+    }
+
+    async fn recover_from_runtime(
+        &self,
+        snapshot: &CoreOperationSnapshot,
+    ) -> CoreOperationSnapshot {
+        let runtime = match &self.recovery_probe {
+            Some(probe) => probe
+                .runtime()
+                .await
+                .unwrap_or(RecoveryRuntimeState::Unavailable),
+            None => RecoveryRuntimeState::Unavailable,
+        };
+        let sequence = snapshot.sequence.saturating_add(1);
+        match runtime {
+            RecoveryRuntimeState::Ready { version } => {
+                let current_version = version.filter(|value| {
+                    value.len() <= 64
+                        && value.is_ascii()
+                        && Version::parse(value).is_ok_and(|parsed| parsed.to_string() == *value)
+                });
+                let update_matches_target = matches!(
+                    (&snapshot.target_version, &current_version),
+                    (Some(target), Some(current)) if target == current
+                );
+                if snapshot.operation == CoreOperationKind::Update && !update_matches_target {
+                    return CoreOperationSnapshot::failed(
+                        snapshot.operation_id,
+                        sequence,
+                        snapshot.operation,
+                        "update_install_failed",
+                    );
+                }
+                CoreOperationSnapshot {
+                    schema_version: 1,
+                    operation_id: snapshot.operation_id,
+                    sequence,
+                    operation: snapshot.operation,
+                    state: CoreOperationState::Succeeded,
+                    phase: CoreOperationPhase::Completed,
+                    current_version,
+                    target_version: snapshot.target_version.clone(),
+                    bytes_completed: None,
+                    bytes_total: None,
+                    active_requests: None,
+                    error_code: None,
+                }
+            }
+            RecoveryRuntimeState::Missing | RecoveryRuntimeState::Unavailable => {
+                CoreOperationSnapshot::failed(
+                    snapshot.operation_id,
+                    sequence,
+                    snapshot.operation,
+                    match snapshot.operation {
+                        CoreOperationKind::Install => "install_failed",
+                        CoreOperationKind::Update => "update_install_failed",
+                    },
+                )
+            }
+        }
+    }
+
+    async fn acquire_claim(
+        &self,
+        journal: &OperationJournal,
+    ) -> Result<JournalLease, CoreOperationError> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match journal.try_claim()? {
+                    LeaseAttempt::Acquired(claim) => return Ok(claim),
+                    LeaseAttempt::Busy => tokio::time::sleep(Duration::from_millis(10)).await,
+                }
+            }
+        })
+        .await
+        .map_err(|_| CoreOperationError::Initialization)?
+    }
+
+    async fn store_persistent_snapshot(&self, snapshot: CoreOperationSnapshot) {
+        self.state.lock().await.last_snapshot = Some(snapshot);
+    }
+
+    async fn ensure_persistent_monitor(
+        &self,
+        snapshot: CoreOperationSnapshot,
+        sink: Arc<dyn OperationEventSink>,
+    ) {
+        {
+            let mut state = self.state.lock().await;
+            if state
+                .active
+                .as_ref()
+                .is_some_and(|active| active.operation_id == snapshot.operation_id)
+            {
+                return;
+            }
+            state.active = Some(ActiveOperation {
+                operation_id: snapshot.operation_id,
+                operation: snapshot.operation,
+            });
+        }
+        let coordinator = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut sequence = snapshot.sequence;
+            loop {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                let Ok(Some(current)) = coordinator.persistent_status().await else {
+                    break;
+                };
+                if current.operation_id != snapshot.operation_id {
+                    break;
+                }
+                if current.sequence > sequence {
+                    sequence = current.sequence;
+                    sink.emit(&current).await;
+                }
+                if current.state != CoreOperationState::Running {
+                    break;
+                }
+            }
+            let mut state = coordinator.state.lock().await;
+            if state
+                .active
+                .as_ref()
+                .is_some_and(|active| active.operation_id == snapshot.operation_id)
+            {
+                state.active = None;
+            }
+        });
     }
 
     async fn run_operation(
@@ -509,30 +1193,7 @@ impl CoreOperationCoordinator {
         result: Result<ChildCompletion, RunnerError>,
         sink: &dyn OperationEventSink,
     ) {
-        let runner_failure = result.as_ref().err().copied();
-        let final_child = match &result {
-            Ok(completion)
-                if completion.progress_valid
-                    && completion.last_progress.as_ref() == terminal.as_ref()
-                    && terminal
-                        .as_ref()
-                        .is_some_and(|event| event.operation == operation) =>
-            {
-                let event = terminal.clone().unwrap();
-                let terminal_is_accepted = event.state == CoreOperationState::Failed
-                    || (completion.exit_success
-                        && final_stdout_is_valid(operation, &completion.stdout)
-                        && event.state == CoreOperationState::Succeeded
-                        && event.phase == CoreOperationPhase::Completed);
-                if terminal_is_accepted {
-                    Some(event)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        let (snapshot, emit) = {
+        let snapshot = {
             let mut state = self.state.lock().await;
             let Some(active) = &state.active else {
                 return;
@@ -545,24 +1206,62 @@ impl CoreOperationCoordinator {
                 .as_ref()
                 .and_then(|snapshot| snapshot.sequence.checked_add(1))
                 .unwrap_or(u64::MAX);
-            let snapshot = match final_child {
-                Some(child) => CoreOperationSnapshot::from_child(operation_id, sequence, child),
-                None => {
-                    let error_code = match runner_failure {
-                        Some(RunnerError::Spawn | RunnerError::Wait | RunnerError::Read) => {
-                            operation_failure_code(operation)
-                        }
-                        _ => "invalid_progress",
-                    };
-                    CoreOperationSnapshot::failed(operation_id, sequence, operation, error_code)
-                }
-            };
+            let snapshot = final_operation_snapshot(
+                operation_id,
+                sequence,
+                operation,
+                terminal,
+                &result,
+                true,
+            );
             state.active = None;
             state.last_snapshot = Some(snapshot.clone());
-            (snapshot, true)
+            snapshot
         };
-        if emit {
-            sink.emit(&snapshot).await;
+        sink.emit(&snapshot).await;
+    }
+}
+
+fn final_operation_snapshot(
+    operation_id: Uuid,
+    sequence: u64,
+    operation: CoreOperationKind,
+    terminal: Option<ChildProgress>,
+    result: &Result<ChildCompletion, RunnerError>,
+    progress_persisted: bool,
+) -> CoreOperationSnapshot {
+    let runner_failure = result.as_ref().err().copied();
+    let final_child = match result {
+        Ok(completion)
+            if progress_persisted
+                && completion.progress_valid
+                && completion.last_progress.as_ref() == terminal.as_ref()
+                && terminal
+                    .as_ref()
+                    .is_some_and(|event| event.operation == operation) =>
+        {
+            let event = terminal.clone().unwrap();
+            let terminal_is_accepted = event.state == CoreOperationState::Failed
+                || (completion.exit_success
+                    && final_stdout_is_valid(operation, &completion.stdout)
+                    && event.state == CoreOperationState::Succeeded
+                    && event.phase == CoreOperationPhase::Completed);
+            terminal_is_accepted.then_some(event)
+        }
+        _ => None,
+    };
+    match final_child {
+        Some(child) => CoreOperationSnapshot::from_child(operation_id, sequence, child),
+        None => {
+            let error_code = match runner_failure {
+                Some(RunnerError::Spawn | RunnerError::Wait | RunnerError::Read)
+                    if progress_persisted =>
+                {
+                    operation_failure_code(operation)
+                }
+                _ => "invalid_progress",
+            };
+            CoreOperationSnapshot::failed(operation_id, sequence, operation, error_code)
         }
     }
 }
@@ -838,11 +1537,14 @@ async fn read_progress(
 mod tests {
     use std::{
         collections::VecDeque,
-        ffi::OsStr,
-        fs,
+        env,
+        ffi::{OsStr, OsString},
+        fs::{self, OpenOptions},
         future::Future,
+        io::Write,
         path::{Path, PathBuf},
         pin::Pin,
+        process::Stdio,
         sync::{
             Arc, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -857,15 +1559,17 @@ mod tests {
     };
     use wokrouter_platform::{
         AppPaths, SelectedWokCoreRuntime,
-        test_support::{RuntimeSelectorHarness, secure_private_file},
+        test_support::{RuntimeSelectorHarness, secure_private_directory, secure_private_file},
     };
     use wokrouter_wokcore_client::{CoreConnection, WokCoreClient};
 
     use super::{
         CheckCompletion, ChildCompletion, CoreOperationCoordinator, CoreOperationError,
         CoreOperationKind, CoreOperationPhase, CoreOperationSnapshot, CoreOperationState,
-        OperationEventSink, OperationFuture, OperationRequest, OperationRunner, RunnerError,
-        TrustedRuntimeAuthority, parser::ChildProgress,
+        HelperLauncher, OperationEventSink, OperationFuture, OperationRecoveryProbe,
+        OperationRequest, OperationRunner, RecoveryFuture, RecoveryRuntimeState, RunnerError,
+        SystemOperationRecoveryProbe, TrustedRuntimeAuthority, journal::OperationJournal,
+        parser::ChildProgress,
     };
     use crate::runtime::{DesktopRuntimeError, DesktopRuntimeSelector, DesktopRuntimeState};
 
@@ -886,6 +1590,90 @@ mod tests {
             update.arguments,
             ["update", "--install", "--json", "--progress-jsonl"]
         );
+    }
+
+    #[test]
+    fn hidden_helper_request_requires_the_exact_safe_argument_shape() {
+        let id = "64c09bda-7afd-4e86-8d61-43bc39a8bc51";
+        let valid = super::helper::parse_operation_helper_request(
+            [super::helper::OPERATION_HELPER_FLAG, id, "install"].map(OsString::from),
+        );
+        assert!(matches!(
+            valid,
+            super::helper::OperationHelperRequest::Valid(invocation)
+                if invocation.operation_id.to_string() == id
+                    && invocation.operation == CoreOperationKind::Install
+        ));
+        assert!(matches!(
+            super::helper::parse_operation_helper_request(["--version"].map(OsString::from)),
+            super::helper::OperationHelperRequest::NotRequested
+        ));
+        for invalid in [
+            vec![super::helper::OPERATION_HELPER_FLAG, id],
+            vec![super::helper::OPERATION_HELPER_FLAG, id, "install", "extra"],
+            vec![
+                super::helper::OPERATION_HELPER_FLAG,
+                "not-a-uuid",
+                "install",
+            ],
+            vec![
+                super::helper::OPERATION_HELPER_FLAG,
+                "64C09BDA-7AFD-4E86-8D61-43BC39A8BC51",
+                "install",
+            ],
+            vec![super::helper::OPERATION_HELPER_FLAG, id, "other"],
+        ] {
+            assert!(matches!(
+                super::helper::parse_operation_helper_request(
+                    invalid.into_iter().map(OsString::from)
+                ),
+                super::helper::OperationHelperRequest::Invalid
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_production_journal_fails_closed_before_runner_or_authority() {
+        let fixture = RuntimeFixture::new();
+        let runtime = fixture.production_runtime(None).await;
+        let (runtime, _) = cached_runtime(runtime);
+        let runner = Arc::new(FakeRunner::new([]));
+        let authority = Arc::new(CountingAuthority::panic());
+        let mut coordinator = CoreOperationCoordinator::new_with_dependencies(
+            runtime,
+            runner.clone(),
+            authority.clone(),
+        );
+        coordinator.persistent_operations = true;
+        let sink = Arc::new(RecordingSink::default());
+
+        assert_eq!(
+            coordinator
+                .status_with_sink(sink.clone())
+                .await
+                .unwrap_err(),
+            CoreOperationError::Initialization
+        );
+        assert_eq!(
+            coordinator
+                .install_and_start(sink.clone())
+                .await
+                .unwrap_err(),
+            CoreOperationError::Initialization
+        );
+        assert_eq!(
+            coordinator.check_update().await.unwrap_err(),
+            CoreOperationError::Initialization
+        );
+        assert_eq!(
+            coordinator
+                .install_update("0.1.23", sink)
+                .await
+                .unwrap_err(),
+            CoreOperationError::Initialization
+        );
+        assert_eq!(runner.spawn_count(), 0);
+        assert_eq!(authority.calls.load(Ordering::SeqCst), 0);
     }
 
     #[cfg(windows)]
@@ -1298,6 +2086,783 @@ mod tests {
             .unwrap();
         assert!(sink.finished.load(Ordering::SeqCst));
         assert_eq!(coordinator.status().await, Some(stored_during_emit));
+    }
+
+    #[test]
+    fn operation_journal_round_trips_only_the_strict_safe_snapshot() {
+        let fixture = RuntimeFixture::new();
+        let journal = super::journal::OperationJournal::open(&fixture.paths.runtime_dir).unwrap();
+        let snapshot = CoreOperationSnapshot {
+            schema_version: 1,
+            operation_id: uuid::Uuid::parse_str("64c09bda-7afd-4e86-8d61-43bc39a8bc51").unwrap(),
+            sequence: 3,
+            operation: CoreOperationKind::Install,
+            state: CoreOperationState::Running,
+            phase: CoreOperationPhase::Downloading,
+            current_version: None,
+            target_version: Some("0.1.23".to_owned()),
+            bytes_completed: Some(512),
+            bytes_total: Some(1024),
+            active_requests: None,
+            error_code: None,
+        };
+
+        journal.write(&snapshot).unwrap();
+        assert_eq!(journal.read().unwrap(), Some(snapshot));
+
+        let record_path = fixture
+            .paths
+            .runtime_dir
+            .join("core-operation")
+            .join("operation.json");
+        let encoded = fs::read_to_string(&record_path).unwrap();
+        for forbidden in ["pid", "path", "token", "stderr", "executable"] {
+            assert!(!encoded.contains(forbidden), "journal leaked {forbidden}");
+        }
+
+        let mut unknown = serde_json::from_str::<serde_json::Value>(&encoded).unwrap();
+        unknown
+            .as_object_mut()
+            .unwrap()
+            .insert("pid".to_owned(), serde_json::json!(42));
+        fs::write(&record_path, serde_json::to_vec(&unknown).unwrap()).unwrap();
+        secure_private_file(&record_path).unwrap();
+        assert_eq!(
+            journal.read().unwrap_err(),
+            CoreOperationError::InvalidProgress
+        );
+
+        for (field, value) in [
+            (
+                "operation_id",
+                serde_json::json!("64C09BDA-7AFD-4E86-8D61-43BC39A8BC51"),
+            ),
+            ("target_version", serde_json::json!("not-semver")),
+            ("error_code", serde_json::json!("backend said C:\\secret")),
+            ("bytes_completed", serde_json::json!(2048)),
+            ("active_requests", serde_json::json!(1)),
+        ] {
+            let mut invalid = serde_json::from_str::<serde_json::Value>(&encoded).unwrap();
+            invalid
+                .as_object_mut()
+                .unwrap()
+                .insert(field.to_owned(), value);
+            fs::write(&record_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            secure_private_file(&record_path).unwrap();
+            assert_eq!(
+                journal.read().unwrap_err(),
+                CoreOperationError::InvalidProgress,
+                "journal accepted unsafe field {field}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn real_helper_survives_coordinator_reopen_and_prevents_a_second_launch() {
+        let fixture = RuntimeFixture::new();
+        let marker = fixture.root.path().join("helper-launches.txt");
+        let first = persistent_coordinator(
+            &fixture,
+            ProcessHelperLauncher::new(&fixture, &marker, HelperScenario::InstallSuccess),
+            Arc::new(FixedRecoveryProbe::missing(false)),
+            None,
+        )
+        .await;
+        let sink = Arc::new(RecordingSink::default());
+
+        let accepted = first.install_and_start(sink).await.unwrap();
+        let progress = wait_for_running_sequence(&first, 1).await;
+        assert_eq!(progress.operation_id, accepted.operation_id);
+        drop(first);
+
+        let reopened_sink = Arc::new(RecordingSink::default());
+        let reopened = persistent_coordinator(
+            &fixture,
+            ProcessHelperLauncher::new(&fixture, &marker, HelperScenario::InstallSuccess),
+            Arc::new(FixedRecoveryProbe::missing(false)),
+            None,
+        )
+        .await;
+        let recovered = reopened
+            .status_with_sink(reopened_sink.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.operation_id, accepted.operation_id);
+        assert!(recovered.sequence >= progress.sequence);
+
+        let duplicate = reopened
+            .install_and_start(reopened_sink.clone())
+            .await
+            .unwrap();
+        assert_eq!(duplicate.operation_id, accepted.operation_id);
+        assert_eq!(launch_count(&marker), 1);
+
+        let terminal = wait_for_terminal(&reopened).await;
+        assert_eq!(terminal.operation_id, accepted.operation_id);
+        assert_eq!(
+            terminal.state,
+            CoreOperationState::Succeeded,
+            "unexpected terminal: {terminal:?}"
+        );
+        assert_eq!(launch_count(&marker), 1);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if reopened_sink
+                    .snapshots
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|snapshot| snapshot.state == CoreOperationState::Succeeded)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reopened_coordinator_recovers_a_real_helper_failure() {
+        let fixture = RuntimeFixture::new();
+        let marker = fixture.root.path().join("helper-launches.txt");
+        let first = persistent_coordinator(
+            &fixture,
+            ProcessHelperLauncher::new(&fixture, &marker, HelperScenario::InstallFailure),
+            Arc::new(FixedRecoveryProbe::missing(false)),
+            None,
+        )
+        .await;
+        let accepted = first
+            .install_and_start(Arc::new(RecordingSink::default()))
+            .await
+            .unwrap();
+        wait_for_running_sequence(&first, 1).await;
+        drop(first);
+
+        let reopened = persistent_coordinator(
+            &fixture,
+            ProcessHelperLauncher::new(&fixture, &marker, HelperScenario::InstallFailure),
+            Arc::new(FixedRecoveryProbe::missing(false)),
+            None,
+        )
+        .await;
+        let terminal = wait_for_terminal(&reopened).await;
+        assert_eq!(terminal.operation_id, accepted.operation_id);
+        assert_eq!(terminal.state, CoreOperationState::Failed);
+        assert_eq!(terminal.error_code.as_deref(), Some("start_failed"));
+        assert_eq!(launch_count(&marker), 1);
+    }
+
+    #[tokio::test]
+    async fn released_external_lease_with_missing_core_becomes_install_failed_and_retryable() {
+        let fixture = RuntimeFixture::new();
+        let marker = fixture.root.path().join("helper-launches.txt");
+        let recovery = Arc::new(FixedRecoveryProbe::missing(true));
+        let first = persistent_coordinator(
+            &fixture,
+            ProcessHelperLauncher::new(&fixture, &marker, HelperScenario::InstallConflict),
+            recovery.clone(),
+            None,
+        )
+        .await;
+        first
+            .install_and_start(Arc::new(RecordingSink::default()))
+            .await
+            .unwrap();
+        let conflict = wait_for_terminal(&first).await;
+        assert_eq!(conflict.error_code.as_deref(), Some("install_in_progress"));
+
+        recovery.install_lease_active.store(false, Ordering::SeqCst);
+        let reopened = persistent_coordinator(
+            &fixture,
+            ProcessHelperLauncher::new(&fixture, &marker, HelperScenario::InstallSuccess),
+            recovery,
+            None,
+        )
+        .await;
+        let released = reopened.status().await.unwrap();
+        assert_eq!(released.state, CoreOperationState::Failed);
+        assert_eq!(released.phase, CoreOperationPhase::Completed);
+        assert_eq!(released.error_code.as_deref(), Some("install_failed"));
+
+        let retry = reopened
+            .install_and_start(Arc::new(RecordingSink::default()))
+            .await
+            .unwrap();
+        assert_ne!(retry.operation_id, released.operation_id);
+        let retry_terminal = wait_for_terminal(&reopened).await;
+        assert_eq!(
+            retry_terminal.state,
+            CoreOperationState::Succeeded,
+            "unexpected retry terminal: {retry_terminal:?}"
+        );
+        assert_eq!(launch_count(&marker), 2);
+    }
+
+    #[tokio::test]
+    async fn real_external_install_lease_survives_one_process_and_releases_for_recovery() {
+        let fixture = RuntimeFixture::new();
+        fs::create_dir_all(&fixture.paths.wokcore_install_dir).unwrap();
+        secure_private_directory(&fixture.paths.wokcore_install_dir).unwrap();
+        let lease_ready = fixture.root.path().join("install-lease-ready");
+        let lease_release = fixture.root.path().join("install-lease-release");
+        let mut holder = tokio::process::Command::new(env::current_exe().unwrap());
+        holder
+            .args([
+                "--exact",
+                "core_operation::tests::install_lease_holder_process_entry",
+                "--nocapture",
+            ])
+            .env(
+                "WOKROUTER_TEST_INSTALL_LEASE_DIRECTORY",
+                &fixture.paths.wokcore_install_dir,
+            )
+            .env("WOKROUTER_TEST_INSTALL_LEASE_READY", &lease_ready)
+            .env("WOKROUTER_TEST_INSTALL_LEASE_RELEASE", &lease_release)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(false);
+        #[cfg(windows)]
+        holder.creation_flags(0x0800_0000);
+        let mut holder = holder.spawn().unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !lease_ready.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            wokrouter_platform::wokcore_install_lease_active(&fixture.paths.wokcore_install_dir)
+                .unwrap()
+        );
+
+        let marker = fixture.root.path().join("helper-launches.txt");
+        let first = persistent_coordinator(
+            &fixture,
+            ProcessHelperLauncher::new(&fixture, &marker, HelperScenario::InstallConflict),
+            system_recovery_probe(&fixture).await,
+            None,
+        )
+        .await;
+        first
+            .install_and_start(Arc::new(RecordingSink::default()))
+            .await
+            .unwrap();
+        let conflict = wait_for_terminal(&first).await;
+        assert_eq!(conflict.error_code.as_deref(), Some("install_in_progress"));
+        let held = first.status().await.unwrap();
+        assert_eq!(held.error_code.as_deref(), Some("install_in_progress"));
+
+        fs::write(&lease_release, b"release").unwrap();
+        assert!(holder.wait().await.unwrap().success());
+        assert!(
+            !wokrouter_platform::wokcore_install_lease_active(&fixture.paths.wokcore_install_dir)
+                .unwrap()
+        );
+
+        let reopened = persistent_coordinator(
+            &fixture,
+            ProcessHelperLauncher::new(&fixture, &marker, HelperScenario::InstallSuccess),
+            system_recovery_probe(&fixture).await,
+            None,
+        )
+        .await;
+        let released = reopened.status().await.unwrap();
+        assert_eq!(released.error_code.as_deref(), Some("install_failed"));
+        let retry = reopened
+            .install_and_start(Arc::new(RecordingSink::default()))
+            .await
+            .unwrap();
+        assert_ne!(retry.operation_id, released.operation_id);
+        assert_eq!(
+            wait_for_terminal(&reopened).await.state,
+            CoreOperationState::Succeeded
+        );
+    }
+
+    #[tokio::test]
+    async fn reopened_coordinator_recovers_a_real_update_terminal() {
+        let fixture = RuntimeFixture::new();
+        let executable = fixture.create_file("production/wokcore");
+        fixture.write_install_record(&executable);
+        let marker = fixture.root.path().join("helper-launches.txt");
+        let first = persistent_coordinator(
+            &fixture,
+            ProcessHelperLauncher::new(&fixture, &marker, HelperScenario::UpdateSuccess),
+            Arc::new(FixedRecoveryProbe::missing(false)),
+            Some(executable.clone()),
+        )
+        .await;
+        let accepted = first
+            .install_update("0.1.23", Arc::new(RecordingSink::default()))
+            .await
+            .unwrap();
+        wait_for_running_sequence(&first, 1).await;
+        drop(first);
+
+        let reopened = persistent_coordinator(
+            &fixture,
+            ProcessHelperLauncher::new(&fixture, &marker, HelperScenario::UpdateSuccess),
+            Arc::new(FixedRecoveryProbe::missing(false)),
+            Some(executable),
+        )
+        .await;
+        let terminal = wait_for_terminal(&reopened).await;
+        assert_eq!(terminal.operation_id, accepted.operation_id);
+        assert_eq!(terminal.operation, CoreOperationKind::Update);
+        assert_eq!(
+            terminal.state,
+            CoreOperationState::Succeeded,
+            "unexpected update terminal: {terminal:?}"
+        );
+        assert_eq!(terminal.target_version.as_deref(), Some("0.1.23"));
+        assert_eq!(launch_count(&marker), 1);
+    }
+
+    #[tokio::test]
+    async fn reopened_coordinator_restarts_an_unready_handoff_without_duplicate_runner_work() {
+        let fixture = RuntimeFixture::new();
+        let launch_marker = fixture.root.path().join("helper-launches.txt");
+        let runner_marker = fixture.root.path().join("runner-starts.txt");
+        let operation_id = uuid::Uuid::new_v4();
+        let mut parent = tokio::process::Command::new(env::current_exe().unwrap());
+        parent
+            .args([
+                "--exact",
+                "core_operation::tests::operation_parent_process_entry",
+                "--nocapture",
+            ])
+            .env("WOKROUTER_TEST_PARENT_RUNTIME", &fixture.paths.runtime_dir)
+            .env(
+                "WOKROUTER_TEST_PARENT_OPERATION_ID",
+                operation_id.to_string(),
+            )
+            .env("WOKROUTER_TEST_PARENT_LAUNCH_MARKER", &launch_marker)
+            .env("WOKROUTER_TEST_PARENT_RUNNER_MARKER", &runner_marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(false);
+        #[cfg(windows)]
+        parent.creation_flags(0x0800_0000);
+        let status = parent.spawn().unwrap().wait().await.unwrap();
+        assert!(status.success());
+
+        let journal = OperationJournal::open(&fixture.paths.runtime_dir).unwrap();
+        let initial = journal.read().unwrap().unwrap();
+        assert_eq!(initial.operation_id, operation_id);
+        assert_eq!(initial.sequence, 0);
+        assert!(!journal.operation_lease_active().unwrap());
+
+        let reopened = persistent_coordinator(
+            &fixture,
+            ProcessHelperLauncher::new(&fixture, &launch_marker, HelperScenario::InstallSuccess)
+                .with_runner_marker(&runner_marker),
+            Arc::new(FixedRecoveryProbe::missing(false)),
+            None,
+        )
+        .await;
+        let recovered = reopened.status().await.unwrap();
+        assert_eq!(recovered.operation_id, operation_id);
+        assert_eq!(recovered.state, CoreOperationState::Running);
+
+        let terminal = wait_for_terminal(&reopened).await;
+        assert_eq!(terminal.operation_id, operation_id);
+        assert_eq!(terminal.state, CoreOperationState::Succeeded);
+        assert_eq!(launch_count(&launch_marker), 2);
+        assert_eq!(launch_count(&runner_marker), 1);
+    }
+
+    #[tokio::test]
+    async fn update_recovery_rejects_a_running_old_production_version() {
+        let fixture = RuntimeFixture::new();
+        let marker = fixture.root.path().join("helper-launches.txt");
+        let recovery = Arc::new(FixedRecoveryProbe {
+            state: RecoveryRuntimeState::Ready {
+                version: Some("0.1.22".to_owned()),
+            },
+            install_lease_active: AtomicBool::new(false),
+        });
+        let coordinator = persistent_coordinator(
+            &fixture,
+            ProcessHelperLauncher::new(&fixture, &marker, HelperScenario::UpdateSuccess),
+            recovery,
+            None,
+        )
+        .await;
+        let mut snapshot = CoreOperationSnapshot::initial(CoreOperationKind::Update);
+        snapshot.sequence = 2;
+        snapshot.target_version = Some("0.1.23".to_owned());
+
+        let recovered = coordinator.recover_from_runtime(&snapshot).await;
+
+        assert_eq!(recovered.sequence, 3);
+        assert_eq!(recovered.state, CoreOperationState::Failed);
+        assert_eq!(recovered.phase, CoreOperationPhase::Completed);
+        assert_eq!(
+            recovered.error_code.as_deref(),
+            Some("update_install_failed")
+        );
+    }
+
+    #[test]
+    fn operation_helper_process_entry() {
+        let Some(runtime_directory) = env::var_os("WOKROUTER_TEST_OPERATION_RUNTIME") else {
+            return;
+        };
+        if let Some(delay) = env::var("WOKROUTER_TEST_OPERATION_START_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            std::thread::sleep(Duration::from_millis(delay));
+        }
+        let operation_id = env::var("WOKROUTER_TEST_OPERATION_ID")
+            .ok()
+            .and_then(|value| uuid::Uuid::parse_str(&value).ok())
+            .unwrap();
+        let operation = match env::var("WOKROUTER_TEST_OPERATION_KIND").as_deref() {
+            Ok("install") => CoreOperationKind::Install,
+            Ok("update") => CoreOperationKind::Update,
+            _ => panic!("invalid test operation kind"),
+        };
+        let scenario =
+            HelperScenario::parse(&env::var("WOKROUTER_TEST_OPERATION_SCENARIO").unwrap());
+        let journal = Arc::new(OperationJournal::open(Path::new(&runtime_directory)).unwrap());
+        let request = match operation {
+            CoreOperationKind::Install => OperationRequest::Install,
+            CoreOperationKind::Update => OperationRequest::Update {
+                executable: PathBuf::from("trusted-test-wokcore"),
+            },
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let exit = runtime.block_on(super::helper::run_operation_helper_with_request(
+            journal,
+            operation_id,
+            request,
+            Arc::new(ProcessFixtureRunner {
+                scenario,
+                marker: env::var_os("WOKROUTER_TEST_OPERATION_RUNNER_MARKER").map(PathBuf::from),
+            }),
+        ));
+        assert_eq!(exit, 0);
+    }
+
+    #[test]
+    fn operation_parent_process_entry() {
+        let Some(runtime_directory) = env::var_os("WOKROUTER_TEST_PARENT_RUNTIME") else {
+            return;
+        };
+        let operation_id = env::var("WOKROUTER_TEST_PARENT_OPERATION_ID")
+            .ok()
+            .and_then(|value| uuid::Uuid::parse_str(&value).ok())
+            .unwrap();
+        let launch_marker =
+            PathBuf::from(env::var_os("WOKROUTER_TEST_PARENT_LAUNCH_MARKER").unwrap());
+        let runner_marker =
+            PathBuf::from(env::var_os("WOKROUTER_TEST_PARENT_RUNNER_MARKER").unwrap());
+        let journal = OperationJournal::open(Path::new(&runtime_directory)).unwrap();
+        let mut snapshot = CoreOperationSnapshot::initial(CoreOperationKind::Install);
+        snapshot.operation_id = operation_id;
+        journal.write(&snapshot).unwrap();
+
+        let fixture = ProcessHelperLauncher {
+            runtime_directory: PathBuf::from(runtime_directory),
+            marker: launch_marker,
+            runner_marker: Some(runner_marker),
+            startup_delay: Duration::from_millis(750),
+            scenario: HelperScenario::InstallSuccess,
+        };
+        drop(
+            fixture
+                .launch(operation_id, CoreOperationKind::Install)
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn install_lease_holder_process_entry() {
+        let Some(directory) = env::var_os("WOKROUTER_TEST_INSTALL_LEASE_DIRECTORY") else {
+            return;
+        };
+        let ready = PathBuf::from(env::var_os("WOKROUTER_TEST_INSTALL_LEASE_READY").unwrap());
+        let release = PathBuf::from(env::var_os("WOKROUTER_TEST_INSTALL_LEASE_RELEASE").unwrap());
+        let _lease =
+            wokrouter_platform::test_support::acquire_wokcore_install_lease(Path::new(&directory))
+                .unwrap();
+        fs::write(ready, b"ready").unwrap();
+        while !release.exists() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    async fn persistent_coordinator(
+        fixture: &RuntimeFixture,
+        launcher: ProcessHelperLauncher,
+        recovery: Arc<dyn OperationRecoveryProbe>,
+        executable: Option<PathBuf>,
+    ) -> CoreOperationCoordinator {
+        let runtime = fixture.production_runtime(executable).await;
+        let (runtime, _) = cached_runtime(runtime);
+        CoreOperationCoordinator::new_persistent_with_dependencies(
+            runtime,
+            Arc::new(FakeRunner::new([])),
+            Arc::new(PanicAuthority),
+            Arc::new(OperationJournal::open(&fixture.paths.runtime_dir).unwrap()),
+            Arc::new(launcher),
+            recovery,
+        )
+    }
+
+    async fn system_recovery_probe(fixture: &RuntimeFixture) -> Arc<dyn OperationRecoveryProbe> {
+        let runtime = fixture.production_runtime(None).await;
+        let (runtime, _) = cached_runtime(runtime);
+        Arc::new(SystemOperationRecoveryProbe {
+            runtime,
+            install_directory: fixture.paths.wokcore_install_dir.clone(),
+        })
+    }
+
+    async fn wait_for_running_sequence(
+        coordinator: &CoreOperationCoordinator,
+        minimum_sequence: u64,
+    ) -> CoreOperationSnapshot {
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                if let Some(snapshot) = coordinator.status().await
+                    && snapshot.state == CoreOperationState::Running
+                    && snapshot.sequence >= minimum_sequence
+                {
+                    return snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    fn launch_count(marker: &Path) -> usize {
+        fs::read_to_string(marker)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum HelperScenario {
+        InstallSuccess,
+        InstallFailure,
+        InstallConflict,
+        UpdateSuccess,
+    }
+
+    impl HelperScenario {
+        fn as_str(self) -> &'static str {
+            match self {
+                Self::InstallSuccess => "install_success",
+                Self::InstallFailure => "install_failure",
+                Self::InstallConflict => "install_conflict",
+                Self::UpdateSuccess => "update_success",
+            }
+        }
+
+        fn parse(value: &str) -> Self {
+            match value {
+                "install_success" => Self::InstallSuccess,
+                "install_failure" => Self::InstallFailure,
+                "install_conflict" => Self::InstallConflict,
+                "update_success" => Self::UpdateSuccess,
+                _ => panic!("invalid helper scenario"),
+            }
+        }
+    }
+
+    struct ProcessHelperLauncher {
+        runtime_directory: PathBuf,
+        marker: PathBuf,
+        runner_marker: Option<PathBuf>,
+        startup_delay: Duration,
+        scenario: HelperScenario,
+    }
+
+    impl ProcessHelperLauncher {
+        fn new(fixture: &RuntimeFixture, marker: &Path, scenario: HelperScenario) -> Self {
+            Self {
+                runtime_directory: fixture.paths.runtime_dir.clone(),
+                marker: marker.to_owned(),
+                runner_marker: None,
+                startup_delay: Duration::ZERO,
+                scenario,
+            }
+        }
+
+        fn with_runner_marker(mut self, marker: &Path) -> Self {
+            self.runner_marker = Some(marker.to_owned());
+            self
+        }
+    }
+
+    impl HelperLauncher for ProcessHelperLauncher {
+        fn launch(
+            &self,
+            operation_id: uuid::Uuid,
+            operation: CoreOperationKind,
+        ) -> Result<tokio::process::Child, RunnerError> {
+            let mut marker = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.marker)
+                .map_err(|_| RunnerError::Spawn)?;
+            marker
+                .write_all(b"launch\n")
+                .and_then(|()| marker.sync_all())
+                .map_err(|_| RunnerError::Spawn)?;
+            let mut command = tokio::process::Command::new(env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "core_operation::tests::operation_helper_process_entry",
+                    "--nocapture",
+                ])
+                .env("WOKROUTER_TEST_OPERATION_RUNTIME", &self.runtime_directory)
+                .env("WOKROUTER_TEST_OPERATION_ID", operation_id.to_string())
+                .env(
+                    "WOKROUTER_TEST_OPERATION_KIND",
+                    match operation {
+                        CoreOperationKind::Install => "install",
+                        CoreOperationKind::Update => "update",
+                    },
+                )
+                .env("WOKROUTER_TEST_OPERATION_SCENARIO", self.scenario.as_str())
+                .env(
+                    "WOKROUTER_TEST_OPERATION_START_DELAY_MS",
+                    self.startup_delay.as_millis().to_string(),
+                )
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(false);
+            if let Some(marker) = &self.runner_marker {
+                command.env("WOKROUTER_TEST_OPERATION_RUNNER_MARKER", marker);
+            }
+            #[cfg(windows)]
+            command.creation_flags(0x0800_0000);
+            command.spawn().map_err(|_| RunnerError::Spawn)
+        }
+    }
+
+    struct FixedRecoveryProbe {
+        state: RecoveryRuntimeState,
+        install_lease_active: AtomicBool,
+    }
+
+    impl FixedRecoveryProbe {
+        fn missing(install_lease_active: bool) -> Self {
+            Self {
+                state: RecoveryRuntimeState::Missing,
+                install_lease_active: AtomicBool::new(install_lease_active),
+            }
+        }
+    }
+
+    impl super::OperationRecoveryProbe for FixedRecoveryProbe {
+        fn runtime(&self) -> RecoveryFuture<'_> {
+            Box::pin(async move { Ok(self.state.clone()) })
+        }
+
+        fn install_lease_active(&self) -> Result<bool, CoreOperationError> {
+            Ok(self.install_lease_active.load(Ordering::SeqCst))
+        }
+    }
+
+    struct ProcessFixtureRunner {
+        scenario: HelperScenario,
+        marker: Option<PathBuf>,
+    }
+
+    impl OperationRunner for ProcessFixtureRunner {
+        fn run(
+            self: Arc<Self>,
+            request: OperationRequest,
+            progress_sender: mpsc::Sender<ChildProgress>,
+        ) -> OperationFuture {
+            Box::pin(async move {
+                if let Some(marker) = &self.marker {
+                    let mut marker = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(marker)
+                        .map_err(|_| RunnerError::Spawn)?;
+                    marker
+                        .write_all(b"run\n")
+                        .and_then(|()| marker.sync_all())
+                        .map_err(|_| RunnerError::Spawn)?;
+                }
+                let operation = match request {
+                    OperationRequest::Install => CoreOperationKind::Install,
+                    OperationRequest::Update { .. } => CoreOperationKind::Update,
+                };
+                let (running, terminal, stdout, exit_success) = match self.scenario {
+                    HelperScenario::InstallSuccess => (
+                        r#"{"schema_version":1,"sequence":0,"operation":"install","state":"running","phase":"downloading","target_version":"0.1.23","bytes_completed":512,"bytes_total":1024}"#,
+                        r#"{"schema_version":1,"sequence":1,"operation":"install","state":"succeeded","phase":"completed","target_version":"0.1.23"}"#,
+                        r#"{"code":"running"}"#,
+                        true,
+                    ),
+                    HelperScenario::InstallFailure => (
+                        r#"{"schema_version":1,"sequence":0,"operation":"install","state":"running","phase":"starting"}"#,
+                        r#"{"schema_version":1,"sequence":1,"operation":"install","state":"failed","phase":"starting","error_code":"start_failed"}"#,
+                        r#"{"code":"start_failed"}"#,
+                        false,
+                    ),
+                    HelperScenario::InstallConflict => (
+                        r#"{"schema_version":1,"sequence":0,"operation":"install","state":"running","phase":"installing"}"#,
+                        r#"{"schema_version":1,"sequence":1,"operation":"install","state":"failed","phase":"installing","error_code":"install_in_progress"}"#,
+                        r#"{"code":"install_in_progress"}"#,
+                        false,
+                    ),
+                    HelperScenario::UpdateSuccess => (
+                        r#"{"schema_version":1,"sequence":0,"operation":"update","state":"running","phase":"downloading","current_version":"0.1.22","target_version":"0.1.23","bytes_completed":512,"bytes_total":1024}"#,
+                        r#"{"schema_version":1,"sequence":1,"operation":"update","state":"succeeded","phase":"completed","current_version":"0.1.22","target_version":"0.1.23"}"#,
+                        r#"{"code":"installed","from":"0.1.22","to":"0.1.23"}"#,
+                        true,
+                    ),
+                };
+                assert_eq!(
+                    operation,
+                    if matches!(self.scenario, HelperScenario::UpdateSuccess) {
+                        CoreOperationKind::Update
+                    } else {
+                        CoreOperationKind::Install
+                    }
+                );
+                let running = progress(running);
+                let terminal = progress(terminal);
+                progress_sender
+                    .send(running)
+                    .await
+                    .map_err(|_| RunnerError::Wait)?;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                progress_sender
+                    .send(terminal.clone())
+                    .await
+                    .map_err(|_| RunnerError::Wait)?;
+                drop(progress_sender);
+                ChildCompletion::with_progress(exit_success, stdout.as_bytes(), [terminal])
+            })
+        }
+
+        fn check_update(self: Arc<Self>, _executable: PathBuf) -> super::CheckFuture {
+            Box::pin(async { Err(RunnerError::Spawn) })
+        }
     }
 
     fn successful_install() -> Result<ChildCompletion, RunnerError> {

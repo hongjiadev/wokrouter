@@ -9,6 +9,9 @@ use semver::Version;
 use url::Host;
 use url::Url;
 
+pub(crate) use install::install_lease_active;
+#[cfg(feature = "test-support")]
+pub(crate) use install::{InstallLease, acquire_install_lease};
 pub use install::{install_missing_wokcore, install_missing_wokcore_with_progress};
 pub use progress::{WokCoreInstallPhase, WokCoreInstallProgress, WokCoreInstallProgressObserver};
 

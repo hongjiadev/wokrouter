@@ -20,6 +20,8 @@ $wokcorePublicKeyPath = Join-Path $rootPath "crates/wokrouter-platform/src/wokco
 $commandModelPath = Join-Path $rootPath "apps/cli/src/commands/mod.rs"
 $desktopControlPath = Join-Path $rootPath "apps/desktop/src-tauri/src/control.rs"
 $coreOperationPath = Join-Path $rootPath "apps/desktop/src-tauri/src/core_operation.rs"
+$coreOperationHelperPath = Join-Path $rootPath "apps/desktop/src-tauri/src/core_operation/helper.rs"
+$coreOperationJournalPath = Join-Path $rootPath "apps/desktop/src-tauri/src/core_operation/journal.rs"
 $desktopLibPath = Join-Path $rootPath "apps/desktop/src-tauri/src/lib.rs"
 $frontendControlPath = Join-Path $rootPath "apps/desktop/src/control.ts"
 $coreUpdateEligibilityPath = Join-Path $rootPath "apps/desktop/src/coreUpdateEligibility.ts"
@@ -2225,6 +2227,8 @@ $wokcorePublicKey = Get-Content -LiteralPath $wokcorePublicKeyPath -Raw -Encodin
 $commandModel = Get-Content -LiteralPath $commandModelPath -Raw -Encoding UTF8
 $desktopControl = Get-Content -LiteralPath $desktopControlPath -Raw -Encoding UTF8
 $coreOperation = Get-Content -LiteralPath $coreOperationPath -Raw -Encoding UTF8
+$coreOperationHelper = Get-Content -LiteralPath $coreOperationHelperPath -Raw -Encoding UTF8
+$coreOperationJournal = Get-Content -LiteralPath $coreOperationJournalPath -Raw -Encoding UTF8
 $desktopLib = Get-Content -LiteralPath $desktopLibPath -Raw -Encoding UTF8
 $frontendControl = Get-Content -LiteralPath $frontendControlPath -Raw -Encoding UTF8
 $coreUpdateEligibility = Get-Content -LiteralPath $coreUpdateEligibilityPath -Raw -Encoding UTF8
@@ -2637,6 +2641,39 @@ if ($null -ne $desktopMainCodeView) {
     if ($exactSubsystemAttributes.Count -ne 1) {
         Add-ContractFailure `
             -Message 'Desktop Rust entry point must retain windows_subsystem = "windows" for non-debug Windows builds.'
+    }
+
+    $desktopMainFunction = Get-UniqueBracedItem `
+        -Source $desktopMain `
+        -SignaturePattern '(?m)^fn[ \t]+main[ \t]*\([ \t]*\)[ \t]*' `
+        -Description "Desktop Rust main function" `
+        -TopLevel `
+        -CodeView $desktopMainCodeView
+    if ($null -ne $desktopMainFunction) {
+        $helperDispatch = Get-UniqueBracedItem `
+            -Source $desktopMainFunction.Body `
+            -SignaturePattern '(?m)^[ \t]*if[ \t]+let[ \t]+Some\(exit_code\)[ \t]*=[ \t]*wokrouter_desktop::run_core_operation_helper_if_requested\(\)[ \t]*' `
+            -Description "Desktop hidden core-operation helper dispatch" `
+            -DirectStatement
+        $tauriDispatch = Get-UniqueBracedItem `
+            -Source $desktopMainFunction.Body `
+            -SignaturePattern '(?m)^[ \t]*if[ \t]+wokrouter_desktop::run\(\)\.is_err\(\)[ \t]*' `
+            -Description "Desktop Tauri dispatch" `
+            -DirectStatement
+        if ($null -ne $helperDispatch) {
+            $null = Get-UniqueDirectStatementIndex `
+                -Source $helperDispatch.Body `
+                -Pattern '(?m)^[ \t]*std::process::exit\(i32::from\(exit_code\)\)[ \t]*;' `
+                -Description "Desktop hidden helper exit"
+        }
+        if (
+            $null -ne $helperDispatch -and
+            $null -ne $tauriDispatch -and
+            $helperDispatch.ClosingBraceIndex -ge $tauriDispatch.SignatureIndex
+        ) {
+            Add-ContractFailure `
+                -Message "Desktop entry point must dispatch and exit the hidden core-operation helper before starting Tauri."
+        }
     }
 }
 
@@ -3153,6 +3190,7 @@ $lifecycleAcceptanceFixtures = @(
             "returns management after active requests defer the update and reconfirms retry",
             "subscribes before recovering a running snapshot and unmounts only the listener",
             "treats install_in_progress as another process and polls trusted status without retrying",
+            "polls operation and core until a released external install becomes retryable",
             "never checks or installs updates for a development %s runtime",
             "never starts production installation for a development %s status"
         )
@@ -3164,7 +3202,14 @@ $lifecycleAcceptanceFixtures = @(
         Names = @(
             "system_runner_uses_only_the_three_fixed_child_commands",
             "duplicate_installs_coalesce_conflicts_fail_and_terminal_allows_retry",
-            "development_suppresses_every_install_and_update_path_before_authority_or_runner"
+            "development_suppresses_every_install_and_update_path_before_authority_or_runner",
+            "unavailable_production_journal_fails_closed_before_runner_or_authority",
+            "hidden_helper_request_requires_the_exact_safe_argument_shape",
+            "operation_journal_round_trips_only_the_strict_safe_snapshot",
+            "real_helper_survives_coordinator_reopen_and_prevents_a_second_launch",
+            "reopened_coordinator_recovers_a_real_helper_failure",
+            "released_external_lease_with_missing_core_becomes_install_failed_and_retryable",
+            "reopened_coordinator_recovers_a_real_update_terminal"
         )
     },
     @{
@@ -3363,9 +3408,358 @@ if ($secretHeaderFound) {
 $coreOperationCodeView = Get-RustCodeView `
     -Source $coreOperation `
     -Description "Core operation coordinator source"
+$coreOperationHelperCodeView = Get-RustCodeView `
+    -Source $coreOperationHelper `
+    -Description "Core operation hidden helper source"
+$coreOperationJournalCodeView = Get-RustCodeView `
+    -Source $coreOperationJournal `
+    -Description "Core operation journal source"
 $desktopLibCodeView = Get-RustCodeView `
     -Source $desktopLib `
     -Description "Desktop Tauri library source"
+
+$coreOperationSnapshot = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^pub\(crate\)[ \t]+struct[ \t]+CoreOperationSnapshot[ \t]*' `
+    -Description "Core operation safe journal snapshot" `
+    -TopLevel `
+    -CodeView $coreOperationCodeView
+if ($null -ne $coreOperationSnapshot) {
+    $snapshotDenyUnknownFields = [regex]::Matches(
+        $coreOperationCodeView.Code,
+        '(?m)^#\[serde\(deny_unknown_fields\)\][ \t]*\r?\n[ \t]*pub\(crate\)[ \t]+struct[ \t]+CoreOperationSnapshot\b'
+    )
+    $snapshotFieldNames = @(
+        [regex]::Matches(
+            $coreOperationSnapshot.CodeBody,
+            '(?m)^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?([a-z][a-z0-9_]*)[ \t]*:'
+        ) | ForEach-Object { $_.Groups[1].Value }
+    )
+    $expectedSnapshotFieldNames = @(
+        "schema_version",
+        "operation_id",
+        "sequence",
+        "operation",
+        "state",
+        "phase",
+        "current_version",
+        "target_version",
+        "bytes_completed",
+        "bytes_total",
+        "active_requests",
+        "error_code"
+    )
+    if (
+        $snapshotDenyUnknownFields.Count -ne 1 -or
+        ($snapshotFieldNames -join "`n") -cne
+        ($expectedSnapshotFieldNames -join "`n")
+    ) {
+        Add-ContractFailure `
+            -Message "Core operation journal snapshot must deny unknown fields and retain only the strict safe projection."
+    }
+}
+
+$spawnOperationHelper = Get-UniqueBracedItem `
+    -Source $coreOperationHelper `
+    -SignaturePattern '(?ms)^pub\(super\)[ \t]+fn[ \t]+spawn_helper_process[ \t]*\([ \t\r\n]*executable:[ \t]*&Path,[ \t\r\n]*operation_id:[ \t]*Uuid,[ \t\r\n]*operation:[ \t]*CoreOperationKind,[ \t\r\n]*\)[ \t]*->[^{]+' `
+    -Description "Core operation hidden helper spawn" `
+    -TopLevel `
+    -CodeView $coreOperationHelperCodeView
+if ($null -ne $spawnOperationHelper) {
+    $spawnOperationHelperBody = (
+        $coreOperationHelperCodeView.CommentStripped.Substring(
+            $spawnOperationHelper.OpeningBraceIndex + 1,
+            $spawnOperationHelper.ClosingBraceIndex -
+                $spawnOperationHelper.OpeningBraceIndex -
+                1
+        ) -replace '\s', ''
+    )
+    $spawnOperationHelperArguments = [regex]::Matches(
+        $spawnOperationHelper.CodeBody,
+        '\.arg[ \t\r\n]*\('
+    )
+    if (
+        $spawnOperationHelperArguments.Count -ne 3 -or
+        $spawnOperationHelperBody -notmatch '\.arg\(OPERATION_HELPER_FLAG\)\.arg\(operation_id\.to_string\(\)\)\.arg\(matchoperation\{CoreOperationKind::Install=>"install",CoreOperationKind::Update=>"update",\}\)' -or
+        $spawnOperationHelperBody -notmatch '\.stdin\(Stdio::null\(\)\)\.stdout\(Stdio::null\(\)\)\.stderr\(Stdio::null\(\)\)\.kill_on_drop\(false\)' -or
+        $spawnOperationHelperBody -notmatch 'command\.creation_flags\(0x0800_0000\);' -or
+        $spawnOperationHelperBody -match '\.env(?:s)?\(' -or
+        $spawnOperationHelperBody -match '\.(?:args|raw_arg|raw_args)\('
+    ) {
+        Add-ContractFailure `
+            -Message "Hidden core-operation helper spawn must pass only the exact flag, canonical operation id, and install/update kind with null stdio, no environment payload, CREATE_NO_WINDOW, and kill_on_drop false."
+    }
+}
+
+$parseOperationHelperRequest = Get-UniqueBracedItem `
+    -Source $coreOperationHelper `
+    -SignaturePattern '(?m)^pub\(super\)[ \t]+fn[ \t]+parse_operation_helper_request[ \t]*\(' `
+    -Description "Core operation hidden helper request parser" `
+    -TopLevel `
+    -CodeView $coreOperationHelperCodeView
+if ($null -ne $parseOperationHelperRequest) {
+    $parseOperationHelperRequestBody = (
+        $coreOperationHelperCodeView.CommentStripped.Substring(
+            $parseOperationHelperRequest.OpeningBraceIndex + 1,
+            $parseOperationHelperRequest.ClosingBraceIndex -
+                $parseOperationHelperRequest.OpeningBraceIndex -
+                1
+        ) -replace '\s', ''
+    )
+    if (
+        $parseOperationHelperRequestBody -notmatch '\(Some\(operation_id\),Some\(operation\),None\)=\(arguments\.next\(\),arguments\.next\(\),arguments\.next\(\)\)' -or
+        $parseOperationHelperRequestBody -notmatch 'ifparsed_id\.to_string\(\)!=operation_id\{returnOperationHelperRequest::Invalid;' -or
+        $parseOperationHelperRequestBody -notmatch 'letoperation=matchoperation\{"install"=>CoreOperationKind::Install,"update"=>CoreOperationKind::Update,_=>returnOperationHelperRequest::Invalid,\};'
+    ) {
+        Add-ContractFailure `
+            -Message "Hidden core-operation helper request must reject extra arguments, non-canonical ids, paths, tokens, and kinds other than install/update."
+    }
+}
+
+$systemOperationHelper = Get-UniqueBracedItem `
+    -Source $coreOperationHelper `
+    -SignaturePattern '(?m)^async[ \t]+fn[ \t]+run_system_operation_helper[ \t]*\(' `
+    -Description "System core-operation hidden helper" `
+    -TopLevel `
+    -CodeView $coreOperationHelperCodeView
+if ($null -ne $systemOperationHelper) {
+    $systemOperationHelperBody = $systemOperationHelper.CodeBody -replace '\s', ''
+    if (
+        $systemOperationHelperBody -notmatch 'AppPaths::discover\(\)' -or
+        $systemOperationHelperBody -notmatch 'OperationJournal::open\(&paths\.runtime_dir\)' -or
+        $systemOperationHelperBody -notmatch 'discover_recorded_wokcore_executable\(&paths\.wokcore_install_record\)' -or
+        $systemOperationHelperBody -notmatch 'OperationRequest::Update\{executable\}'
+    ) {
+        Add-ContractFailure `
+            -Message "System core-operation helper must rediscover private paths and the trusted WokCore install record instead of accepting caller-supplied paths."
+    }
+}
+
+$journalRead = Get-UniqueBracedItem `
+    -Source $coreOperationJournal `
+    -SignaturePattern '(?m)^[ \t]*pub\(super\)[ \t]+fn[ \t]+read[ \t]*\(' `
+    -Description "Core operation journal read" `
+    -CodeView $coreOperationJournalCodeView
+$journalWrite = Get-UniqueBracedItem `
+    -Source $coreOperationJournal `
+    -SignaturePattern '(?m)^[ \t]*pub\(super\)[ \t]+fn[ \t]+write[ \t]*\(' `
+    -Description "Core operation journal write" `
+    -CodeView $coreOperationJournalCodeView
+if ($null -ne $journalRead) {
+    $journalReadBody = $journalRead.CodeBody -replace '\s', ''
+    if (
+        $journalReadBody -notmatch '^self\.ensure_stable_root\(\)\?;let_record_lock=self\.lock_record_shared\(\)\?;self\.ensure_stable_root\(\)\?;' -or
+        $journalReadBody -notmatch 'serde_json::from_value::<CoreOperationSnapshot>\(value\)' -or
+        $journalReadBody -notmatch 'if!snapshot\.is_safe_projection\(\)'
+    ) {
+        Add-ContractFailure `
+            -Message "Core operation journal reads must hold the shared record lock and validate the strict typed safe projection."
+    }
+}
+if ($null -ne $journalWrite) {
+    $journalWriteBody = $journalWrite.CodeBody -replace '\s', ''
+    if (
+        $journalWriteBody -notmatch '^self\.ensure_stable_root\(\)\?;if!snapshot\.is_safe_projection\(\)' -or
+        $journalWriteBody -notmatch 'let_record_lock=self\.lock_record_exclusive\(\)\?;self\.ensure_stable_root\(\)\?;' -or
+        $journalWriteBody -notmatch '\.write_all\(&bytes\)\.and_then\(\|\(\)\|file\.sync_all\(\)\)\.and_then\(\|\(\)\|replace_file\(&temporary,&self\.record\)\)\.and_then\(\|\(\)\|secure_private_file\(&self\.record\)\)\.and_then\(\|\(\)\|sync_directory\(&self\.root\)\)'
+    ) {
+        Add-ContractFailure `
+            -Message "Core operation journal writes must hold the exclusive record lock and durably replace only a validated private snapshot."
+    }
+}
+if (
+    $null -ne $coreOperationJournalCodeView -and
+    (
+        $coreOperationJournalCodeView.Code -notmatch '(?m)^const[ \t]+MAX_JOURNAL_BYTES:[ \t]*usize[ \t]*=[ \t]*16[ \t]*\*[ \t]*1024[ \t]*;' -or
+        $coreOperationJournalCodeView.Code -notmatch 'MOVEFILE_REPLACE_EXISTING[ \t\r\n]*\|[ \t\r\n]*MOVEFILE_WRITE_THROUGH'
+    )
+) {
+    Add-ContractFailure `
+        -Message "Core operation journal must remain bounded and use write-through atomic replacement on Windows."
+}
+
+$systemHelperLauncher = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^impl[ \t]+HelperLauncher[ \t]+for[ \t]+SystemHelperLauncher[ \t]*' `
+    -Description "System hidden helper launcher" `
+    -TopLevel `
+    -CodeView $coreOperationCodeView
+$systemHelperLaunch = if ($null -ne $systemHelperLauncher) {
+    Get-UniqueBracedItem `
+        -Source $systemHelperLauncher.Body `
+        -SignaturePattern '(?m)^[ \t]*fn[ \t]+launch[ \t]*\(' `
+        -Description "System hidden helper launch method" `
+        -TopLevel
+}
+else {
+    $null
+}
+if (
+    $null -ne $systemHelperLaunch -and
+    ($systemHelperLaunch.CodeBody -replace '\s', '') -cne
+    'letexecutable=env::current_exe().map_err(|_|RunnerError::Spawn)?;helper::spawn_helper_process(&executable,operation_id,operation)'
+) {
+    Add-ContractFailure `
+        -Message "System helper launcher must launch only the current desktop executable with the operation id and kind."
+}
+
+$productionCoordinatorConstructor = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*pub\(crate\)[ \t]+fn[ \t]+new[ \t]*\(' `
+    -Description "Production core operation coordinator constructor" `
+    -CodeView $coreOperationCodeView
+if (
+    $null -ne $productionCoordinatorConstructor -and
+    ($productionCoordinatorConstructor.CodeBody -replace '\s', '') -notmatch
+    'authority:Arc::new\(SystemTrustedRuntimeAuthority::discover\(\)\),persistent_operations:true,journal,'
+) {
+    Add-ContractFailure `
+        -Message "Production core operation coordination must fail closed when private persistent state cannot be initialized."
+}
+
+$startPersistentOperation = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+start_persistent_operation[ \t]*\(' `
+    -Description "Persistent core operation start arbitration" `
+    -CodeView $coreOperationCodeView
+if ($null -ne $startPersistentOperation) {
+    $claimIndex = Get-UniqueDirectStatementIndex `
+        -Source $startPersistentOperation.Body `
+        -Pattern '(?m)^[ \t]*let[ \t]+claim[ \t]*=[ \t]*self\.acquire_claim\(journal\)\.await\?[ \t]*;' `
+        -Description "Persistent core operation claim"
+    $initialJournalWriteIndex = Get-UniqueDirectStatementIndex `
+        -Source $startPersistentOperation.Body `
+        -Pattern '(?m)^[ \t]*journal\.write\(&snapshot\)\?[ \t]*;' `
+        -Description "Persistent core operation initial journal write"
+    $helperLaunch = Get-UniqueBracedItem `
+        -Source $startPersistentOperation.Body `
+        -SignaturePattern '(?m)^[ \t]*let[ \t]+mut[ \t]+helper[ \t]*=[ \t]*match[ \t]+launcher\.launch\(snapshot\.operation_id,[ \t]*operation\)[ \t]*' `
+        -Description "Persistent core operation helper launch" `
+        -DirectStatement
+    $helperLaunchCalls = [regex]::Matches(
+        $startPersistentOperation.CodeBody,
+        'launcher\.launch[ \t\r\n]*\('
+    )
+    $existingRunning = Get-UniqueBracedItem `
+        -Source $startPersistentOperation.Body `
+        -SignaturePattern '(?m)^[ \t]*if[ \t]+existing\.state[ \t]*==[ \t]*CoreOperationState::Running[ \t]*' `
+        -Description "Persistent existing-running arbitration"
+    if ($null -ne $existingRunning) {
+        $existingRunningBody = $existingRunning.CodeBody -replace '\s', ''
+        if (
+            $existingRunningBody -notmatch 'ifoperation==CoreOperationKind::Install&&existing\.operation==CoreOperationKind::Install\{.*self\.ensure_persistent_monitor\(existing\.clone\(\),sink\)\.await;returnOk\(existing\);\}returnErr\(CoreOperationError::OperationInProgress\);'
+        ) {
+            Add-ContractFailure `
+                -Message "Persistent operation arbitration must coalesce the same install and reject every conflicting running operation."
+        }
+    }
+    if (
+        $helperLaunchCalls.Count -ne 1 -or
+        $claimIndex -lt 0 -or
+        $initialJournalWriteIndex -lt 0 -or
+        $null -eq $helperLaunch -or
+        $claimIndex -ge $initialJournalWriteIndex -or
+        $initialJournalWriteIndex -ge $helperLaunch.SignatureIndex
+    ) {
+        Add-ContractFailure `
+            -Message "Persistent operation start must claim, journal, and launch exactly one hidden helper in that order."
+    }
+    $startPersistentOperationBody = $startPersistentOperation.CodeBody -replace '\s', ''
+    $coreOperationBody = $coreOperationCodeView.CommentStripped -replace '\s', ''
+    if (
+        $startPersistentOperationBody -notmatch 'Ok\(Err\(error\)\)=>\{drop\(claim\);reap_helper\(helper\);returnErr\(error\);\}' -or
+        $startPersistentOperationBody -notmatch 'drop\(claim\);reap_helper\(helper\);self\.store_persistent_snapshot' -or
+        $coreOperationBody -notmatch 'fnreap_helper\(muthelper:tokio::process::Child\)\{tauri::async_runtime::spawn\(asyncmove\{let_=helper\.wait\(\)\.await;\}\);\}'
+    ) {
+        Add-ContractFailure `
+            -Message "A launched core-operation helper must be explicitly reaped after both readiness success and readiness errors."
+    }
+}
+
+$reconcilePersistentOperation = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+reconcile_locked[ \t]*\(' `
+    -Description "Persistent core operation recovery" `
+    -CodeView $coreOperationCodeView
+if ($null -ne $reconcilePersistentOperation) {
+    $reconcilePersistentOperationBody = (
+        $coreOperationCodeView.CommentStripped.Substring(
+            $reconcilePersistentOperation.OpeningBraceIndex + 1,
+            $reconcilePersistentOperation.ClosingBraceIndex -
+                $reconcilePersistentOperation.OpeningBraceIndex -
+                1
+        ) -replace '\s', ''
+    )
+    if (
+        $reconcilePersistentOperationBody -notmatch 'ifsnapshot\.state==CoreOperationState::Running&&!journal\.operation_lease_active\(\)\?&&snapshot\.sequence==0&&letSome\(current\)=self\.restart_initial_handoff\(journal,&snapshot\)\.await\?\{snapshot=current;\}' -or
+        $reconcilePersistentOperationBody -notmatch 'ifsnapshot\.state==CoreOperationState::Running&&!journal\.operation_lease_active\(\)\?\{letrecovery_lease=matchjournal\.try_operation_lease\(\)\?\{LeaseAttempt::Busy=>\{returnjournal\.read\(\)\?\.ok_or\(CoreOperationError::InvalidProgress\);\}LeaseAttempt::Acquired\(lease\)=>lease,\};.*letrecovered=self\.recover_from_runtime\(&current\)\.await;journal\.write\(&recovered\)\?;drop\(recovery_lease\);returnOk\(recovered\);\}'
+    ) {
+        Add-ContractFailure `
+            -Message "Released running operations must restart an unready same-id handoff and fence terminal recovery with the operation lease."
+    }
+    if (
+        $reconcilePersistentOperationBody -notmatch 'ifsnapshot\.operation==CoreOperationKind::Install&&snapshot\.state==CoreOperationState::Failed&&snapshot\.error_code\.as_deref\(\)==Some\("install_in_progress"\)\{letprobe=self\.recovery_probe\.as_ref\(\)\.ok_or\(CoreOperationError::Initialization\)\?;ifprobe\.install_lease_active\(\)\?\{returnOk\(snapshot\);\}letrecovered=self\.recover_from_runtime\(&snapshot\)\.await;journal\.write\(&recovered\)\?;returnOk\(recovered\);\}'
+    ) {
+        Add-ContractFailure `
+            -Message "External install recovery must poll while its lease is active, then reconcile trusted runtime state and persist a retryable terminal snapshot."
+    }
+}
+
+$restartInitialHandoff = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+restart_initial_handoff[ \t]*\(' `
+    -Description "Initial helper handoff recovery" `
+    -CodeView $coreOperationCodeView
+if ($null -ne $restartInitialHandoff) {
+    $restartInitialHandoffBody = $restartInitialHandoff.CodeBody -replace '\s', ''
+    if (
+        $restartInitialHandoffBody -notmatch 'launcher\.launch\(snapshot\.operation_id,snapshot\.operation\)' -or
+        $restartInitialHandoffBody -notmatch 'tokio::time::timeout\(Duration::from_secs\(3\),async\{' -or
+        $restartInitialHandoffBody -notmatch 'current\.state!=CoreOperationState::Running\|\|current\.sequence!=0\|\|journal\.operation_lease_active\(\)\?' -or
+        $restartInitialHandoffBody -notmatch 'helper\.try_wait\(\)' -or
+        $restartInitialHandoffBody -notmatch 'let_=helper\.kill\(\)\.await;let_=helper\.wait\(\)\.await;Ok\(None\)'
+    ) {
+        Add-ContractFailure `
+            -Message "Initial helper handoff recovery must relaunch the same operation id and wait on lease, journal, or child-exit conditions within a bounded window."
+    }
+}
+
+$recoverPersistentOperation = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+recover_from_runtime[ \t]*\(' `
+    -Description "Trusted runtime terminal recovery" `
+    -CodeView $coreOperationCodeView
+if ($null -ne $recoverPersistentOperation) {
+    $recoverPersistentOperationBody = (
+        $coreOperationCodeView.CommentStripped.Substring(
+            $recoverPersistentOperation.OpeningBraceIndex + 1,
+            $recoverPersistentOperation.ClosingBraceIndex -
+                $recoverPersistentOperation.OpeningBraceIndex -
+                1
+        ) -replace '\s', ''
+    )
+    if (
+        $recoverPersistentOperationBody -notmatch 'RecoveryRuntimeState::Ready\{version\}=>\{.*state:CoreOperationState::Succeeded,phase:CoreOperationPhase::Completed,.*error_code:None,\}' -or
+        $recoverPersistentOperationBody -notmatch 'ifsnapshot\.operation==CoreOperationKind::Update&&!update_matches_target\{returnCoreOperationSnapshot::failed\(snapshot\.operation_id,sequence,snapshot\.operation,"update_install_failed",\);\}' -or
+        $recoverPersistentOperationBody -notmatch 'RecoveryRuntimeState::Missing\|RecoveryRuntimeState::Unavailable=>\{CoreOperationSnapshot::failed\(snapshot\.operation_id,sequence,snapshot\.operation,matchsnapshot\.operation\{CoreOperationKind::Install=>"install_failed",CoreOperationKind::Update=>"update_install_failed",\},\)\}'
+    ) {
+        Add-ContractFailure `
+            -Message "Trusted runtime recovery must require the exact update target and map Missing or unavailable runtime to the stable install/update failure code."
+    }
+}
+
+$processFixtureRunner = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*impl[ \t]+OperationRunner[ \t]+for[ \t]+ProcessFixtureRunner[ \t]*' `
+    -Description "Cross-platform process fixture runner" `
+    -CodeView $coreOperationCodeView
+if (
+    $null -ne $processFixtureRunner -and
+    $processFixtureRunner.Body -match '(?i)powershell(?:\.exe)?'
+) {
+    Add-ContractFailure `
+        -Message "The real helper process fixture must not depend on a Windows-only shell."
+}
 
 $installSpec = Get-UniqueBracedItem `
     -Source $coreOperation `
@@ -3532,6 +3926,31 @@ if (
         -Message "Desktop operation sink must emit exactly one core-operation-progress event."
 }
 
+$coreOperationStatusFor = Get-UniqueBracedItem `
+    -Source $desktopLib `
+    -SignaturePattern '(?m)^async[ \t]+fn[ \t]+core_operation_status_for[ \t]*\(' `
+    -Description "Desktop operation status recovery wiring" `
+    -TopLevel `
+    -CodeView $desktopLibCodeView
+$coreOperationStatusForBody = if ($null -ne $coreOperationStatusFor) {
+    (
+        Get-RustCodeView `
+            -Source $coreOperationStatusFor.Body `
+            -Description "Desktop operation status recovery wiring body"
+    ).CommentStripped -replace '\s', ''
+}
+else {
+    ""
+}
+if (
+    $null -ne $coreOperationStatusFor -and
+    $coreOperationStatusForBody -cne
+    'state.core_operations.status_with_sink(sink).await.map_err(|error|error.to_string())'
+) {
+    Add-ContractFailure `
+        -Message "Desktop operation status must attach reopened coordinators to the Tauri progress event sink."
+}
+
 $installAndStartCoreFor = Get-UniqueBracedItem `
     -Source $desktopLib `
     -SignaturePattern '(?m)^async[ \t]+fn[ \t]+install_and_start_core_for[ \t]*\(' `
@@ -3678,9 +4097,10 @@ $checkUpdate = Get-UniqueBracedItem `
 if ($null -ne $checkUpdate) {
     $checkUpdateConflict = Get-UniqueBracedItem `
         -Source $checkUpdate.Body `
-        -SignaturePattern '(?m)^[ \t]*if[ \t]+self\.state\.lock\(\)\.await\.active\.is_some\(\)[ \t]*' `
+        -SignaturePattern '(?m)^[ \t]*if[ \t]+self\.operation_is_active\(\)\.await\?[ \t]*' `
         -Description "check_update active-operation conflict branch" `
-        -DirectStatement
+        -DirectStatement `
+        -CodeView (Get-RustCodeView -Source $checkUpdate.Body -Description "check_update body")
     if ($null -ne $checkUpdateConflict) {
         $null = Get-UniqueDirectStatementIndex `
             -Source $checkUpdateConflict.Body `
@@ -3717,9 +4137,10 @@ if ($null -ne $installUpdate) {
     }
     $installUpdateConflict = Get-UniqueBracedItem `
         -Source $installUpdate.Body `
-        -SignaturePattern '(?m)^[ \t]*if[ \t]+self\.state\.lock\(\)\.await\.active\.is_some\(\)[ \t]*' `
+        -SignaturePattern '(?m)^[ \t]*if[ \t]+self\.operation_is_active\(\)\.await\?[ \t]*' `
         -Description "install_update active-operation conflict branch" `
-        -DirectStatement
+        -DirectStatement `
+        -CodeView (Get-RustCodeView -Source $installUpdate.Body -Description "install_update body")
     if ($null -ne $installUpdateConflict) {
         $null = Get-UniqueDirectStatementIndex `
             -Source $installUpdateConflict.Body `
@@ -3734,16 +4155,27 @@ $startOperation = Get-UniqueBracedItem `
     -Description "Core operation start arbitration" `
     -CodeView $coreOperationCodeView
 if ($null -ne $startOperation) {
-    $startOperationConflict = Get-UniqueBracedItem `
-        -Source $startOperation.Body `
-        -SignaturePattern '(?m)^[ \t]*if[ \t]+let[ \t]+Some\(active\)[ \t]*=[ \t]*&state\.active[ \t]*' `
-        -Description "start_operation active-operation conflict branch"
-    if ($null -ne $startOperationConflict) {
-        $null = Get-UniqueDirectStatementIndex `
-            -Source $startOperationConflict.Body `
-            -Pattern '(?m)^[ \t]*return[ \t]+Err\(CoreOperationError::OperationInProgress\)[ \t]*;' `
-            -Description "start_operation operation_in_progress return"
+    if (
+        ($startOperation.CodeBody -replace '\s', '') -cne
+        'ifself.persistent_operations{returnself.start_persistent_operation(operation,sink).await;}self.start_legacy_operation(operation,request,sink).await'
+    ) {
+        Add-ContractFailure `
+            -Message "Core operation start must route persistent production coordination before the test-only legacy coordinator."
     }
+}
+
+$operationIsActive = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+operation_is_active[ \t]*\(' `
+    -Description "Cross-process active operation check" `
+    -CodeView $coreOperationCodeView
+if (
+    $null -ne $operationIsActive -and
+    ($operationIsActive.CodeBody -replace '\s', '') -cne
+    'ifself.persistent_operations{returnOk(self.persistent_status().await?.is_some_and(|snapshot|snapshot.state==CoreOperationState::Running));}Ok(self.state.lock().await.active.is_some())'
+) {
+    Add-ContractFailure `
+        -Message "Production update checks and installs must determine active operations from the persistent cross-process journal."
 }
 
 $frontendEligibility = Get-UniqueBracedItem `
@@ -3764,6 +4196,103 @@ $coreLifecycleCodeView = Get-RustCodeView `
     -Source $coreLifecycle `
     -Description "Core lifecycle frontend source"
 if ($null -ne $coreLifecycleCodeView) {
+    $externalInstallWaitGates = @([regex]::Matches(
+            $coreLifecycleCodeView.Code,
+            '(?m)^[ \t]*if[ \t]*\([ \t]*!waitsForAnotherProcess[ \t]*\)[ \t]*\{'
+        ))
+    $externalInstallEffectEnds = @([regex]::Matches(
+            $coreLifecycleCodeView.Code,
+            '(?m)^[ \t]*\},[ \t]*\[[^\]\r\n]*waitsForAnotherProcess[^\]\r\n]*\]\);'
+        ))
+    $effectStarts = @([regex]::Matches(
+            $coreLifecycleCodeView.Code,
+            '(?m)^[ \t]*useEffect\(\(\)[ \t]*=>[ \t]*\{'
+        ))
+    $externalInstallEffectStart = $null
+    if ($externalInstallWaitGates.Count -eq 1) {
+        $precedingEffectStarts = @($effectStarts | Where-Object {
+                $_.Index -lt $externalInstallWaitGates[0].Index
+            })
+        if ($precedingEffectStarts.Count -gt 0) {
+            $externalInstallEffectStart =
+                $precedingEffectStarts[$precedingEffectStarts.Count - 1]
+        }
+    }
+    if (
+        $externalInstallWaitGates.Count -ne 1 -or
+        $externalInstallEffectEnds.Count -ne 1 -or
+        $null -eq $externalInstallEffectStart -or
+        $externalInstallWaitGates[0].Index -ge $externalInstallEffectEnds[0].Index
+    ) {
+        Add-ContractFailure `
+            -Message "The waitsForAnotherProcess effect must remain uniquely identifiable."
+    }
+    else {
+        $externalInstallEffectLength = (
+            $externalInstallEffectEnds[0].Index +
+            $externalInstallEffectEnds[0].Length -
+            $externalInstallEffectStart.Index
+        )
+        $externalInstallEffect = $coreLifecycle.Substring(
+            $externalInstallEffectStart.Index,
+            $externalInstallEffectLength
+        )
+        $externalInstallEffectCodeView = Get-RustCodeView `
+            -Source $externalInstallEffect `
+            -Description "External install waitsForAnotherProcess effect"
+        $externalInstallPollStarts = @([regex]::Matches(
+                $externalInstallEffectCodeView.Code,
+                '(?m)^[ \t]*const[ \t]+poll[ \t]*=[ \t]*window\.setInterval\(\(\)[ \t]*=>[ \t]*\{'
+            ))
+        $externalInstallPollEnds = @([regex]::Matches(
+                $externalInstallEffectCodeView.Code,
+                '(?m)^[ \t]*\},[ \t]*1_000\);'
+            ))
+        if (
+            $externalInstallPollStarts.Count -ne 1 -or
+            $externalInstallPollEnds.Count -ne 1 -or
+            $externalInstallPollStarts[0].Index -ge $externalInstallPollEnds[0].Index
+        ) {
+            Add-ContractFailure `
+                -Message "The waitsForAnotherProcess effect must contain one bounded external install poll."
+        }
+        else {
+        $externalInstallPollOpeningBrace = (
+            $externalInstallPollStarts[0].Index +
+            $externalInstallPollStarts[0].Length -
+            1
+        )
+        $externalInstallPollBodyLength = (
+            $externalInstallPollEnds[0].Index -
+            $externalInstallPollOpeningBrace -
+            1
+        )
+        $externalInstallPollBody = $externalInstallEffect.Substring(
+            $externalInstallPollOpeningBrace + 1,
+            $externalInstallPollBodyLength
+        )
+        $externalInstallPollCodeView = Get-RustCodeView `
+            -Source $externalInstallPollBody `
+            -Description "External install cross-process poll body"
+        $externalInstallPollCode = (
+            $externalInstallPollCodeView.CommentStripped -replace '\s', ''
+        )
+        $externalInstallRefreshIndex = Get-UniqueDirectStatementIndex `
+            -Source $externalInstallPollBody `
+            -Pattern '(?m)^[ \t]*void[ \t]+Promise\.allSettled\([ \t]*\[[ \t]*getCoreOperation\(\)[ \t]*,[ \t]*status\.refetch\(\)[ \t]*\]' `
+            -Description "External install operation and core refresh"
+        if (
+            $externalInstallRefreshIndex -lt 0 -or
+            $externalInstallPollCode -notmatch 'Promise\.allSettled\(\[getCoreOperation\(\),status\.refetch\(\)\]\)\.then\(\(\[operationResult,statusResult\]\)=>\{' -or
+            $externalInstallPollCode -notmatch 'if\(operationResult\.status==="fulfilled"&&operationResult\.value\)\{acceptOperation\(operationResult\.value\);\}' -or
+            $externalInstallPollCode -notmatch 'if\(statusResult\.status==="fulfilled"&&statusResult\.value\.data&&statusResult\.value\.data\.state!=="missing"\)\{setOperation\(undefined\);\}'
+        ) {
+            Add-ContractFailure `
+                -Message "External install recovery must poll both the operation journal and trusted core status until the released lease becomes terminal or ready."
+        }
+        }
+    }
+
     $eligibilityCalls = [regex]::Matches(
         $coreLifecycleCodeView.Code,
         '(?<![A-Za-z0-9_])isCoreUpdateEligible[ \t\r\n]*\('

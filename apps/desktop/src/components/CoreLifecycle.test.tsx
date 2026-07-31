@@ -1772,6 +1772,55 @@ it("treats install_in_progress as another process and polls trusted status witho
   expect(installAndStartCore).not.toHaveBeenCalled();
 });
 
+it("polls operation and core until a released external install becomes retryable", async () => {
+  vi.useFakeTimers();
+  const externalInstall: CoreOperation = {
+    ...failedOperation,
+    errorCode: "install_in_progress",
+  };
+  const releasedInstall: CoreOperation = {
+    ...failedOperation,
+    sequence: 2,
+    phase: "completed",
+    errorCode: "install_failed",
+  };
+  vi.mocked(getCoreStatus).mockResolvedValue(missingStatus);
+  vi.mocked(getCoreOperation)
+    .mockResolvedValueOnce(externalInstall)
+    .mockResolvedValue(releasedInstall);
+
+  renderLifecycle(undefined, false);
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(
+    screen.getByText(/operation continues in another process/i),
+  ).toBeInTheDocument();
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1_000);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(getCoreOperation).toHaveBeenCalledTimes(2);
+  expect(getCoreStatus).toHaveBeenCalledTimes(2);
+  expect(
+    screen.getByText(/WokCore could not be installed/i),
+  ).toBeInTheDocument();
+  const retry = screen.getByRole("button", { name: "Try again" });
+
+  fireEvent.click(retry);
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(getCoreOperation).toHaveBeenCalledTimes(3);
+  expect(installAndStartCore).toHaveBeenCalledOnce();
+});
+
 it("keeps a missing development runtime IDE-managed without using a production operation", async () => {
   vi.mocked(getCoreStatus).mockResolvedValue({
     ...missingStatus,

@@ -69,8 +69,13 @@ async fn stop_core_for(state: &DesktopState) -> Result<(), String> {
 
 async fn core_operation_status_for(
     state: &DesktopState,
+    sink: Arc<dyn OperationEventSink>,
 ) -> Result<Option<CoreOperationSnapshot>, String> {
-    Ok(state.core_operations.status().await)
+    state
+        .core_operations
+        .status_with_sink(sink)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 async fn install_and_start_core_for(
@@ -126,9 +131,10 @@ async fn stop_core(state: tauri::State<'_, DesktopState>) -> Result<(), String> 
 
 #[tauri::command]
 async fn core_operation_status(
+    app: tauri::AppHandle,
     state: tauri::State<'_, DesktopState>,
 ) -> Result<Option<CoreOperationSnapshot>, String> {
-    core_operation_status_for(&state).await
+    core_operation_status_for(&state, Arc::new(TauriOperationEventSink { app })).await
 }
 
 #[tauri::command]
@@ -189,6 +195,10 @@ pub fn run() -> tauri::Result<()> {
             wokcore::export_diagnostics,
         ])
         .run(tauri::generate_context!())
+}
+
+pub fn run_core_operation_helper_if_requested() -> Option<u8> {
+    core_operation::run_operation_helper_if_requested()
 }
 
 #[cfg(test)]

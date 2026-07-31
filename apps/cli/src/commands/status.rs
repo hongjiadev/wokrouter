@@ -27,11 +27,11 @@ pub async fn snapshot_selected(
 
 async fn snapshot_runtime(runtime: &impl CommandRuntime) -> Result<(CoreStatus, u8), CommandError> {
     let runtime_channel = runtime.channel();
+    let client = runtime.client();
     if runtime_channel == WokCoreRuntimeChannel::Production && runtime.executable().is_none() {
         let status = CoreStatus::missing(runtime_channel);
         return Ok((status, NOT_RUNNING_EXIT_CODE));
     }
-    let client = runtime.client();
     let connection = runtime.connection().await;
     let (status, exit_code) = match connection {
         CoreConnection::Running(handshake) => match load_token().await? {
@@ -88,7 +88,13 @@ fn render(status: &CoreStatus, json: bool) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        sync::{
+            OnceLock,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use wokrouter_platform::WokCoreRuntimeChannel;
     use wokrouter_wokcore_client::{Compatibility, CoreConnection, WokCoreClient};
@@ -132,6 +138,59 @@ mod tests {
         async fn connection(&self) -> CoreConnection {
             self.connection.clone()
         }
+    }
+
+    struct RefreshingProductionRuntime {
+        client: WokCoreClient,
+        executable: OnceLock<PathBuf>,
+        refresh_calls: AtomicUsize,
+    }
+
+    impl RefreshingProductionRuntime {
+        fn new() -> Self {
+            Self {
+                client: WokCoreClient::new(PathBuf::from("unused-discovery.json")).unwrap(),
+                executable: OnceLock::new(),
+                refresh_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl CommandRuntime for RefreshingProductionRuntime {
+        fn channel(&self) -> WokCoreRuntimeChannel {
+            WokCoreRuntimeChannel::Production
+        }
+
+        fn executable(&self) -> Option<&Path> {
+            self.executable.get().map(PathBuf::as_path)
+        }
+
+        fn client(&self) -> &WokCoreClient {
+            self.refresh_calls.fetch_add(1, Ordering::SeqCst);
+            let _ = self
+                .executable
+                .set(PathBuf::from("trusted-wokcore-after-install"));
+            &self.client
+        }
+
+        fn establish_production_binding(&self, _executable: &Path) -> bool {
+            false
+        }
+
+        async fn connection(&self) -> CoreConnection {
+            CoreConnection::Stopped
+        }
+    }
+
+    #[tokio::test]
+    async fn production_status_refreshes_trusted_binding_before_classifying_missing() {
+        let runtime = RefreshingProductionRuntime::new();
+
+        let (status, _) = snapshot_runtime(&runtime).await.unwrap();
+
+        assert_eq!(status.state, CoreUiState::Stopped);
+        assert_eq!(runtime.refresh_calls.load(Ordering::SeqCst), 1);
+        assert!(runtime.executable().is_some());
     }
 
     #[tokio::test]

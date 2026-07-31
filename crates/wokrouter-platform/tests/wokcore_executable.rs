@@ -1,7 +1,17 @@
 use std::fs;
 
 use tempfile::tempdir;
-use wokrouter_platform::{PlatformError, discover_wokcore_executable};
+use wokrouter_platform::{
+    PlatformError, discover_recorded_wokcore_executable, discover_wokcore_executable,
+};
+
+#[test]
+fn record_only_discovery_does_not_fall_back_when_the_record_is_missing() {
+    let fixture = tempdir().unwrap();
+    let record = fixture.path().join("missing-wokcore-install.json");
+
+    assert_eq!(discover_recorded_wokcore_executable(&record).unwrap(), None);
+}
 
 #[cfg(any(not(windows), feature = "test-support"))]
 #[test]

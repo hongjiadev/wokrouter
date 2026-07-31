@@ -1,5 +1,6 @@
 pub mod locale;
 pub mod paths;
+pub mod private_paths;
 #[cfg(debug_assertions)]
 mod process;
 #[cfg(windows)]

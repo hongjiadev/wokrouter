@@ -100,7 +100,7 @@ fn existing_wokcore(paths: &AppPaths) -> Result<Option<PathBuf>, WokCoreInstallE
         .map_err(|_| WokCoreInstallError::InvalidInstallState)
 }
 
-struct InstallLease {
+pub(crate) struct InstallLease {
     file: File,
 }
 
@@ -110,7 +110,7 @@ impl Drop for InstallLease {
     }
 }
 
-fn acquire_install_lease(directory: &Path) -> Result<InstallLease, WokCoreInstallError> {
+pub(crate) fn acquire_install_lease(directory: &Path) -> Result<InstallLease, WokCoreInstallError> {
     let lock_path = directory.join(".wokcore-install.lock");
     if let Ok(metadata) = fs::symlink_metadata(&lock_path)
         && !safe_regular_file(&metadata)
@@ -131,6 +131,20 @@ fn acquire_install_lease(directory: &Path) -> Result<InstallLease, WokCoreInstal
             Err(WokCoreInstallError::InstallInProgress)
         }
         Err(_) => Err(WokCoreInstallError::UnsafeInstallLocation),
+    }
+}
+
+pub(crate) fn install_lease_active(directory: &Path) -> Result<bool, WokCoreInstallError> {
+    if !directory.exists() {
+        return Ok(false);
+    }
+    match acquire_install_lease(directory) {
+        Ok(lease) => {
+            drop(lease);
+            Ok(false)
+        }
+        Err(WokCoreInstallError::InstallInProgress) => Ok(true),
+        Err(error) => Err(error),
     }
 }
 
