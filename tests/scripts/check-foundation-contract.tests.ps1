@@ -401,6 +401,153 @@ try {
             -Scenario "desktop bootstrap with reversed i18n initialization order"
     }
 
+    Invoke-Scenario -Name "desktop bootstrap requirements cannot survive in a template literal" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/main.tsx" `
+            -OldText @'
+export async function bootstrap(): Promise<void> {
+  const systemLocale = await invoke<string>("system_locale").catch(
+    () => undefined,
+  );
+  const locale = resolveSupportedLocale(
+    systemLocale,
+    browserLocaleCandidates(window.navigator),
+  );
+  await initializeI18n(locale);
+  initializeDocumentLocale(document.documentElement, locale);
+
+  const root = document.getElementById("root");
+  if (!root) {
+    throw new Error("WokRouter desktop root is missing.");
+  }
+
+  createRoot(root).render(
+    <StrictMode>
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
+    </StrictMode>,
+  );
+}
+'@ `
+            -NewText @'
+export async function bootstrap(): Promise<void> {
+  const decoy = `
+invoke<string>("system_locale")
+await initializeI18n(locale)
+createRoot(root).render()
+`;
+  void decoy;
+}
+'@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "reachable direct bootstrap statements" `
+            -Scenario "bootstrap contract text retained only in a template literal"
+    }
+
+    Invoke-Scenario -Name "desktop bootstrap requirements cannot live under if false" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/main.tsx" `
+            -OldText "  const systemLocale = await invoke<string>(`"system_locale`").catch(`n" `
+            -NewText "  if (false) {`n    const systemLocale = await invoke<string>(`"system_locale`").catch(`n"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/main.tsx" `
+            -OldText "  );`n}`n`nvoid bootstrap();" `
+            -NewText "  );`n  }`n}`n`nvoid bootstrap();"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "reachable direct bootstrap statements" `
+            -Scenario "bootstrap contract statements retained only under if false"
+    }
+
+    Invoke-Scenario -Name "desktop bootstrap requirements cannot live in an uncalled nested function" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/main.tsx" `
+            -OldText @'
+export async function bootstrap(): Promise<void> {
+  const systemLocale = await invoke<string>("system_locale").catch(
+'@ `
+            -NewText @'
+export async function bootstrap(): Promise<void> {
+  async function decoy(): Promise<void> {
+    const systemLocale = await invoke<string>("system_locale").catch(
+'@
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/main.tsx" `
+            -OldText "  );`n}`n`nvoid bootstrap();" `
+            -NewText "  );`n  }`n  void decoy;`n}`n`nvoid bootstrap();"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "reachable direct bootstrap statements" `
+            -Scenario "bootstrap contract statements retained only in an uncalled nested function"
+    }
+
+    Invoke-Scenario -Name "desktop bootstrap cannot return before locale initialization" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/main.tsx" `
+            -OldText "  const systemLocale = await invoke<string>(`"system_locale`").catch(`n" `
+            -NewText "  return;`n  const systemLocale = await invoke<string>(`"system_locale`").catch(`n"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "reachable direct bootstrap statements" `
+            -Scenario "bootstrap returning before locale initialization"
+    }
+
+    Invoke-Scenario -Name "desktop module must invoke bootstrap" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/main.tsx" `
+            -OldText "`nvoid bootstrap();`n" `
+            -NewText "`n"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "invoke bootstrap at module scope" `
+            -Scenario "desktop module without its bootstrap invocation"
+    }
+
+    Invoke-Scenario -Name "desktop supported languages cannot append another locale" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/i18n/index.ts" `
+            -OldText '    supportedLngs: ["en", "zh-CN"],' `
+            -NewText '    supportedLngs: ["en", "zh-CN"].concat(["fr"]),'
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "awaited i18n.init options" `
+            -Scenario "desktop supported language list with an appended locale"
+    }
+
+    Invoke-Scenario -Name "desktop supported languages cannot survive only in a dead object" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/i18n/index.ts" `
+            -OldText "  await i18n.use(initReactI18next).init({`n" `
+            -NewText "  const decoy = { supportedLngs: [`"en`", `"zh-CN`"] };`n  void decoy;`n  await i18n.use(initReactI18next).init({`n"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/i18n/index.ts" `
+            -OldText "    supportedLngs: [`"en`", `"zh-CN`"],`n" `
+            -NewText ""
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "awaited i18n.init options" `
+            -Scenario "supported languages retained only in an unrelated object"
+    }
+
     Invoke-Scenario -Name "Simplified Chinese catalog cannot be removed" -Test {
         $root = New-ContractFixture
         Remove-Item `
@@ -433,6 +580,28 @@ if (`$false) {
             -Root $root `
             -ExpectedText "active script-scope source desktop GUI subsystem check" `
             -Scenario "desktop PE subsystem check retained only in dead code"
+    }
+
+    Invoke-Scenario -Name "desktop PE check cannot follow a top-level return" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @"
+if ((Get-PeSubsystem -Path `$desktop) -ne 2) {
+    throw "Windows desktop executable must use the GUI subsystem."
+}
+"@ `
+            -NewText @"
+return
+if ((Get-PeSubsystem -Path `$desktop) -ne 2) {
+    throw "Windows desktop executable must use the GUI subsystem."
+}
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "reachable script-scope source desktop GUI subsystem check" `
+            -Scenario "desktop PE subsystem check after a top-level return"
     }
 
     Invoke-Scenario -Name "frontend CI cannot omit the catalog check" -Test {

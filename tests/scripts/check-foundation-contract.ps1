@@ -428,6 +428,230 @@ function Get-RustCodeView {
     }
 }
 
+function Get-TypeScriptCodeView {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $view = $Source.ToCharArray()
+    $index = 0
+    while ($index -lt $Source.Length) {
+        $current = $Source[$index]
+        $next = if ($index + 1 -lt $Source.Length) {
+            $Source[$index + 1]
+        }
+        else {
+            [char]0
+        }
+
+        if ($current -eq "/" -and $next -eq "/") {
+            $end = $index + 2
+            while (
+                $end -lt $Source.Length -and
+                $Source[$end] -ne "`r" -and
+                $Source[$end] -ne "`n"
+            ) {
+                $end += 1
+            }
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            $index = $end
+            continue
+        }
+
+        if ($current -eq "/" -and $next -eq "*") {
+            $end = $index + 2
+            while (
+                $end + 1 -lt $Source.Length -and
+                -not (
+                    $Source[$end] -eq "*" -and
+                    $Source[$end + 1] -eq "/"
+                )
+            ) {
+                $end += 1
+            }
+            if ($end + 1 -ge $Source.Length) {
+                Add-ContractFailure `
+                    -Message "$Description must be lexically valid: unterminated block comment."
+                return $null
+            }
+            $end += 2
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            $index = $end
+            continue
+        }
+
+        if ($current -eq "'" -or $current -eq '"' -or $current -eq "``") {
+            $quote = $current
+            $end = $index + 1
+            $closed = $false
+            while ($end -lt $Source.Length) {
+                if ($Source[$end] -eq "\") {
+                    $end += 2
+                    continue
+                }
+                if ($Source[$end] -eq $quote) {
+                    $end += 1
+                    $closed = $true
+                    break
+                }
+                if (
+                    $quote -ne "``" -and
+                    ($Source[$end] -eq "`r" -or $Source[$end] -eq "`n")
+                ) {
+                    break
+                }
+                $end += 1
+            }
+            if (-not $closed) {
+                $kind = if ($quote -eq "``") { "template literal" } else { "string literal" }
+                Add-ContractFailure `
+                    -Message "$Description must be lexically valid: unterminated $kind."
+                return $null
+            }
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            $index = $end
+            continue
+        }
+
+        $index += 1
+    }
+
+    $code = -join $view
+    $delimiterStack = [System.Collections.Generic.List[char]]::new()
+    for ($index = 0; $index -lt $code.Length; $index += 1) {
+        $current = $code[$index]
+        if ($current -eq "(" -or $current -eq "[" -or $current -eq "{") {
+            $delimiterStack.Add($current)
+            continue
+        }
+        if ($current -ne ")" -and $current -ne "]" -and $current -ne "}") {
+            continue
+        }
+        if ($delimiterStack.Count -eq 0) {
+            Add-ContractFailure `
+                -Message "$Description must have balanced TypeScript delimiters."
+            return $null
+        }
+        $opening = $delimiterStack[$delimiterStack.Count - 1]
+        $delimiterStack.RemoveAt($delimiterStack.Count - 1)
+        if (
+            ($current -eq ")" -and $opening -ne "(") -or
+            ($current -eq "]" -and $opening -ne "[") -or
+            ($current -eq "}" -and $opening -ne "{")
+        ) {
+            Add-ContractFailure `
+                -Message "$Description must have balanced TypeScript delimiters."
+            return $null
+        }
+    }
+    if ($delimiterStack.Count -ne 0) {
+        Add-ContractFailure `
+            -Message "$Description must have balanced TypeScript delimiters."
+        return $null
+    }
+
+    return [pscustomobject]@{
+        Code = $code
+    }
+}
+
+function Get-TypeScriptDirectStatements {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$Description,
+
+        [AllowNull()]
+        [object]$CodeView
+    )
+
+    $codeView = if ($null -ne $CodeView) {
+        $CodeView
+    }
+    else {
+        Get-TypeScriptCodeView -Source $Source -Description $Description
+    }
+    if ($null -eq $codeView) {
+        return @()
+    }
+    if ($codeView.Code.Length -ne $Source.Length) {
+        Add-ContractFailure `
+            -Message "$Description code view must preserve source offsets."
+        return @()
+    }
+
+    $statements = @()
+    $statementStart = 0
+    $braceDepth = 0
+    $parenthesisDepth = 0
+    $bracketDepth = 0
+    for ($index = 0; $index -lt $codeView.Code.Length; $index += 1) {
+        $current = $codeView.Code[$index]
+        switch ($current) {
+            "{" { $braceDepth += 1; continue }
+            "(" { $parenthesisDepth += 1; continue }
+            "[" { $bracketDepth += 1; continue }
+            "}" { $braceDepth -= 1 }
+            ")" { $parenthesisDepth -= 1 }
+            "]" { $bracketDepth -= 1 }
+        }
+        $atStatementBoundary = (
+            $braceDepth -eq 0 -and
+            $parenthesisDepth -eq 0 -and
+            $bracketDepth -eq 0 -and
+            ($current -eq ";" -or $current -eq "}")
+        )
+        if (-not $atStatementBoundary) {
+            continue
+        }
+
+        $trimmedStart = $statementStart
+        while (
+            $trimmedStart -le $index -and
+            [char]::IsWhiteSpace($codeView.Code[$trimmedStart])
+        ) {
+            $trimmedStart += 1
+        }
+        if ($trimmedStart -le $index) {
+            $length = $index - $trimmedStart + 1
+            $statements += [pscustomobject]@{
+                Index = $trimmedStart
+                Length = $length
+                Source = $Source.Substring($trimmedStart, $length)
+                Code = $codeView.Code.Substring($trimmedStart, $length)
+            }
+        }
+        $statementStart = $index + 1
+    }
+
+    $trimmedStart = $statementStart
+    while (
+        $trimmedStart -lt $codeView.Code.Length -and
+        [char]::IsWhiteSpace($codeView.Code[$trimmedStart])
+    ) {
+        $trimmedStart += 1
+    }
+    if ($trimmedStart -lt $codeView.Code.Length) {
+        $length = $codeView.Code.Length - $trimmedStart
+        $statements += [pscustomobject]@{
+            Index = $trimmedStart
+            Length = $length
+            Source = $Source.Substring($trimmedStart, $length)
+            Code = $codeView.Code.Substring($trimmedStart, $length)
+        }
+    }
+
+    return @($statements)
+}
+
 function Get-RustOwnershipAtIndex {
     param(
         [Parameter(Mandatory)]
@@ -1890,52 +2114,80 @@ foreach ($catalog in @(
     }
 }
 
+$desktopBootstrapCodeView = Get-TypeScriptCodeView `
+    -Source $desktopBootstrap `
+    -Description "Desktop bootstrap module"
 $bootstrap = Get-UniqueBracedItem `
     -Source $desktopBootstrap `
     -SignaturePattern '(?m)^export[ \t]+async[ \t]+function[ \t]+bootstrap[ \t]*\(' `
     -Description "Desktop bootstrap" `
-    -TopLevel
+    -TopLevel `
+    -CodeView $desktopBootstrapCodeView
 if ($null -ne $bootstrap) {
-    $systemLocaleCalls = @()
-    foreach ($candidate in @([regex]::Matches(
-                $bootstrap.CodeBody,
-                '(?<![A-Za-z0-9_$])invoke[ \t\r\n]*<[ \t\r\n]*string[ \t\r\n]*>[ \t\r\n]*\('
-            ))) {
-        $sourceTail = $bootstrap.Body.Substring($candidate.Index)
-        if (
-            $sourceTail -match
-            '^invoke[ \t\r\n]*<[ \t\r\n]*string[ \t\r\n]*>[ \t\r\n]*\([ \t\r\n]*"system_locale"[ \t\r\n]*\)'
-        ) {
-            $systemLocaleCalls += $candidate
-        }
+    $bootstrapCodeView = [pscustomobject]@{ Code = $bootstrap.CodeBody }
+    $bootstrapStatements = @(Get-TypeScriptDirectStatements `
+        -Source $bootstrap.Body `
+        -Description "Desktop bootstrap body" `
+        -CodeView $bootstrapCodeView)
+    $systemLocaleCalls = @($bootstrapStatements | Where-Object {
+            [regex]::IsMatch(
+                $_.Source,
+                '(?s)^const\s+systemLocale\s*=\s*await\s+invoke\s*<\s*string\s*>\s*\(\s*"system_locale"\s*\)\s*\.\s*catch\s*\(\s*\(\s*\)\s*=>\s*undefined\s*,?\s*\)\s*;$'
+            )
+        })
+    $localeResolutionCalls = @($bootstrapStatements | Where-Object {
+            [regex]::IsMatch(
+                $_.Source,
+                '(?s)^const\s+locale\s*=\s*resolveSupportedLocale\s*\(\s*systemLocale\s*,\s*browserLocaleCandidates\s*\(\s*window\s*\.\s*navigator\s*\)\s*,?\s*\)\s*;$'
+            )
+        })
+    $initializeCalls = @($bootstrapStatements | Where-Object {
+            [regex]::IsMatch(
+                $_.Source,
+                '^await\s+initializeI18n\s*\(\s*locale\s*\)\s*;$'
+            )
+        })
+    $documentLocaleCalls = @($bootstrapStatements | Where-Object {
+            [regex]::IsMatch(
+                $_.Source,
+                '^initializeDocumentLocale\s*\(\s*document\s*\.\s*documentElement\s*,\s*locale\s*\)\s*;$'
+            )
+        })
+    $renderCalls = @($bootstrapStatements | Where-Object {
+            [regex]::IsMatch(
+                $_.Source,
+                '(?s)^createRoot\s*\(\s*root\s*\)\s*\.\s*render\s*\(.*\)\s*;$'
+            )
+        })
+    $unconditionalTerminators = @($bootstrapStatements | Where-Object {
+            $_.Code -match '^(?:return|throw)\b'
+        })
+    $requiredBootstrapStatementsPresent = (
+        $systemLocaleCalls.Count -eq 1 -and
+        $localeResolutionCalls.Count -eq 1 -and
+        $initializeCalls.Count -eq 1 -and
+        $documentLocaleCalls.Count -eq 1 -and
+        $renderCalls.Count -eq 1
+    )
+    $bootstrapHasEarlyTerminator = $false
+    if ($renderCalls.Count -eq 1) {
+        $bootstrapHasEarlyTerminator = @(
+            $unconditionalTerminators | Where-Object {
+                $_.Index -lt $renderCalls[0].Index
+            }
+        ).Count -gt 0
     }
-    $initializeCalls = @([regex]::Matches(
-            $bootstrap.CodeBody,
-            '(?<![A-Za-z0-9_$])await[ \t\r\n]+initializeI18n[ \t\r\n]*\([ \t\r\n]*locale[ \t\r\n]*\)'
-        ))
-    $renderCalls = @([regex]::Matches(
-            $bootstrap.CodeBody,
-            '(?<![A-Za-z0-9_$])createRoot[ \t\r\n]*\([ \t\r\n]*root[ \t\r\n]*\)[ \t\r\n]*\.[ \t\r\n]*render[ \t\r\n]*\('
-        ))
-    if ($systemLocaleCalls.Count -ne 1) {
+    if (-not $requiredBootstrapStatementsPresent -or $bootstrapHasEarlyTerminator) {
         Add-ContractFailure `
-            -Message 'Desktop bootstrap must call invoke<string>("system_locale") exactly once.'
-    }
-    if ($initializeCalls.Count -ne 1) {
-        Add-ContractFailure `
-            -Message "Desktop bootstrap must await initializeI18n(locale) exactly once."
-    }
-    if ($renderCalls.Count -ne 1) {
-        Add-ContractFailure `
-            -Message "Desktop bootstrap must call createRoot(root).render exactly once."
+            -Message "Desktop bootstrap must retain reachable direct bootstrap statements for system locale resolution, i18n initialization, document locale initialization, and rendering."
     }
     if (
-        $systemLocaleCalls.Count -eq 1 -and
-        $initializeCalls.Count -eq 1 -and
-        $renderCalls.Count -eq 1 -and
+        $requiredBootstrapStatementsPresent -and
         (
-            $systemLocaleCalls[0].Index -ge $initializeCalls[0].Index -or
-            $initializeCalls[0].Index -ge $renderCalls[0].Index
+            $systemLocaleCalls[0].Index -ge $localeResolutionCalls[0].Index -or
+            $localeResolutionCalls[0].Index -ge $initializeCalls[0].Index -or
+            $initializeCalls[0].Index -ge $documentLocaleCalls[0].Index -or
+            $documentLocaleCalls[0].Index -ge $renderCalls[0].Index
         )
     ) {
         Add-ContractFailure `
@@ -1943,32 +2195,118 @@ if ($null -ne $bootstrap) {
     }
 }
 
+if ($null -ne $desktopBootstrapCodeView) {
+    $desktopModuleStatements = @(Get-TypeScriptDirectStatements `
+        -Source $desktopBootstrap `
+        -Description "Desktop bootstrap module" `
+        -CodeView $desktopBootstrapCodeView)
+    $bootstrapInvocations = @($desktopModuleStatements | Where-Object {
+            [regex]::IsMatch($_.Source, '^void\s+bootstrap\s*\(\s*\)\s*;$')
+        })
+    if ($bootstrapInvocations.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "Desktop bootstrap module must invoke bootstrap at module scope exactly once."
+    }
+}
+
+$desktopI18nCodeView = Get-TypeScriptCodeView `
+    -Source $desktopI18n `
+    -Description "Desktop i18n module"
 $i18nInitializer = Get-UniqueBracedItem `
     -Source $desktopI18n `
     -SignaturePattern '(?m)^export[ \t]+async[ \t]+function[ \t]+initializeI18n[ \t]*\(' `
     -Description "Desktop i18n initializer" `
-    -TopLevel
+    -TopLevel `
+    -CodeView $desktopI18nCodeView
 if ($null -ne $i18nInitializer) {
-    $supportedLanguageProperties = @([regex]::Matches(
-            $i18nInitializer.CodeBody,
-            '(?<![A-Za-z0-9_$])supportedLngs[ \t\r\n]*:'
-        ))
-    $exactSupportedLanguageProperties = @()
-    foreach ($candidate in $supportedLanguageProperties) {
-        $sourceTail = $i18nInitializer.Body.Substring($candidate.Index)
-        if (
-            $sourceTail -match
-            '^supportedLngs[ \t\r\n]*:[ \t\r\n]*\[[ \t\r\n]*"en"[ \t\r\n]*,[ \t\r\n]*"zh-CN"[ \t\r\n]*\]'
+    $i18nInitializerCodeView = [pscustomobject]@{
+        Code = $i18nInitializer.CodeBody
+    }
+    $i18nStatements = @(Get-TypeScriptDirectStatements `
+        -Source $i18nInitializer.Body `
+        -Description "Desktop i18n initializer body" `
+        -CodeView $i18nInitializerCodeView)
+    $initStatements = @($i18nStatements | Where-Object {
+            $_.Code -match '^await\s+i18n\s*\.\s*use\s*\(\s*initReactI18next\s*\)\s*\.\s*init\s*\('
+        })
+    $supportedLanguagesAreExact = $false
+    if ($initStatements.Count -eq 1) {
+        $initStatement = $initStatements[0]
+        $initCall = [regex]::Match(
+            $initStatement.Code,
+            '^await\s+i18n\s*\.\s*use\s*\(\s*initReactI18next\s*\)\s*\.\s*init\s*\('
+        )
+        $optionsOpeningBrace = $initCall.Index + $initCall.Length
+        while (
+            $optionsOpeningBrace -lt $initStatement.Code.Length -and
+            [char]::IsWhiteSpace($initStatement.Code[$optionsOpeningBrace])
         ) {
-            $exactSupportedLanguageProperties += $candidate
+            $optionsOpeningBrace += 1
+        }
+        if (
+            $optionsOpeningBrace -lt $initStatement.Code.Length -and
+            $initStatement.Code[$optionsOpeningBrace] -eq "{"
+        ) {
+            $depth = 0
+            $optionsClosingBrace = -1
+            for (
+                $index = $optionsOpeningBrace;
+                $index -lt $initStatement.Code.Length;
+                $index += 1
+            ) {
+                if ($initStatement.Code[$index] -eq "{") {
+                    $depth += 1
+                }
+                elseif ($initStatement.Code[$index] -eq "}") {
+                    $depth -= 1
+                    if ($depth -eq 0) {
+                        $optionsClosingBrace = $index
+                        break
+                    }
+                }
+            }
+            if ($optionsClosingBrace -gt $optionsOpeningBrace) {
+                $optionsBodyStart = $optionsOpeningBrace + 1
+                $optionsBodyLength = $optionsClosingBrace - $optionsBodyStart
+                $optionsCodeBody = $initStatement.Code.Substring(
+                    $optionsBodyStart,
+                    $optionsBodyLength
+                )
+                $optionsSourceBody = $initStatement.Source.Substring(
+                    $optionsBodyStart,
+                    $optionsBodyLength
+                )
+                $supportedLanguageProperties = @()
+                foreach ($candidate in @([regex]::Matches(
+                            $optionsCodeBody,
+                            '(?<![A-Za-z0-9_$])supportedLngs\s*:'
+                        ))) {
+                    $ownership = Get-RustOwnershipAtIndex `
+                        -Structure $optionsCodeBody `
+                        -Index $candidate.Index
+                    if ($ownership.AllDelimiterDepthsZero) {
+                        $supportedLanguageProperties += $candidate
+                    }
+                }
+                $exactSupportedLanguageProperties = @(
+                    $supportedLanguageProperties | Where-Object {
+                        $sourceTail = $optionsSourceBody.Substring($_.Index)
+                        [regex]::IsMatch(
+                            $sourceTail,
+                            '^supportedLngs\s*:\s*\[\s*"en"\s*,\s*"zh-CN"\s*\]\s*(?=,|$)'
+                        )
+                    }
+                )
+                $supportedLanguagesAreExact = (
+                    $supportedLanguageProperties.Count -eq 1 -and
+                    $exactSupportedLanguageProperties.Count -eq 1
+                )
+            }
         }
     }
-    if (
-        $supportedLanguageProperties.Count -ne 1 -or
-        $exactSupportedLanguageProperties.Count -ne 1
-    ) {
+    if (-not $supportedLanguagesAreExact) {
         Add-ContractFailure `
-            -Message 'Desktop i18n must define supportedLngs: ["en", "zh-CN"] exactly once in initializeI18n.'
+            -Message 'Desktop i18n must bind supportedLngs: ["en", "zh-CN"] exactly to the awaited i18n.init options.'
     }
 }
 
@@ -2009,15 +2347,38 @@ if ($null -ne $windowsPackagerAst) {
             -Condition '(Get-PeSubsystem -Path $desktop) -ne 2' `
             -ThrowStatement 'throw "Windows desktop executable must use the GUI subsystem."'
     )
-    if (
+    $sourceDesktopGuardIsActive = (
         $sourceDesktopGuards.Count -ne 1 -or
         -not [object]::ReferenceEquals(
             $sourceDesktopGuards[0].Parent,
             $windowsPackagerAst.EndBlock
         )
-    ) {
+    )
+    if ($sourceDesktopGuardIsActive) {
         Add-ContractFailure `
             -Message "Windows packager must retain the active script-scope source desktop GUI subsystem check."
+    }
+    else {
+        $guardStatementIndex = [array]::IndexOf(
+            @($windowsPackagerAst.EndBlock.Statements),
+            $sourceDesktopGuards[0]
+        )
+        $terminalStatementsBeforeGuard = @(
+            $windowsPackagerAst.EndBlock.Statements |
+                Select-Object -First $guardStatementIndex |
+                Where-Object {
+                    $_ -is [System.Management.Automation.Language.ReturnStatementAst] -or
+                    $_ -is [System.Management.Automation.Language.ExitStatementAst] -or
+                    $_ -is [System.Management.Automation.Language.ThrowStatementAst]
+                }
+        )
+        if (
+            $guardStatementIndex -lt 0 -or
+            $terminalStatementsBeforeGuard.Count -gt 0
+        ) {
+            Add-ContractFailure `
+                -Message "Windows packager must retain a reachable script-scope source desktop GUI subsystem check."
+        }
     }
 }
 
