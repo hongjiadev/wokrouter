@@ -10,8 +10,11 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 
 import { coreStatusQueryKey, getCoreStatus } from "../control";
+import type { SupportedLocale } from "../i18n";
+import { formatBytes, formatLocalTime, formatNumber } from "../i18n/format";
 import {
   commitProviderConfig,
   createProviderSecret,
@@ -41,25 +44,31 @@ export type ManagementArea =
   | "usage"
   | "diagnostics";
 
+type ManagementAreaTranslationKey = `management.${ManagementArea}.tab`;
+
 const areaDefinitions: {
   id: ManagementArea;
-  label: string;
+  labelKey: ManagementAreaTranslationKey;
   capability: string;
 }[] = [
   {
     id: "providers",
-    label: "Providers",
+    labelKey: "management.providers.tab",
     capability: "provider.catalog.v1",
   },
   {
     id: "sessions",
-    label: "Sessions",
+    labelKey: "management.sessions.tab",
     capability: "sessions.index.v1",
   },
-  { id: "usage", label: "Usage", capability: "usage.session.v1" },
+  {
+    id: "usage",
+    labelKey: "management.usage.tab",
+    capability: "usage.session.v1",
+  },
   {
     id: "diagnostics",
-    label: "Diagnostics",
+    labelKey: "management.diagnostics.tab",
     capability: "diagnostics.events.v1",
   },
 ];
@@ -71,6 +80,7 @@ export function ManagementPanel({
   requestedArea?: ManagementArea;
   requestedAreaRequestId?: number;
 }) {
+  const { t } = useTranslation();
   const status = useQuery({
     queryKey: coreStatusQueryKey,
     queryFn: getCoreStatus,
@@ -122,15 +132,21 @@ export function ManagementPanel({
     <section className="management-panel" aria-labelledby="management-heading">
       <header className="management-header">
         <div>
-          <p className="section-label">Management</p>
-          <h2 id="management-heading">WokCore workspace</h2>
+          <p className="section-label">
+            {t("management.providers.panelLabel")}
+          </p>
+          <h2 id="management-heading">
+            {t("management.providers.panelHeading")}
+          </h2>
         </div>
-        <span className="management-connection">Live · loopback only</span>
+        <span className="management-connection">
+          {t("management.providers.connection")}
+        </span>
       </header>
       <div
         className="management-tabs"
         role="tablist"
-        aria-label="Management areas"
+        aria-label={t("management.providers.areasLabel")}
       >
         {areas.map((area) => (
           <button
@@ -146,7 +162,7 @@ export function ManagementPanel({
             }}
             onClick={() => setActiveArea(area.id)}
           >
-            {area.label}
+            {t(area.labelKey)}
           </button>
         ))}
       </div>
@@ -185,6 +201,8 @@ function ProviderPanel({
   canWrite: boolean;
   canManageSecrets: boolean;
 }) {
+  const { i18n, t } = useTranslation();
+  const locale = i18n.resolvedLanguage as SupportedLocale;
   const queryClient = useQueryClient();
   const catalog = useQuery({
     queryKey: ["provider-catalog"],
@@ -242,12 +260,12 @@ function ProviderPanel({
   });
 
   if (catalog.isPending || runtime.isPending || models.isPending || !draft) {
-    return <PanelLoading label="Loading provider configuration" />;
+    return <PanelLoading label={t("management.providers.loading")} />;
   }
   if (catalog.isError || runtime.isError || models.isError) {
     return (
       <PanelError
-        title="Provider data unavailable"
+        title={t("management.providers.unavailable")}
         action={() => {
           void catalog.refetch();
           void runtime.refetch();
@@ -261,18 +279,22 @@ function ProviderPanel({
     <div className="management-stack">
       <div className="management-summary">
         <div>
-          <span>Configured</span>
-          <strong>{runtime.data.provider_count}</strong>
+          <span>{t("management.providers.configured")}</span>
+          <strong>{formatNumber(runtime.data.provider_count, locale)}</strong>
         </div>
         <div>
-          <span>Models</span>
-          <strong>{models.data.models.length}</strong>
+          <span>{t("management.providers.models")}</span>
+          <strong>{formatNumber(models.data.models.length, locale)}</strong>
         </div>
         <div>
-          <span>Revision</span>
+          <span>{t("management.providers.revision")}</span>
           <strong>{runtime.data.revision}</strong>
         </div>
-        <p className="revision-label">Revision {runtime.data.revision}</p>
+        <p className="revision-label">
+          {t("management.providers.revisionLabel", {
+            revision: runtime.data.revision,
+          })}
+        </p>
       </div>
 
       <div className="provider-grid">
@@ -290,10 +312,13 @@ function ProviderPanel({
                 <span>{provider.auth_kind}</span>
               </div>
               <p className="provider-capabilities">
-                {capabilityLabels(provider).join(" · ") || "Text only"}
+                {capabilityLabels(provider).join(" · ") ||
+                  t("management.providers.textOnly")}
               </p>
               {instances.length === 0 ? (
-                <p className="empty-inline">Not configured</p>
+                <p className="empty-inline">
+                  {t("management.providers.notConfigured")}
+                </p>
               ) : (
                 <ul className="provider-instances">
                   {instances.map((instance) => (
@@ -301,7 +326,9 @@ function ProviderPanel({
                       <label>
                         <input
                           type="checkbox"
-                          aria-label={`Enable ${instance.id}`}
+                          aria-label={t("management.providers.enableInstance", {
+                            id: instance.id,
+                          })}
                           checked={instance.enabled}
                           disabled={!canWrite}
                           onChange={(event) => {
@@ -330,7 +357,11 @@ function ProviderPanel({
                         />
                         <span>{instance.id}</span>
                       </label>
-                      <span>{instance.enabled ? "Enabled" : "Disabled"}</span>
+                      <span>
+                        {instance.enabled
+                          ? t("management.providers.enabled")
+                          : t("management.providers.disabled")}
+                      </span>
                     </li>
                   ))}
                 </ul>
@@ -369,7 +400,9 @@ function ProviderPanel({
             disabled={save.isPending}
             onClick={() => save.mutate()}
           >
-            {save.isPending ? "Saving…" : "Save changes"}
+            {save.isPending
+              ? t("management.providers.saving")
+              : t("management.providers.saveChanges")}
           </button>
         )}
         {canWrite && (
@@ -379,13 +412,14 @@ function ProviderPanel({
             disabled={reload.isPending}
             onClick={() => reload.mutate()}
           >
-            {reload.isPending ? "Reloading…" : "Reload WokCore"}
+            {reload.isPending
+              ? t("management.providers.reloading")
+              : t("management.providers.reload")}
           </button>
         )}
         {(save.isError || reload.isError) && (
           <p className="inline-error">
-            Provider changes were not assumed to have applied. Refresh and try
-            again.
+            {t("management.providers.changesNotApplied")}
           </p>
         )}
       </div>
@@ -402,6 +436,7 @@ function AddProviderForm({
   draft: ProviderCandidate;
   onChange: (draft: ProviderCandidate) => void;
 }) {
+  const { t } = useTranslation();
   const [catalogId, setCatalogId] = useState(providers[0]?.id ?? "");
   const [instanceId, setInstanceId] = useState("");
 
@@ -436,11 +471,11 @@ function AddProviderForm({
   return (
     <form className="management-form" onSubmit={submit}>
       <div>
-        <h3>Add provider instance</h3>
-        <p>Choose a built-in adapter, then assign a local routing name.</p>
+        <h3>{t("management.providers.addTitle")}</h3>
+        <p>{t("management.providers.addDescription")}</p>
       </div>
       <label>
-        Provider
+        {t("management.providers.provider")}
         <select
           value={catalogId}
           onChange={(event) => setCatalogId(event.currentTarget.value)}
@@ -453,12 +488,12 @@ function AddProviderForm({
         </select>
       </label>
       <label>
-        Instance ID
+        {t("management.providers.instanceId")}
         <input
           value={instanceId}
           maxLength={128}
           pattern="[a-z0-9._-]*[a-z0-9]"
-          placeholder="primary"
+          placeholder={t("management.providers.instanceIdPlaceholder")}
           onChange={(event) => setInstanceId(event.currentTarget.value)}
         />
       </label>
@@ -467,7 +502,7 @@ function AddProviderForm({
         type="submit"
         disabled={!catalogId || instanceId.trim() === ""}
       >
-        Add instance
+        {t("management.providers.addInstance")}
       </button>
     </form>
   );
@@ -484,6 +519,7 @@ function AccountsEditor({
   onChange: (draft: ProviderCandidate) => void;
   onRemoveSecret: (secretRef: string) => void;
 }) {
+  const { t } = useTranslation();
   const instances = draft.providers.instances;
   const [providerId, setProviderId] = useState(instances[0]?.id ?? "");
   const [accountId, setAccountId] = useState("");
@@ -547,11 +583,8 @@ function AccountsEditor({
   return (
     <div className="accounts-editor">
       <div>
-        <h3>Provider accounts</h3>
-        <p>
-          Secret values are sent directly to WokCore and never returned to this
-          interface.
-        </p>
+        <h3>{t("management.providers.accountsTitle")}</h3>
+        <p>{t("management.providers.accountsDescription")}</p>
       </div>
       {draft.providers.accounts.length > 0 && (
         <ul className="account-list">
@@ -566,13 +599,17 @@ function AccountsEditor({
                 {secretRef && (
                   <label>
                     <span className="sr-only">
-                      Replacement secret for {account.id}
+                      {t("management.providers.replacementSecretAria", {
+                        id: account.id,
+                      })}
                     </span>
                     <input
                       type="password"
                       autoComplete="new-password"
                       value={replacement[account.id] ?? ""}
-                      placeholder="Replace secret"
+                      placeholder={t(
+                        "management.providers.replacementSecretPlaceholder",
+                      )}
                       onChange={(event) =>
                         setReplacement((current) => ({
                           ...current,
@@ -592,7 +629,7 @@ function AccountsEditor({
                     }
                     onClick={() => replace.mutate(account)}
                   >
-                    Replace
+                    {t("management.providers.replace")}
                   </button>
                 )}
                 <button
@@ -612,8 +649,8 @@ function AccountsEditor({
                       onRemoveSecret(secretRef);
                     }
                   }}
-                >
-                  Remove
+                  >
+                    {t("management.providers.remove")}
                 </button>
               </li>
             );
@@ -628,7 +665,7 @@ function AccountsEditor({
         }}
       >
         <label>
-          Instance
+          {t("management.providers.instance")}
           <select
             value={providerId}
             onChange={(event) => setProviderId(event.currentTarget.value)}
@@ -641,21 +678,22 @@ function AccountsEditor({
           </select>
         </label>
         <label>
-          Account ID
+          {t("management.providers.accountId")}
           <input
             value={accountId}
             maxLength={128}
             pattern="[a-z0-9._-]*[a-z0-9]"
-            placeholder="work"
+            placeholder={t("management.providers.accountIdPlaceholder")}
             onChange={(event) => setAccountId(event.currentTarget.value)}
           />
         </label>
         <label>
-          Secret
+          {t("management.providers.secretValue")}
           <input
             type="password"
             autoComplete="new-password"
             value={secret}
+            placeholder={t("management.providers.secretPlaceholder")}
             onChange={(event) => setSecret(event.currentTarget.value)}
           />
         </label>
@@ -666,13 +704,14 @@ function AccountsEditor({
             create.isPending || accountId.trim() === "" || secret === ""
           }
         >
-          {create.isPending ? "Storing…" : "Store account"}
+          {create.isPending
+            ? t("management.providers.storing")
+            : t("management.providers.storeAccount")}
         </button>
       </form>
       {(create.isError || replace.isError) && (
         <p className="inline-error">
-          The credential was not assumed to have changed. Check the account and
-          try again.
+          {t("management.providers.secretFailure")}
         </p>
       )}
     </div>
@@ -680,6 +719,8 @@ function AccountsEditor({
 }
 
 function SessionsPanel({ canReadMessages }: { canReadMessages: boolean }) {
+  const { i18n, t } = useTranslation();
+  const locale = i18n.resolvedLanguage as SupportedLocale;
   const [cursor, setCursor] = useState<string | undefined>();
   const [selected, setSelected] = useState<
     SessionList["items"][number] | null
@@ -701,12 +742,12 @@ function SessionsPanel({ canReadMessages }: { canReadMessages: boolean }) {
   });
 
   if (sessions.isPending) {
-    return <PanelLoading label="Loading indexed sessions" />;
+    return <PanelLoading label={t("management.sessions.loading")} />;
   }
   if (sessions.isError) {
     return (
       <PanelError
-        title="Sessions unavailable"
+        title={t("management.sessions.unavailable")}
         action={() => void sessions.refetch()}
       />
     );
@@ -717,15 +758,20 @@ function SessionsPanel({ canReadMessages }: { canReadMessages: boolean }) {
       <div className="session-list">
         <div className="subsection-heading">
           <div>
-            <h3>Indexed sessions</h3>
+            <h3>{t("management.sessions.indexed")}</h3>
             <p>{sessions.data.index_status.phase}</p>
           </div>
-          <span>{sessions.data.items.length} on this page</span>
+          <span>
+            {t("management.sessions.onThisPage", {
+              count: sessions.data.items.length,
+              formattedCount: formatNumber(sessions.data.items.length, locale),
+            })}
+          </span>
         </div>
         {sessions.data.items.length === 0 ? (
           <EmptyState
-            title="No sessions found"
-            detail="WokCore will surface local Codex, Claude, and Gemini sessions as their indexes become available."
+            title={t("management.sessions.emptyTitle")}
+            detail={t("management.sessions.emptyDetail")}
           />
         ) : (
           <ul>
@@ -741,13 +787,23 @@ function SessionsPanel({ canReadMessages }: { canReadMessages: boolean }) {
                   }}
                 >
                   <span>
-                    <strong>{session.title ?? "Untitled session"}</strong>
-                    <small>
-                      {session.source} · {session.message_count} messages
-                    </small>
-                  </span>
-                  <time dateTime={session.last_active_at}>
-                    {formatLocalTime(session.last_active_at)}
+                      <strong>
+                        {session.title ?? t("management.sessions.untitled")}
+                      </strong>
+                      <small>
+                        {session.source} ·
+                        {" "}
+                        {t("management.sessions.messageCount", {
+                          count: session.message_count,
+                          formattedCount: formatNumber(
+                            session.message_count,
+                            locale,
+                          ),
+                        })}
+                      </small>
+                    </span>
+                    <time dateTime={session.last_active_at}>
+                      {formatLocalTime(session.last_active_at, locale)}
                   </time>
                 </button>
               </li>
@@ -763,29 +819,29 @@ function SessionsPanel({ canReadMessages }: { canReadMessages: boolean }) {
               setSelected(null);
             }}
           >
-            Next page
+            {t("management.sessions.nextPage")}
           </button>
         )}
       </div>
       <div className="message-view">
         {!selected && (
           <EmptyState
-            title="Select a session"
-            detail="Message bodies stay unloaded until you choose a session."
+            title={t("management.sessions.selectTitle")}
+            detail={t("management.sessions.selectDetail")}
           />
         )}
         {selected && !canReadMessages && (
           <EmptyState
-            title="Message access unavailable"
-            detail="This WokCore build does not advertise session message access."
+            title={t("management.sessions.messageAccessTitle")}
+            detail={t("management.sessions.messageAccessDetail")}
           />
         )}
         {selected && canReadMessages && messages.isPending && (
-          <PanelLoading label="Loading session messages" />
+          <PanelLoading label={t("management.sessions.loadingMessages")} />
         )}
         {selected && canReadMessages && messages.isError && (
           <PanelError
-            title="Messages unavailable"
+            title={t("management.sessions.messagesUnavailable")}
             action={() => void messages.refetch()}
           />
         )}
@@ -793,7 +849,7 @@ function SessionsPanel({ canReadMessages }: { canReadMessages: boolean }) {
           <>
             <div className="subsection-heading">
               <div>
-                <h3>{selected.title ?? "Untitled session"}</h3>
+                <h3>{selected.title ?? t("management.sessions.untitled")}</h3>
                 <p>{selected.source}</p>
               </div>
             </div>
@@ -803,7 +859,7 @@ function SessionsPanel({ canReadMessages }: { canReadMessages: boolean }) {
                   <header>
                     <strong>{message.role}</strong>
                     <time dateTime={message.timestamp}>
-                      {formatLocalTime(message.timestamp)}
+                      {formatLocalTime(message.timestamp, locale)}
                     </time>
                   </header>
                   <pre>{message.content}</pre>
@@ -818,7 +874,7 @@ function SessionsPanel({ canReadMessages }: { canReadMessages: boolean }) {
                   setMessageCursor(messages.data.next_cursor ?? undefined)
                 }
               >
-                Load next messages
+                {t("management.sessions.loadNextMessages")}
               </button>
             )}
           </>
@@ -829,6 +885,8 @@ function SessionsPanel({ canReadMessages }: { canReadMessages: boolean }) {
 }
 
 function UsagePanel() {
+  const { i18n, t } = useTranslation();
+  const locale = i18n.resolvedLanguage as SupportedLocale;
   const [groupBy, setGroupBy] =
     useState<NonNullable<UsageQuery["group_by"]>>("day");
   const usage = useQuery({
@@ -837,12 +895,12 @@ function UsagePanel() {
   });
 
   if (usage.isPending) {
-    return <PanelLoading label="Loading usage totals" />;
+    return <PanelLoading label={t("management.usage.loading")} />;
   }
   if (usage.isError) {
     return (
       <PanelError
-        title="Usage unavailable"
+        title={t("management.usage.unavailable")}
         action={() => void usage.refetch()}
       />
     );
@@ -853,11 +911,11 @@ function UsagePanel() {
     <div className="management-stack">
       <div className="subsection-heading">
         <div>
-          <h3>Local usage</h3>
-          <p>Aggregated from indexed local sessions</p>
+          <h3>{t("management.usage.heading")}</h3>
+          <p>{t("management.usage.description")}</p>
         </div>
         <label className="inline-select">
-          Group by
+          {t("management.usage.groupBy")}
           <select
             value={groupBy}
             onChange={(event) =>
@@ -868,44 +926,64 @@ function UsagePanel() {
               )
             }
           >
-            <option value="day">Day</option>
-            <option value="source">Source</option>
-            <option value="model">Model</option>
+            <option value="day">{t("management.usage.groupDay")}</option>
+            <option value="source">{t("management.usage.groupSource")}</option>
+            <option value="model">{t("management.usage.groupModel")}</option>
           </select>
         </label>
       </div>
       <div className="usage-totals">
-        <Metric label="Input tokens" value={totals.input_tokens} />
-        <Metric label="Output tokens" value={totals.output_tokens} />
-        <Metric label="Cache read" value={totals.cache_read_tokens} />
-        <Metric label="Reasoning" value={totals.reasoning_tokens} />
-        <Metric label="Sessions" value={totals.session_count} />
+        <Metric
+          label={t("management.usage.inputTokens")}
+          value={totals.input_tokens}
+          locale={locale}
+        />
+        <Metric
+          label={t("management.usage.outputTokens")}
+          value={totals.output_tokens}
+          locale={locale}
+        />
+        <Metric
+          label={t("management.usage.cacheRead")}
+          value={totals.cache_read_tokens}
+          locale={locale}
+        />
+        <Metric
+          label={t("management.usage.reasoning")}
+          value={totals.reasoning_tokens}
+          locale={locale}
+        />
+        <Metric
+          label={t("management.usage.sessions")}
+          value={totals.session_count}
+          locale={locale}
+        />
       </div>
       {usage.data.buckets.length === 0 ? (
-        <EmptyState
-          title="No usage buckets"
-          detail="Totals will appear here after WokCore indexes local usage records."
+          <EmptyState
+            title={t("management.usage.emptyTitle")}
+            detail={t("management.usage.emptyDetail")}
         />
       ) : (
         <div className="table-scroll">
           <table className="data-table">
             <thead>
               <tr>
-                <th>Bucket</th>
-                <th>Input</th>
-                <th>Output</th>
-                <th>Cache</th>
-                <th>Sessions</th>
+                <th>{t("management.usage.bucket")}</th>
+                <th>{t("management.usage.input")}</th>
+                <th>{t("management.usage.output")}</th>
+                <th>{t("management.usage.cache")}</th>
+                <th>{t("management.usage.sessions")}</th>
               </tr>
             </thead>
             <tbody>
               {usage.data.buckets.map((bucket) => (
                 <tr key={bucket.key}>
                   <th>{bucket.key}</th>
-                  <td>{formatNumber(bucket.input_tokens)}</td>
-                  <td>{formatNumber(bucket.output_tokens)}</td>
-                  <td>{formatNumber(bucket.cache_read_tokens)}</td>
-                  <td>{formatNumber(bucket.session_count)}</td>
+                  <td>{formatNumber(bucket.input_tokens, locale)}</td>
+                  <td>{formatNumber(bucket.output_tokens, locale)}</td>
+                  <td>{formatNumber(bucket.cache_read_tokens, locale)}</td>
+                  <td>{formatNumber(bucket.session_count, locale)}</td>
                 </tr>
               ))}
             </tbody>
@@ -917,6 +995,8 @@ function UsagePanel() {
 }
 
 function DiagnosticsPanel({ canExport }: { canExport: boolean }) {
+  const { i18n, t } = useTranslation();
+  const locale = i18n.resolvedLanguage as SupportedLocale;
   const [cursor, setCursor] = useState<string | undefined>();
   const logs = useQuery({
     queryKey: ["diagnostic-logs", cursor],
@@ -932,12 +1012,12 @@ function DiagnosticsPanel({ canExport }: { canExport: boolean }) {
   });
 
   if (logs.isPending) {
-    return <PanelLoading label="Loading diagnostics" />;
+    return <PanelLoading label={t("management.diagnostics.loading")} />;
   }
   if (logs.isError) {
     return (
       <PanelError
-        title="Diagnostics unavailable"
+        title={t("management.diagnostics.unavailable")}
         action={() => void logs.refetch()}
       />
     );
@@ -947,11 +1027,17 @@ function DiagnosticsPanel({ canExport }: { canExport: boolean }) {
     <div className="management-stack">
       <div className="subsection-heading">
         <div>
-          <h3>Diagnostic events</h3>
+          <h3>{t("management.diagnostics.events")}</h3>
           <p>
             {logs.data.dropped_events === 0
-              ? "No dropped events reported"
-              : `${formatNumber(logs.data.dropped_events)} events were dropped`}
+              ? t("management.diagnostics.noDroppedEvents")
+              : t("management.diagnostics.droppedEvents", {
+                  count: logs.data.dropped_events,
+                  formattedCount: formatNumber(
+                    logs.data.dropped_events,
+                    locale,
+                  ),
+                })}
           </p>
         </div>
         {canExport && (
@@ -961,26 +1047,29 @@ function DiagnosticsPanel({ canExport }: { canExport: boolean }) {
             disabled={exportArchive.isPending}
             onClick={() => exportArchive.mutate()}
           >
-            {exportArchive.isPending ? "Exporting…" : "Export diagnostics"}
+            {exportArchive.isPending
+              ? t("management.diagnostics.exporting")
+              : t("management.diagnostics.export")}
           </button>
         )}
       </div>
       {exportArchive.data && (
         <p className="success-note" role="status">
-          Saved {exportArchive.data.file_name} (
-          {formatBytes(exportArchive.data.bytes)}).
+          {t("management.diagnostics.exported", {
+            fileName: exportArchive.data.file_name,
+            size: formatBytes(exportArchive.data.bytes, locale),
+          })}
         </p>
       )}
       {exportArchive.isError && (
         <p className="inline-error">
-          The diagnostic archive could not be saved. No destination was
-          reported as successful.
+          {t("management.diagnostics.exportFailed")}
         </p>
       )}
       {logs.data.items.length === 0 ? (
-        <EmptyState
-          title="No diagnostic events"
-          detail="Recent bounded diagnostic events will appear here when available."
+          <EmptyState
+            title={t("management.diagnostics.emptyTitle")}
+            detail={t("management.diagnostics.emptyDetail")}
         />
       ) : (
         <ol className="diagnostic-list">
@@ -997,7 +1086,7 @@ function DiagnosticsPanel({ canExport }: { canExport: boolean }) {
           type="button"
           onClick={() => setCursor(logs.data.next_cursor ?? undefined)}
         >
-          Next page
+          {t("management.diagnostics.nextPage")}
         </button>
       )}
     </div>
@@ -1015,14 +1104,14 @@ function PanelLoading({ label }: { label: string }) {
 }
 
 function PanelError({ title, action }: { title: string; action: () => void }) {
+  const { t } = useTranslation();
+
   return (
     <div className="panel-state">
       <h3>{title}</h3>
-      <p>
-        WokRouter did not assume any local state. Check WokCore and try again.
-      </p>
+      <p>{t("common.localStateRecovery")}</p>
       <button className="button button--secondary" type="button" onClick={action}>
-        Try again
+        {t("common.retry")}
       </button>
     </div>
   );
@@ -1037,11 +1126,19 @@ function EmptyState({ title, detail }: { title: string; detail: string }) {
   );
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
+function Metric({
+  label,
+  value,
+  locale,
+}: {
+  label: string;
+  value: number;
+  locale: SupportedLocale;
+}) {
   return (
     <div>
       <span>{label}</span>
-      <strong>{formatNumber(value)}</strong>
+      <strong>{formatNumber(value, locale)}</strong>
     </div>
   );
 }
@@ -1122,34 +1219,4 @@ function accountSecretRef(
     case "local":
       return null;
   }
-}
-
-function formatLocalTime(timestamp: string): string {
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.valueOf())) {
-    return timestamp;
-  }
-  return new Intl.DateTimeFormat(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    timeZoneName: "short",
-  }).format(date);
-}
-
-function formatNumber(value: number): string {
-  return new Intl.NumberFormat().format(value);
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KiB`;
-  }
-  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
 }

@@ -410,4 +410,187 @@ describe("ManagementPanel", () => {
     );
     expect(reloadProviders).not.toHaveBeenCalled();
   });
+
+  it("preserves the English management workspace and area labels", async () => {
+    renderPanel();
+
+    expect(
+      await screen.findByRole("heading", { name: "WokCore workspace" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Management")).toBeInTheDocument();
+    expect(screen.getByText("Live · loopback only")).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: "Providers" }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Sessions" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Usage" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: "Diagnostics" }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the Chinese sessions workspace and empty state", async () => {
+    await initializeI18n("zh-CN");
+    vi.mocked(getSessions).mockResolvedValue({
+      schema_version: 1,
+      items: [],
+      next_cursor: null,
+      index_status: { phase: "idle", sources: [] },
+    });
+    const user = userEvent.setup();
+
+    renderPanel();
+
+    expect(
+      await screen.findByRole("heading", { name: "WokCore 工作区" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "会话" }));
+    expect(screen.getByText("未找到会话")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "当索引可用时，WokCore 会显示本地 Codex、Claude 和 Gemini 会话。",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a safe localized provider failure without leaking a bridge error", async () => {
+    await initializeI18n("zh-CN");
+    vi.mocked(getProviderCatalog).mockRejectedValue(
+      new Error("bridge failure: C:\\private\\secret.txt"),
+    );
+
+    renderPanel();
+
+    expect(await screen.findByText("供应商数据不可用")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "WokRouter 未假定任何本地状态发生变化。请检查 WokCore 后重试。",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/bridge failure/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/secret\.txt/i)).not.toBeInTheDocument();
+  });
+
+  it("shows localized secret field labels and placeholders for provider account changes", async () => {
+    vi.mocked(getProviderRuntime).mockResolvedValue({
+      schema_version: 1,
+      revision: 4,
+      snapshot_revision: 4,
+      reload_status: "ready",
+      provider_count: 1,
+      models: [],
+      providers: {
+        instances: [
+          {
+            id: "primary",
+            catalog_id: "openai",
+            enabled: true,
+            endpoint: null,
+            allow_private_network: false,
+          },
+        ],
+        accounts: [
+          {
+            id: "work",
+            provider: "primary",
+            enabled: true,
+            auth: { kind: "api_key", secret: "secret-ref" },
+          },
+        ],
+      },
+      routing: { aliases: [], rules: [], default: null },
+    });
+
+    renderPanel();
+
+    expect(
+      await screen.findByPlaceholderText("Enter a secret"),
+    ).toHaveAccessibleName("Secret value");
+    expect(
+      screen.getByPlaceholderText("Enter a replacement secret"),
+    ).toHaveAccessibleName("Replacement secret for work");
+  });
+
+  it("shows a localized usage error state", async () => {
+    await initializeI18n("zh-CN");
+    vi.mocked(getUsage).mockRejectedValue(new Error("usage bridge failure"));
+    const user = userEvent.setup();
+
+    renderPanel();
+
+    await user.click(await screen.findByRole("tab", { name: "用量" }));
+    expect(await screen.findByText("用量不可用")).toBeInTheDocument();
+    expect(screen.queryByText(/usage bridge failure/i)).not.toBeInTheDocument();
+  });
+
+  it("shows a localized empty diagnostics state", async () => {
+    await initializeI18n("zh-CN");
+    vi.mocked(getDiagnosticLogs).mockResolvedValue({
+      schema_version: 1,
+      items: [],
+      next_cursor: null,
+      dropped_events: 0,
+    });
+    const user = userEvent.setup();
+
+    renderPanel();
+
+    await user.click(await screen.findByRole("tab", { name: "诊断" }));
+    expect(await screen.findByText("没有诊断事件")).toBeInTheDocument();
+    expect(
+      screen.getByText("可用时，最近的有界诊断事件会显示在这里。"),
+    ).toBeInTheDocument();
+  });
+
+  it("exports diagnostics with localized live status while preserving archive data", async () => {
+    await initializeI18n("zh-CN");
+    const user = userEvent.setup();
+
+    renderPanel();
+
+    await user.click(await screen.findByRole("tab", { name: "诊断" }));
+    await user.click(screen.getByRole("button", { name: "导出诊断信息" }));
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "已保存 wokcore-diagnostics-synthetic.zip（1.0 KiB）。",
+    );
+  });
+
+  it("updates mounted provider labels and live status without clearing the provider form", async () => {
+    const user = userEvent.setup();
+
+    renderPanel();
+
+    const instanceId = await screen.findByRole("textbox", {
+      name: "Instance ID",
+    });
+    await user.type(instanceId, "secondary");
+    await initializeI18n("zh-CN");
+
+    expect(
+      await screen.findByRole("tab", { name: "供应商", selected: true }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("实时 · 仅限环回")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "实例 ID" })).toHaveValue(
+      "secondary",
+    );
+  });
+
+  it("updates mounted session labels without clearing the selected session", async () => {
+    const user = userEvent.setup();
+
+    renderPanel();
+
+    await user.click(await screen.findByRole("tab", { name: "Sessions" }));
+    await user.click(screen.getByRole("button", { name: /Synthetic session/ }));
+    expect(await screen.findByText("Synthetic response")).toBeInTheDocument();
+
+    await initializeI18n("zh-CN");
+
+    expect(
+      await screen.findByRole("tab", { name: "会话", selected: true }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Synthetic response")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Synthetic session" }))
+      .toBeInTheDocument();
+  });
 });
