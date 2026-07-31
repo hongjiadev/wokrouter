@@ -121,6 +121,37 @@ function renderLifecycle(
   };
 }
 
+function queryClientWithCoreRefreshFailure(
+  failure: "reject" | "throw",
+) {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  const originalInvalidate =
+    queryClient.invalidateQueries.bind(queryClient);
+  const invalidateQueries = vi
+    .spyOn(queryClient, "invalidateQueries")
+    .mockImplementation((filters, options) => {
+      if (filters?.queryKey?.[0] === "core-status") {
+        if (failure === "throw") {
+          throw new Error(
+            "core refresh threw at C:\\private\\status.json",
+          );
+        }
+        return Promise.reject(
+          new Error(
+            "core refresh rejected at C:\\private\\status.json",
+          ),
+        );
+      }
+      return originalInvalidate(filters, options);
+    });
+  return { invalidateQueries, queryClient };
+}
+
 beforeEach(() => {
   operationListener = undefined;
   unlisten.mockReset();
@@ -562,6 +593,172 @@ it("settles a rejected query refresh and still restores normal content once", as
   await act(async () => {
     await Promise.resolve();
   });
+  expect(invalidateQueries).toHaveBeenCalledTimes(7);
+});
+
+it.each(["reject", "throw"] as const)(
+  "falls back to status refetch when core-status invalidation %ss",
+  async (failure) => {
+    vi.mocked(getCoreStatus)
+      .mockResolvedValueOnce(missingStatus)
+      .mockResolvedValue(runningStatus);
+    vi.mocked(getCoreOperation).mockResolvedValue(null);
+    vi.mocked(installAndStartCore).mockResolvedValue(
+      checkingOperation,
+    );
+    const { invalidateQueries, queryClient } =
+      queryClientWithCoreRefreshFailure(failure);
+
+    renderLifecycle(queryClient);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Checking for a WokCore release",
+      }),
+    ).toBeInTheDocument();
+    operationListener?.(completedOperation);
+
+    expect(
+      await screen.findByText("WokCore running"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("WokCore workspace")).toBeInTheDocument();
+    expect(invalidateQueries).toHaveBeenCalledTimes(7);
+    expect(
+      vi.mocked(getCoreStatus).mock.calls.length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(installAndStartCore).toHaveBeenCalledTimes(1);
+    const statusCalls = vi.mocked(getCoreStatus).mock.calls.length;
+
+    operationListener?.(completedOperation);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(invalidateQueries).toHaveBeenCalledTimes(7);
+    expect(getCoreStatus).toHaveBeenCalledTimes(statusCalls);
+  },
+);
+
+it("falls back when fulfilled invalidation leaves core status in error with missing data", async () => {
+  vi.mocked(getCoreStatus)
+    .mockResolvedValueOnce(missingStatus)
+    .mockRejectedValueOnce(
+      new Error("refetch failed at C:\\private\\status.json"),
+    )
+    .mockResolvedValue(runningStatus);
+  vi.mocked(getCoreOperation).mockResolvedValue(null);
+  vi.mocked(installAndStartCore).mockResolvedValue(checkingOperation);
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  const invalidateQueries = vi.spyOn(
+    queryClient,
+    "invalidateQueries",
+  );
+
+  renderLifecycle(queryClient);
+
+  expect(
+    await screen.findByRole("heading", {
+      name: "Checking for a WokCore release",
+    }),
+  ).toBeInTheDocument();
+  operationListener?.(completedOperation);
+
+  expect(await screen.findByText("WokCore running")).toBeInTheDocument();
+  expect(screen.getByText("WokCore workspace")).toBeInTheDocument();
+  expect(invalidateQueries).toHaveBeenCalledTimes(7);
+  expect(
+    vi.mocked(getCoreStatus).mock.calls.length,
+  ).toBeGreaterThanOrEqual(3);
+  expect(
+    screen.queryByText(/private|status\.json/i),
+  ).not.toBeInTheDocument();
+});
+
+it("does not refetch status again when invalidation already cached running", async () => {
+  vi.mocked(getCoreStatus)
+    .mockResolvedValueOnce(missingStatus)
+    .mockResolvedValue(runningStatus);
+  vi.mocked(getCoreOperation).mockResolvedValue(null);
+  vi.mocked(installAndStartCore).mockResolvedValue(checkingOperation);
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+      mutations: { retry: false },
+    },
+  });
+
+  renderLifecycle(queryClient);
+
+  expect(
+    await screen.findByRole("heading", {
+      name: "Checking for a WokCore release",
+    }),
+  ).toBeInTheDocument();
+  operationListener?.(completedOperation);
+
+  expect(await screen.findByText("WokCore running")).toBeInTheDocument();
+  expect(getCoreStatus).toHaveBeenCalledTimes(2);
+});
+
+it("shows status-only recovery when core refresh and fallback both fail", async () => {
+  vi.mocked(getCoreStatus)
+    .mockResolvedValueOnce(missingStatus)
+    .mockRejectedValueOnce(
+      new Error("status failed at C:\\private\\token.json"),
+    )
+    .mockResolvedValue(runningStatus);
+  vi.mocked(getCoreOperation).mockResolvedValue(null);
+  vi.mocked(installAndStartCore).mockResolvedValue(checkingOperation);
+  const { invalidateQueries, queryClient } =
+    queryClientWithCoreRefreshFailure("reject");
+  const user = userEvent.setup();
+
+  renderLifecycle(queryClient);
+
+  expect(
+    await screen.findByRole("heading", {
+      name: "Checking for a WokCore release",
+    }),
+  ).toBeInTheDocument();
+  operationListener?.(completedOperation);
+
+  expect(
+    await screen.findByRole("heading", {
+      name: "WokCore setup completed, but status is unavailable",
+    }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByText(/private|token\.json/i),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("heading", {
+      name: "Checking existing WokCore setup",
+    }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByText("WokCore workspace")).not.toBeInTheDocument();
+  expect(invalidateQueries).toHaveBeenCalledTimes(7);
+  expect(getCoreStatus).toHaveBeenCalledTimes(2);
+  const listenerCalls = vi.mocked(listenForCoreOperation).mock.calls.length;
+  const installCalls = vi.mocked(installAndStartCore).mock.calls.length;
+  const operationStatusCalls =
+    vi.mocked(getCoreOperation).mock.calls.length;
+
+  await user.click(
+    screen.getByRole("button", { name: "Check status again" }),
+  );
+
+  expect(await screen.findByText("WokCore running")).toBeInTheDocument();
+  expect(screen.getByText("WokCore workspace")).toBeInTheDocument();
+  expect(
+    vi.mocked(getCoreStatus).mock.calls.length,
+  ).toBeGreaterThanOrEqual(3);
+  expect(listenForCoreOperation).toHaveBeenCalledTimes(listenerCalls);
+  expect(installAndStartCore).toHaveBeenCalledTimes(installCalls);
+  expect(getCoreOperation).toHaveBeenCalledTimes(operationStatusCalls);
   expect(invalidateQueries).toHaveBeenCalledTimes(7);
 });
 

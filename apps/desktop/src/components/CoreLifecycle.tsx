@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   coreStatusQueryKey,
   getCoreStatus,
+  type CoreStatus,
 } from "../control";
 import {
   getCoreOperation,
@@ -16,7 +17,7 @@ import { CoreHealth } from "./CoreHealth";
 import { CoreOperationPanel } from "./CoreOperationPanel";
 import { ManagementPanel } from "./ManagementPanel";
 
-type SetupFailure = "bridge" | "install";
+type SetupFailure = "bridge" | "install" | "status";
 
 const lifecycleQueryKeys = [
   coreStatusQueryKey,
@@ -93,15 +94,40 @@ export function CoreLifecycle() {
       return;
     }
     processedSuccesses.current.remember(terminalKey);
-    void Promise.allSettled(
-      lifecycleQueryKeys.map((queryKey) =>
-        Promise.resolve().then(() =>
-          queryClient.invalidateQueries({ queryKey }),
+    void (async () => {
+      const refreshes = await Promise.allSettled(
+        lifecycleQueryKeys.map((queryKey) =>
+          Promise.resolve().then(() =>
+            queryClient.invalidateQueries({ queryKey }),
+          ),
         ),
-      ),
-    ).then(() => {
+      );
       if (!mounted.current) {
         return;
+      }
+      const cachedStatus =
+        queryClient.getQueryData<CoreStatus>(coreStatusQueryKey);
+      const coreQueryState =
+        queryClient.getQueryState<CoreStatus>(coreStatusQueryKey);
+      const coreNeedsRecovery =
+        refreshes[0]?.status === "rejected" ||
+        cachedStatus === undefined ||
+        cachedStatus.state === "missing" ||
+        coreQueryState?.status === "error";
+      if (coreNeedsRecovery) {
+        let recovered = false;
+        try {
+          const result = await status.refetch();
+          recovered =
+            result.data !== undefined &&
+            result.data.state !== "missing";
+        } catch {
+          recovered = false;
+        }
+        if (!mounted.current) {
+          return;
+        }
+        setSetupFailure(recovered ? undefined : "status");
       }
       setOperation((current) =>
         current?.operationId === operation.operationId &&
@@ -109,8 +135,8 @@ export function CoreLifecycle() {
           ? undefined
           : current,
       );
-    });
-  }, [operation, queryClient]);
+    })();
+  }, [operation, queryClient, status.refetch]);
 
   useEffect(() => {
     let active = true;
@@ -224,14 +250,47 @@ export function CoreLifecycle() {
     })();
   }, [acceptOperation]);
 
+  const retryStatus = useCallback(() => {
+    if (retryPending.current) {
+      return;
+    }
+    retryPending.current = true;
+    void (async () => {
+      try {
+        const result = await status.refetch();
+        if (!mounted.current) {
+          return;
+        }
+        if (
+          result.data !== undefined &&
+          result.data.state !== "missing"
+        ) {
+          setSetupFailure(undefined);
+        } else {
+          setSetupFailure("status");
+        }
+      } catch {
+        if (mounted.current) {
+          setSetupFailure("status");
+        }
+      } finally {
+        retryPending.current = false;
+      }
+    })();
+  }, [status.refetch]);
+
   const retrySetup = useCallback(() => {
     if (setupFailure === "bridge") {
       setSetupFailure(undefined);
       setBridgeAttempt((attempt) => attempt + 1);
       return;
     }
+    if (setupFailure === "status") {
+      retryStatus();
+      return;
+    }
     retryInstall();
-  }, [retryInstall, setupFailure]);
+  }, [retryInstall, retryStatus, setupFailure]);
 
   if (waitsForAnotherProcess) {
     return (
@@ -264,6 +323,45 @@ export function CoreLifecycle() {
   ) {
     return (
       <CoreOperationPanel operation={operation} onRetry={retryInstall} />
+    );
+  }
+
+  if (
+    status.data?.runtime_channel === "production" &&
+    status.data.state === "missing" &&
+    setupFailure === "status"
+  ) {
+    return (
+      <section
+        className="health-panel"
+        aria-labelledby="core-status-recovery-heading"
+      >
+        <p className="section-label">WokCore setup</p>
+        <div className="status-line status-line--error">
+          <span className="status-mark" aria-hidden="true">
+            !
+          </span>
+          <h1 id="core-status-recovery-heading">
+            WokCore setup completed, but status is unavailable
+          </h1>
+        </div>
+        <p className="health-summary">
+          WokRouter could not confirm the new WokCore status. Check the
+          trusted status again without repeating installation.
+        </p>
+        <div className="recovery">
+          <button
+            className="button button--primary"
+            type="button"
+            onClick={retrySetup}
+          >
+            Check status again
+          </button>
+          <p className="action-note">
+            Closing this window never cancels a WokCore operation.
+          </p>
+        </div>
+      </section>
     );
   }
 
