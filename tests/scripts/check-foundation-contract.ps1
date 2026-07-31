@@ -23,6 +23,11 @@ $desktopLibPath = Join-Path $rootPath "apps/desktop/src-tauri/src/lib.rs"
 $frontendControlPath = Join-Path $rootPath "apps/desktop/src/control.ts"
 $coreUpdateEligibilityPath = Join-Path $rootPath "apps/desktop/src/coreUpdateEligibility.ts"
 $coreLifecyclePath = Join-Path $rootPath "apps/desktop/src/components/CoreLifecycle.tsx"
+$coreLifecycleTestsPath = Join-Path $rootPath "apps/desktop/src/components/CoreLifecycle.test.tsx"
+$localeTestsPath = Join-Path $rootPath "apps/desktop/src/locale.test.ts"
+$coreOperationParserPath = Join-Path $rootPath "apps/desktop/src-tauri/src/core_operation/parser.rs"
+$wokcoreInstallTestsPath = Join-Path $rootPath "crates/wokrouter-platform/tests/wokcore_install.rs"
+$cliStartTestsPath = Join-Path $rootPath "apps/cli/src/commands/start/tests.rs"
 $failures = [System.Collections.Generic.List[string]]::new()
 
 function Add-ContractFailure {
@@ -1370,6 +1375,11 @@ $desktopLib = Get-Content -LiteralPath $desktopLibPath -Raw -Encoding UTF8
 $frontendControl = Get-Content -LiteralPath $frontendControlPath -Raw -Encoding UTF8
 $coreUpdateEligibility = Get-Content -LiteralPath $coreUpdateEligibilityPath -Raw -Encoding UTF8
 $coreLifecycle = Get-Content -LiteralPath $coreLifecyclePath -Raw -Encoding UTF8
+$coreLifecycleTests = Get-Content -LiteralPath $coreLifecycleTestsPath -Raw -Encoding UTF8
+$localeTests = Get-Content -LiteralPath $localeTestsPath -Raw -Encoding UTF8
+$coreOperationParser = Get-Content -LiteralPath $coreOperationParserPath -Raw -Encoding UTF8
+$wokcoreInstallTests = Get-Content -LiteralPath $wokcoreInstallTestsPath -Raw -Encoding UTF8
+$cliStartTests = Get-Content -LiteralPath $cliStartTestsPath -Raw -Encoding UTF8
 $jobs = Get-WorkflowJobs -Lines $workflowLines
 
 $requiredJobs = @(
@@ -1758,6 +1768,116 @@ if ($development -notmatch "cargo deny --version") {
         -Message "Development docs must require cargo-deny version verification."
 }
 
+$lifecycleEvidenceFragments = @(
+    "## WokCore lifecycle acceptance evidence",
+    "does not currently provide a command that drives a live signed",
+    "pnpm.cmd --dir apps/desktop exec vitest run src/components/CoreLifecycle.test.tsx",
+    "tests/scripts/run-fixed-test-host.ps1",
+    "1. **Missing to running without a click.**",
+    "missing_production_runtime_installs_starts_authorizes_and_reports_structured_progress",
+    "signed_release_reports_monotonic_download_and_authoritative_install_phases",
+    "2. **Signed update cancel and confirm.**",
+    "accessible confirmation and invokes the expected version once",
+    "system_runner_uses_only_the_three_fixed_child_commands",
+    "3. **Active requests remain.**",
+    "returns management after",
+    "versions_bytes_and_active_requests_are_strictly_validated",
+    "4. **Verification failure and rollback.**",
+    "artifact_hash_mismatch_leaves_no_install_or_record",
+    "invalid_manifest_signature_is_rejected_before_artifact_download",
+    "5. **Close and reopen during an operation.**",
+    "duplicate_installs_coalesce_conflicts_fail_and_terminal_allows_retry",
+    "subscribes before recovering a running snapshot and",
+    "6. **IDE Development performs zero update work.**",
+    "development_suppresses_every_install_and_update_path_before_authority_or_runner",
+    "a_selected_development_session_never_switches_to_production",
+    "7. **Chinese and English UI.**",
+    "pnpm.cmd --dir apps/desktop exec vitest run src/locale.test.ts",
+    "pwsh tests/scripts/check-foundation-contract.tests.ps1"
+)
+$lifecycleEvidenceComplete = $true
+foreach ($lifecycleEvidenceFragment in $lifecycleEvidenceFragments) {
+    if (-not $development.Contains($lifecycleEvidenceFragment)) {
+        $lifecycleEvidenceComplete = $false
+        break
+    }
+}
+if (-not $lifecycleEvidenceComplete) {
+    Add-ContractFailure `
+        -Message "Development docs must retain reproducible lifecycle acceptance evidence for all seven paths and disclose missing live GUI harnesses."
+}
+$lifecycleAcceptanceFixtures = @(
+    @{
+        Source = $coreLifecycleTests
+        Names = @(
+            "starts one production install in StrictMode and restores normal content after success",
+            "requires an accessible confirmation and invokes the expected version once",
+            "returns management after active requests defer the update and reconfirms retry",
+            "subscribes before recovering a running snapshot and unmounts only the listener",
+            "treats install_in_progress as another process and polls trusted status without retrying",
+            "never checks or installs updates for a development %s runtime",
+            "never starts production installation for a development %s status"
+        )
+    },
+    @{
+        Source = $coreOperation
+        Names = @(
+            "system_runner_uses_only_the_three_fixed_child_commands",
+            "duplicate_installs_coalesce_conflicts_fail_and_terminal_allows_retry",
+            "development_suppresses_every_install_and_update_path_before_authority_or_runner"
+        )
+    },
+    @{
+        Source = $coreOperationParser
+        Names = @(
+            "versions_bytes_and_active_requests_are_strictly_validated",
+            "update_active_requests_are_valid_during_rolling_back"
+        )
+    },
+    @{
+        Source = $wokcoreInstallTests
+        Names = @(
+            "signed_release_reports_monotonic_download_and_authoritative_install_phases",
+            "artifact_hash_mismatch_leaves_no_install_or_record",
+            "invalid_manifest_signature_is_rejected_before_artifact_download"
+        )
+    },
+    @{
+        Source = $cliStartTests
+        Names = @(
+            "missing_production_runtime_installs_starts_authorizes_and_reports_structured_progress"
+        )
+    },
+    @{
+        Source = $runtimeSelectorTests
+        Names = @(
+            "a_selected_development_session_never_switches_to_production"
+        )
+    },
+    @{
+        Source = $localeTests
+        Names = @(
+            "keeps zh-CN left-to-right"
+        )
+    }
+)
+$lifecycleAcceptanceFixturesExist = $true
+foreach ($fixtureGroup in $lifecycleAcceptanceFixtures) {
+    foreach ($fixtureName in $fixtureGroup.Names) {
+        if (-not $fixtureGroup.Source.Contains($fixtureName)) {
+            $lifecycleAcceptanceFixturesExist = $false
+            break
+        }
+    }
+    if (-not $lifecycleAcceptanceFixturesExist) {
+        break
+    }
+}
+if (-not $lifecycleAcceptanceFixturesExist) {
+    Add-ContractFailure `
+        -Message "Every documented lifecycle acceptance fixture must remain present in an executable test source."
+}
+
 $expectedWokCorePublicKey = @"
 untrusted comment: minisign public key 7EF262CD8E9FE136
 RWQ24Z+OzWLyfjz0X7JFepiizNYEsUBt/cJisQWQ9o9EAK8TURVs9hts
@@ -1774,32 +1894,69 @@ $secretHeaderPattern = (
     '(?im)^[ \t]*untrusted comment:[ \t]*' +
     'minisign[ \t]+(?:encrypted[ \t]+)?secret[ \t]+key\b'
 )
+$generatedDirectoryNames = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase
+)
+foreach (
+    $generatedDirectoryName in @(
+        ".git",
+        ".next",
+        "build",
+        "coverage",
+        "dist",
+        "gen",
+        "node_modules",
+        "target"
+    )
+) {
+    $null = $generatedDirectoryNames.Add($generatedDirectoryName)
+}
 $secretHeaderFound = $false
 foreach ($sourceRootName in @("apps", "crates")) {
     $sourceRoot = Join-Path $rootPath $sourceRootName
     if (-not (Test-Path -LiteralPath $sourceRoot)) {
         continue
     }
-    foreach (
-        $sourceFile in Get-ChildItem -LiteralPath $sourceRoot -Recurse -File |
-            Where-Object {
-                $_.Extension -in @(
-                    ".json",
-                    ".md",
-                    ".pub",
-                    ".rs",
-                    ".toml",
-                    ".ts",
-                    ".tsx",
-                    ".yaml",
-                    ".yml"
-                )
+    $sourceRootPrefix = $sourceRoot.TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    ) + [System.IO.Path]::DirectorySeparatorChar
+    foreach ($sourceFile in Get-ChildItem -LiteralPath $sourceRoot -Recurse -File -Force) {
+        $relativePath = $sourceFile.FullName.Substring($sourceRootPrefix.Length)
+        $relativeSegments = @($relativePath -split '[\\/]')
+        $generated = $false
+        for (
+            $segmentIndex = 0;
+            $segmentIndex -lt $relativeSegments.Count - 1;
+            $segmentIndex += 1
+        ) {
+            if ($generatedDirectoryNames.Contains($relativeSegments[$segmentIndex])) {
+                $generated = $true
+                break
             }
-    ) {
-        $sourceText = Get-Content `
-            -LiteralPath $sourceFile.FullName `
-            -Raw `
-            -Encoding UTF8
+        }
+        if ($generated) {
+            continue
+        }
+
+        $buffer = New-Object byte[] (64 * 1024)
+        $stream = [System.IO.File]::Open(
+            $sourceFile.FullName,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::ReadWrite
+        )
+        try {
+            $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
+        }
+        finally {
+            $stream.Dispose()
+        }
+        $sourceText = [System.Text.Encoding]::UTF8.GetString(
+            $buffer,
+            0,
+            $bytesRead
+        ).TrimStart([char]0xFEFF)
         if ($sourceText -match $secretHeaderPattern) {
             $secretHeaderFound = $true
             break
@@ -1849,6 +2006,55 @@ if (
         -Message "Core operation structured WokCore update-install arguments must remain exactly update --install --json --progress-jsonl."
 }
 
+$systemOperationRunner = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^impl[ \t]+OperationRunner[ \t]+for[ \t]+SystemOperationRunner[ \t]*' `
+    -Description "System operation runner implementation" `
+    -TopLevel `
+    -CodeView $coreOperationCodeView
+$systemOperationRun = if ($null -ne $systemOperationRunner) {
+    Get-UniqueBracedItem `
+        -Source $systemOperationRunner.Body `
+        -SignaturePattern '(?m)^[ \t]*fn[ \t]+run[ \t]*\(' `
+        -Description "System operation runner run method" `
+        -TopLevel
+}
+else {
+    $null
+}
+$systemOperationRequestMatch = if ($null -ne $systemOperationRun) {
+    Get-UniqueBracedItem `
+        -Source $systemOperationRun.Body `
+        -SignaturePattern '(?m)^[ \t]*let[ \t]+\([ \t]*operation[ \t]*,[ \t]*spec[ \t]*\)[ \t]*=[ \t]*match[ \t]+request[ \t]*' `
+        -Description "System operation runner request dispatch"
+}
+else {
+    $null
+}
+if ($null -ne $systemOperationRequestMatch) {
+    $systemOperationRequestCode = (
+        Get-RustCodeView `
+            -Source $systemOperationRequestMatch.Body `
+            -Description "System operation runner request dispatch body"
+    ).Code
+    $systemInstallWiring = [regex]::Matches(
+        $systemOperationRequestCode,
+        '(?ms)OperationRequest::Install[ \t\r\n]*=>[ \t\r\n]*\([ \t\r\n]*CoreOperationKind::Install[ \t]*,[ \t\r\n]*CommandSpec::install\([ \t\r\n]*bundled_wokrouter_executable\(\)\?[ \t\r\n]*\)[ \t]*,[ \t\r\n]*\)[ \t]*,'
+    )
+    if ($systemInstallWiring.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "System operation runner install wiring must dispatch Install through CommandSpec::install."
+    }
+    $systemUpdateWiring = [regex]::Matches(
+        $systemOperationRequestCode,
+        '(?ms)OperationRequest::Update[ \t\r\n]*\{[ \t\r\n]*executable[ \t\r\n]*\}[ \t\r\n]*=>[ \t\r\n]*\([ \t\r\n]*CoreOperationKind::Update[ \t]*,[ \t\r\n]*CommandSpec::update_install\([ \t\r\n]*executable[ \t\r\n]*\)[ \t]*,[ \t\r\n]*\)[ \t]*,'
+    )
+    if ($systemUpdateWiring.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "System operation runner update wiring must dispatch Update through CommandSpec::update_install."
+    }
+}
+
 $spawnChild = Get-UniqueBracedItem `
     -Source $coreOperation `
     -SignaturePattern '(?m)^fn[ \t]+spawn_child[ \t]*\(' `
@@ -1856,13 +2062,10 @@ $spawnChild = Get-UniqueBracedItem `
     -TopLevel `
     -CodeView $coreOperationCodeView
 if ($null -ne $spawnChild) {
-    if (
-        $spawnChild.CodeBody -notmatch
-        '(?m)^[ \t]*#\[cfg\(windows\)\][ \t]*\r?\n[ \t]*command\.creation_flags\(policy\.creation_flags\)[ \t]*;'
-    ) {
-        Add-ContractFailure `
-            -Message "Core operation child spawn must apply CREATE_NO_WINDOW through the Windows policy."
-    }
+    $null = Get-UniqueDirectStatementIndex `
+        -Source $spawnChild.Body `
+        -Pattern '(?m)^[ \t]*#\[cfg\(windows\)\][ \t]*\r?\n[ \t]*command\.creation_flags\(policy\.creation_flags\)[ \t]*;' `
+        -Description "Core operation child spawn must directly apply CREATE_NO_WINDOW through the Windows policy"
     if (
         $spawnChild.CodeBody -notmatch
         '\.kill_on_drop\([ \t\r\n]*policy\.kill_on_drop[ \t\r\n]*\)'
@@ -1940,6 +2143,56 @@ if (
         -Message "Desktop operation sink must emit exactly one core-operation-progress event."
 }
 
+$installAndStartCoreFor = Get-UniqueBracedItem `
+    -Source $desktopLib `
+    -SignaturePattern '(?m)^async[ \t]+fn[ \t]+install_and_start_core_for[ \t]*\(' `
+    -Description "Desktop install command event wiring" `
+    -TopLevel `
+    -CodeView $desktopLibCodeView
+$installAndStartCoreForBody = if ($null -ne $installAndStartCoreFor) {
+    (
+        Get-RustCodeView `
+            -Source $installAndStartCoreFor.Body `
+            -Description "Desktop install command event wiring body"
+    ).CommentStripped -replace '\s', ''
+}
+else {
+    ""
+}
+if (
+    $null -ne $installAndStartCoreFor -and
+    $installAndStartCoreForBody -cne
+    'state.core_operations.install_and_start(Arc::new(TauriOperationEventSink{app})).await.map_err(|error|error.to_string())'
+) {
+    Add-ContractFailure `
+        -Message "Desktop install command Tauri operation event sink wiring must pass TauriOperationEventSink { app }."
+}
+
+$installCoreUpdateFor = Get-UniqueBracedItem `
+    -Source $desktopLib `
+    -SignaturePattern '(?m)^async[ \t]+fn[ \t]+install_core_update_for[ \t]*\(' `
+    -Description "Desktop update command event wiring" `
+    -TopLevel `
+    -CodeView $desktopLibCodeView
+$installCoreUpdateForBody = if ($null -ne $installCoreUpdateFor) {
+    (
+        Get-RustCodeView `
+            -Source $installCoreUpdateFor.Body `
+            -Description "Desktop update command event wiring body"
+    ).CommentStripped -replace '\s', ''
+}
+else {
+    ""
+}
+if (
+    $null -ne $installCoreUpdateFor -and
+    $installCoreUpdateForBody -cne
+    'state.core_operations.install_update(&expected_version,Arc::new(TauriOperationEventSink{app})).await.map_err(|error|error.to_string())'
+) {
+    Add-ContractFailure `
+        -Message "Desktop update command Tauri operation event sink wiring must pass TauriOperationEventSink { app }."
+}
+
 $coreOperationError = Get-UniqueBracedItem `
     -Source $coreOperation `
     -SignaturePattern '(?m)^pub\(crate\)[ \t]+enum[ \t]+CoreOperationError[ \t]*' `
@@ -1989,6 +2242,44 @@ if (
     Add-ContractFailure `
         -Message "Backend development update gate must reject Development before trusted executable reuse or discovery."
 }
+if ($null -ne $trustedProductionExecutable) {
+    $trustedDevelopmentGate = Get-UniqueBracedItem `
+        -Source $trustedProductionExecutable.Body `
+        -SignaturePattern '(?m)^[ \t]*if[ \t]+runtime\.channel\(\)[ \t]*==[ \t]*WokCoreRuntimeChannel::Development[ \t]*' `
+        -Description "Backend development update gate" `
+        -DirectStatement
+    $trustedExecutableReuse = Get-UniqueBracedItem `
+        -Source $trustedProductionExecutable.Body `
+        -SignaturePattern '(?m)^[ \t]*if[ \t]+let[ \t]+Some\(executable\)[ \t]*=[ \t]*runtime\.executable\(\)[ \t]*' `
+        -Description "Backend trusted executable reuse" `
+        -DirectStatement
+    $trustedAuthorityDiscoveryIndex = Get-UniqueDirectStatementIndex `
+        -Source $trustedProductionExecutable.Body `
+        -Pattern '(?m)^[ \t]*self\.authority[ \t\r\n]*\.[ \t\r\n]*discover\(\)\?' `
+        -Description "Backend trusted authority discovery"
+    if ($null -ne $trustedDevelopmentGate) {
+        $null = Get-UniqueDirectStatementIndex `
+            -Source $trustedDevelopmentGate.Body `
+            -Pattern '(?m)^[ \t]*return[ \t]+Err\(CoreOperationError::DevelopmentRuntimeManagedByIde\)[ \t]*;' `
+            -Description "Backend development update gate return"
+    }
+    if (
+        $null -ne $trustedDevelopmentGate -and
+        $null -ne $trustedExecutableReuse -and
+        (
+            $trustedDevelopmentGate.ClosingBraceIndex -ge
+            $trustedExecutableReuse.SignatureIndex -or
+            (
+                $trustedAuthorityDiscoveryIndex -ge 0 -and
+                $trustedDevelopmentGate.ClosingBraceIndex -ge
+                $trustedAuthorityDiscoveryIndex
+            )
+        )
+    ) {
+        Add-ContractFailure `
+            -Message "Backend development update gate must dominate executable reuse and trusted discovery."
+    }
+}
 
 $checkUpdate = Get-UniqueBracedItem `
     -Source $coreOperation `
@@ -1996,6 +2287,17 @@ $checkUpdate = Get-UniqueBracedItem `
     -Description "Core operation update check" `
     -CodeView $coreOperationCodeView
 if ($null -ne $checkUpdate) {
+    $checkUpdateConflict = Get-UniqueBracedItem `
+        -Source $checkUpdate.Body `
+        -SignaturePattern '(?m)^[ \t]*if[ \t]+self\.state\.lock\(\)\.await\.active\.is_some\(\)[ \t]*' `
+        -Description "check_update active-operation conflict branch" `
+        -DirectStatement
+    if ($null -ne $checkUpdateConflict) {
+        $null = Get-UniqueDirectStatementIndex `
+            -Source $checkUpdateConflict.Body `
+            -Pattern '(?m)^[ \t]*return[ \t]+Err\(CoreOperationError::OperationInProgress\)[ \t]*;' `
+            -Description "check_update operation_in_progress return"
+    }
     $null = Get-UniqueDirectStatementIndex `
         -Source $checkUpdate.Body `
         -Pattern '(?m)^[ \t]*let[ \t]+executable[ \t]*=[ \t]*self\.trusted_production_executable\(\)\.await\?[ \t]*;' `
@@ -2023,6 +2325,35 @@ if ($null -ne $installUpdate) {
     ) {
         Add-ContractFailure `
             -Message "install_update must reject Development before validation or child work."
+    }
+    $installUpdateConflict = Get-UniqueBracedItem `
+        -Source $installUpdate.Body `
+        -SignaturePattern '(?m)^[ \t]*if[ \t]+self\.state\.lock\(\)\.await\.active\.is_some\(\)[ \t]*' `
+        -Description "install_update active-operation conflict branch" `
+        -DirectStatement
+    if ($null -ne $installUpdateConflict) {
+        $null = Get-UniqueDirectStatementIndex `
+            -Source $installUpdateConflict.Body `
+            -Pattern '(?m)^[ \t]*return[ \t]+Err\(CoreOperationError::OperationInProgress\)[ \t]*;' `
+            -Description "install_update operation_in_progress return"
+    }
+}
+
+$startOperation = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+start_operation[ \t]*\(' `
+    -Description "Core operation start arbitration" `
+    -CodeView $coreOperationCodeView
+if ($null -ne $startOperation) {
+    $startOperationConflict = Get-UniqueBracedItem `
+        -Source $startOperation.Body `
+        -SignaturePattern '(?m)^[ \t]*if[ \t]+let[ \t]+Some\(active\)[ \t]*=[ \t]*&state\.active[ \t]*' `
+        -Description "start_operation active-operation conflict branch"
+    if ($null -ne $startOperationConflict) {
+        $null = Get-UniqueDirectStatementIndex `
+            -Source $startOperationConflict.Body `
+            -Pattern '(?m)^[ \t]*return[ \t]+Err\(CoreOperationError::OperationInProgress\)[ \t]*;' `
+            -Description "start_operation operation_in_progress return"
     }
 }
 
@@ -2072,6 +2403,110 @@ if ($null -ne $coreLifecycleCodeView) {
         )) {
         if ($coreLifecycleCodeView.Code -notmatch $requiredGate.Pattern) {
             Add-ContractFailure -Message $requiredGate.Message
+        }
+    }
+
+    $manualUpdateCheck = Get-UniqueBracedItem `
+        -Source $coreLifecycle `
+        -SignaturePattern '(?m)^[ \t]*\(openConfirmation:[ \t]*boolean,[ \t]*trigger\?:[ \t]*HTMLButtonElement\)[ \t]*=>[ \t]*' `
+        -Description "Manual update check callback" `
+        -CodeView $coreLifecycleCodeView
+    if ($null -ne $manualUpdateCheck) {
+        $manualUpdateGate = Get-UniqueBracedItem `
+            -Source $manualUpdateCheck.Body `
+            -SignaturePattern '(?m)^[ \t]*if[ \t]*\(' `
+            -Description "Manual update eligibility gate" `
+            -DirectStatement
+        $manualUpdateSideEffectIndex = Get-UniqueDirectStatementIndex `
+            -Source $manualUpdateCheck.Body `
+            -Pattern '(?m)^[ \t]*void[ \t]+retryCoreUpdateCheck\(\)' `
+            -Description "Manual retryCoreUpdateCheck side effect"
+        $manualRetryCalls = [regex]::Matches(
+            $manualUpdateCheck.CodeBody,
+            '(?<![A-Za-z0-9_])retryCoreUpdateCheck[ \t\r\n]*\('
+        )
+        if (
+            $null -eq $manualUpdateGate -or
+            $manualUpdateSideEffectIndex -lt 0 -or
+            $manualRetryCalls.Count -ne 1 -or
+            $manualUpdateGate.ClosingBraceIndex -ge
+            $manualUpdateSideEffectIndex
+        ) {
+            Add-ContractFailure `
+                -Message "Manual update gate must dominate retryCoreUpdateCheck and every update-check side effect."
+        }
+    }
+
+    if (
+        $coreLifecycleCodeView.Code -notmatch
+        '(?ms)^[ \t]*useEffect\(\(\)[ \t]*=>[ \t]*\{[ \t\r\n]*if[ \t]*\([ \t\r\n]*!bridgeReady[ \t\r\n]*\|\|[ \t\r\n]*startupCheckConsumed\.current'
+    ) {
+        Add-ContractFailure `
+            -Message "Automatic update check must require bridgeReady before every side effect."
+    }
+    if (
+        $coreLifecycleCodeView.Code -notmatch
+        '(?ms)^[ \t]*useEffect\(\(\)[ \t]*=>[ \t]*\{[ \t\r\n]*if[ \t]*\([ \t\r\n]*!bridgeReady[ \t\r\n]*\|\|[ \t\r\n]*installRequested\.current'
+    ) {
+        Add-ContractFailure `
+            -Message "Automatic install must require bridgeReady before every side effect."
+    }
+
+    $confirmUpdateStart = Get-UniquePatternIndex `
+        -Source $coreLifecycleCodeView.Code `
+        -Pattern '(?m)^[ \t]*const[ \t]+confirmUpdate[ \t]*=[ \t]*useCallback' `
+        -Description "Update confirmation callback"
+    $confirmationDialogStart = Get-UniquePatternIndex `
+        -Source $coreLifecycleCodeView.Code `
+        -Pattern '(?m)^[ \t]*const[ \t]+updateConfirmationDialog[ \t]*=' `
+        -Description "Update confirmation dialog"
+    if (
+        $confirmUpdateStart -ge 0 -and
+        $confirmationDialogStart -gt $confirmUpdateStart
+    ) {
+        $confirmUpdateLength = $confirmationDialogStart - $confirmUpdateStart
+        $confirmUpdateCode = $coreLifecycleCodeView.Code.Substring(
+            $confirmUpdateStart,
+            $confirmUpdateLength
+        )
+        $confirmUpdateCommentStripped = (
+            $coreLifecycleCodeView.CommentStripped.Substring(
+                $confirmUpdateStart,
+                $confirmUpdateLength
+            )
+        )
+        $allInstallCoreUpdateCalls = [regex]::Matches(
+            $coreLifecycleCodeView.Code,
+            '(?<![A-Za-z0-9_])installCoreUpdate[ \t\r\n]*\('
+        )
+        $confirmationInstallCoreUpdateCalls = [regex]::Matches(
+            $confirmUpdateCode,
+            '(?<![A-Za-z0-9_])installCoreUpdate[ \t\r\n]*\('
+        )
+        if (
+            $allInstallCoreUpdateCalls.Count -ne 1 -or
+            $confirmationInstallCoreUpdateCalls.Count -ne 1
+        ) {
+            Add-ContractFailure `
+                -Message "Core lifecycle must retain confirmation-only installCoreUpdate ownership."
+        }
+        $completeConfirmationGuard = (
+            '(?s)const[ \t]+targetVersion[ \t]*=[ \t]*' +
+            'updateCheck\?\.targetVersion[ \t]*;[ \t\r\n]*' +
+            'if[ \t]*\([ \t\r\n]*' +
+            'updateRequested\.current[ \t\r\n]*\|\|[ \t\r\n]*' +
+            '!latestBridgeReady\.current[ \t\r\n]*\|\|[ \t\r\n]*' +
+            'blocksUpdateInteraction\(latestOperation\.current\)[ \t\r\n]*\|\|[ \t\r\n]*' +
+            '!isCoreUpdateEligible\(latestStatus\.current\)[ \t\r\n]*\|\|[ \t\r\n]*' +
+            'updateCheck\?\.code[ \t]*!==[ \t]*"update_available"[ \t\r\n]*\|\|[ \t\r\n]*' +
+            'targetVersion[ \t]*===[ \t]*undefined[ \t\r\n]*' +
+            '\)[ \t\r\n]*\{[ \t\r\n]*return[ \t]*;[ \t\r\n]*\}' +
+            '(?:(?!installCoreUpdate).)*' +
+            'void[ \t]+installCoreUpdate\([ \t]*targetVersion[ \t]*\)'
+        )
+        if ($confirmUpdateCommentStripped -notmatch $completeConfirmationGuard) {
+            Add-ContractFailure `
+                -Message "installCoreUpdate must run only after the complete confirmation guard."
         }
     }
 }

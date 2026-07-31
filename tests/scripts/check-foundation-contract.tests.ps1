@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$ScenarioPattern = ""
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -21,6 +23,8 @@ function New-ContractFixture {
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src/components") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri/src") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri/src/core_operation") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/cli/src/commands/start") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-platform/src/wokcore_install") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-platform/src") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-platform/tests") -Force
@@ -47,11 +51,20 @@ function New-ContractFixture {
         -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src/components/CoreLifecycle.tsx") `
         -Destination (Join-Path $root "apps/desktop/src/components/CoreLifecycle.tsx")
     Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src/components/CoreLifecycle.test.tsx") `
+        -Destination (Join-Path $root "apps/desktop/src/components/CoreLifecycle.test.tsx")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src/locale.test.ts") `
+        -Destination (Join-Path $root "apps/desktop/src/locale.test.ts")
+    Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/src/control.rs") `
         -Destination (Join-Path $root "apps/desktop/src-tauri/src/control.rs")
     Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/src/core_operation.rs") `
         -Destination (Join-Path $root "apps/desktop/src-tauri/src/core_operation.rs")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/src/core_operation/parser.rs") `
+        -Destination (Join-Path $root "apps/desktop/src-tauri/src/core_operation/parser.rs")
     Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/src/lib.rs") `
         -Destination (Join-Path $root "apps/desktop/src-tauri/src/lib.rs")
@@ -61,6 +74,12 @@ function New-ContractFixture {
     Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "crates/wokrouter-platform/tests/wokcore_runtime.rs") `
         -Destination (Join-Path $root "crates/wokrouter-platform/tests/wokcore_runtime.rs")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "crates/wokrouter-platform/tests/wokcore_install.rs") `
+        -Destination (Join-Path $root "crates/wokrouter-platform/tests/wokcore_install.rs")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/cli/src/commands/start/tests.rs") `
+        -Destination (Join-Path $root "apps/cli/src/commands/start/tests.rs")
     Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "crates/wokrouter-platform/src/wokcore_install/wokcore-minisign.pub") `
         -Destination (Join-Path $root "crates/wokrouter-platform/src/wokcore_install/wokcore-minisign.pub")
@@ -97,6 +116,27 @@ function Edit-FixtureFile {
         throw "Fixture mutation source must occur exactly once in ${RelativePath}; found ${occurrences}: $OldText"
     }
     Set-Content -LiteralPath $path -Value $content.Replace($OldText, $NewText) -Encoding UTF8
+}
+
+function Add-FixtureTextFile {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Root,
+
+        [Parameter(Mandatory)]
+        [string]$RelativePath,
+
+        [Parameter(Mandatory)]
+        [string]$Content
+    )
+
+    $path = Join-Path $Root $RelativePath
+    $parent = Split-Path -Parent $path
+    $null = New-Item -ItemType Directory -Path $parent -Force
+    if (Test-Path -LiteralPath $path) {
+        throw "Fixture text file must not already exist: $RelativePath"
+    }
+    Set-Content -LiteralPath $path -Value $Content -Encoding UTF8
 }
 
 function Edit-Workflow {
@@ -259,6 +299,12 @@ function Invoke-Scenario {
         [scriptblock]$Test
     )
 
+    if (
+        $ScenarioPattern.Length -gt 0 -and
+        $Name -notmatch $ScenarioPattern
+    ) {
+        return
+    }
     $script:scenarioCount += 1
     try {
         & $Test
@@ -334,6 +380,40 @@ try {
             Expected = "structured WokCore update-install arguments"
         },
         @{
+            Name = "system runner install request must use the install command spec"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+                OperationRequest::Install => (
+                    CoreOperationKind::Install,
+                    CommandSpec::install(bundled_wokrouter_executable()?),
+                ),
+"@
+            New = @"
+                OperationRequest::Install => (
+                    CoreOperationKind::Install,
+                    CommandSpec::update_check(bundled_wokrouter_executable()?),
+                ),
+"@
+            Expected = "System operation runner install wiring"
+        },
+        @{
+            Name = "system runner update request must use the update-install command spec"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+                OperationRequest::Update { executable } => (
+                    CoreOperationKind::Update,
+                    CommandSpec::update_install(executable),
+                ),
+"@
+            New = @"
+                OperationRequest::Update { executable } => (
+                    CoreOperationKind::Update,
+                    CommandSpec::update_check(executable),
+                ),
+"@
+            Expected = "System operation runner update wiring"
+        },
+        @{
             Name = "long child Windows no-window policy cannot change"
             Path = "apps/desktop/src-tauri/src/core_operation.rs"
             Old = "creation_flags: 0x0800_0000,"
@@ -377,6 +457,21 @@ ChildProcessPolicy {
             Expected = "apply CREATE_NO_WINDOW"
         },
         @{
+            Name = "long child Windows no-window application must be a direct statement"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+    #[cfg(windows)]
+    command.creation_flags(policy.creation_flags);
+"@
+            New = @"
+    if false {
+        #[cfg(windows)]
+        command.creation_flags(policy.creation_flags);
+    }
+"@
+            Expected = "directly apply CREATE_NO_WINDOW"
+        },
+        @{
             Name = "core operation progress event name cannot change"
             Path = "apps/desktop/src-tauri/src/lib.rs"
             Old = 'self.app.emit("core-operation-progress", snapshot)'
@@ -393,6 +488,20 @@ self.app.emit("core-operation-progress", snapshot)
 */
 '@
             Expected = "core-operation-progress event"
+        },
+        @{
+            Name = "install command must wire the Tauri operation event sink"
+            Path = "apps/desktop/src-tauri/src/lib.rs"
+            Old = '.install_and_start(Arc::new(TauriOperationEventSink { app }))'
+            New = '.install_and_start(Arc::new(NoopOperationEventSink))'
+            Expected = "install command Tauri operation event sink wiring"
+        },
+        @{
+            Name = "update command must wire the Tauri operation event sink"
+            Path = "apps/desktop/src-tauri/src/lib.rs"
+            Old = '.install_update(&expected_version, Arc::new(TauriOperationEventSink { app }))'
+            New = '.install_update(&expected_version, Arc::new(NoopOperationEventSink))'
+            Expected = "update command Tauri operation event sink wiring"
         },
         @{
             Name = "operation conflict stable code cannot change"
@@ -415,6 +524,63 @@ OperationInProgress,
             Expected = "operation_in_progress"
         },
         @{
+            Name = "update check conflict must return operation_in_progress"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+        if let Some(check) = self.state.lock().await.update_check.clone() {
+            return Ok(check);
+        }
+        if self.state.lock().await.active.is_some() {
+            return Err(CoreOperationError::OperationInProgress);
+        }
+        let executable = self.trusted_production_executable().await?;
+"@
+            New = @"
+        if let Some(check) = self.state.lock().await.update_check.clone() {
+            return Ok(check);
+        }
+        if self.state.lock().await.active.is_some() {
+            return Err(CoreOperationError::InvalidProgress);
+        }
+        let executable = self.trusted_production_executable().await?;
+"@
+            Expected = "check_update operation_in_progress return"
+        },
+        @{
+            Name = "update install conflict must return operation_in_progress"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+        Version::parse(expected_version).map_err(|_| CoreOperationError::InvalidProgress)?;
+        if self.state.lock().await.active.is_some() {
+            return Err(CoreOperationError::OperationInProgress);
+        }
+        let executable = self.trusted_production_executable().await?;
+"@
+            New = @"
+        Version::parse(expected_version).map_err(|_| CoreOperationError::InvalidProgress)?;
+        if self.state.lock().await.active.is_some() {
+            return Err(CoreOperationError::InvalidProgress);
+        }
+        let executable = self.trusted_production_executable().await?;
+"@
+            Expected = "install_update operation_in_progress return"
+        },
+        @{
+            Name = "operation coordinator conflict must return operation_in_progress"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+                return Err(CoreOperationError::OperationInProgress);
+            }
+            let snapshot = CoreOperationSnapshot::initial(operation);
+"@
+            New = @"
+                return Err(CoreOperationError::InvalidProgress);
+            }
+            let snapshot = CoreOperationSnapshot::initial(operation);
+"@
+            Expected = "start_operation operation_in_progress return"
+        },
+        @{
             Name = "transactional child cannot enable kill-on-drop"
             Path = "apps/desktop/src-tauri/src/core_operation.rs"
             Old = "        .kill_on_drop(policy.kill_on_drop);"
@@ -434,6 +600,27 @@ OperationInProgress,
         if let Some(executable) = runtime.executable() {
 "@
             Expected = "Backend development update gate"
+        },
+        @{
+            Name = "backend Development gate must precede executable reuse"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+        if runtime.channel() == WokCoreRuntimeChannel::Development {
+            return Err(CoreOperationError::DevelopmentRuntimeManagedByIde);
+        }
+        if let Some(executable) = runtime.executable() {
+            return Ok(executable.to_path_buf());
+        }
+"@
+            New = @"
+        if let Some(executable) = runtime.executable() {
+            return Ok(executable.to_path_buf());
+        }
+        if runtime.channel() == WokCoreRuntimeChannel::Development {
+            return Err(CoreOperationError::DevelopmentRuntimeManagedByIde);
+        }
+"@
+            Expected = "Backend development update gate must dominate"
         },
         @{
             Name = "backend check must use the production-gated trusted executable"
@@ -508,6 +695,80 @@ OperationInProgress,
             Expected = "Manual update check must use the shared eligibility gate"
         },
         @{
+            Name = "manual update gate must precede the update-check side effect"
+            Path = "apps/desktop/src/components/CoreLifecycle.tsx"
+            Old = @"
+    (openConfirmation: boolean, trigger?: HTMLButtonElement) => {
+      if (
+        activeUpdateCheckRequestId.current !== undefined ||
+        !latestBridgeReady.current ||
+        blocksUpdateInteraction(latestOperation.current) ||
+        !isCoreUpdateEligible(latestStatus.current)
+      ) {
+        return;
+      }
+      nextUpdateCheckRequestId.current += 1;
+      const requestId = nextUpdateCheckRequestId.current;
+      activeUpdateCheckRequestId.current = requestId;
+      startupCheckConsumed.current = true;
+      setUpdateCheckPending(true);
+      const revision = startupCheckRevision.current;
+      void retryCoreUpdateCheck()
+"@
+            New = @"
+    (openConfirmation: boolean, trigger?: HTMLButtonElement) => {
+      const updateCheckRequest = retryCoreUpdateCheck();
+      if (
+        activeUpdateCheckRequestId.current !== undefined ||
+        !latestBridgeReady.current ||
+        blocksUpdateInteraction(latestOperation.current) ||
+        !isCoreUpdateEligible(latestStatus.current)
+      ) {
+        return;
+      }
+      nextUpdateCheckRequestId.current += 1;
+      const requestId = nextUpdateCheckRequestId.current;
+      activeUpdateCheckRequestId.current = requestId;
+      startupCheckConsumed.current = true;
+      setUpdateCheckPending(true);
+      const revision = startupCheckRevision.current;
+      void updateCheckRequest
+"@
+            Expected = "Manual update gate must dominate retryCoreUpdateCheck"
+        },
+        @{
+            Name = "automatic update check must wait for bridge readiness"
+            Path = "apps/desktop/src/components/CoreLifecycle.tsx"
+            Old = @"
+  useEffect(() => {
+    if (
+      !bridgeReady ||
+      startupCheckConsumed.current ||
+"@
+            New = @"
+  useEffect(() => {
+    if (
+      startupCheckConsumed.current ||
+"@
+            Expected = "Automatic update check must require bridgeReady"
+        },
+        @{
+            Name = "automatic install must wait for bridge readiness"
+            Path = "apps/desktop/src/components/CoreLifecycle.tsx"
+            Old = @"
+  useEffect(() => {
+    if (
+      !bridgeReady ||
+      installRequested.current ||
+"@
+            New = @"
+  useEffect(() => {
+    if (
+      installRequested.current ||
+"@
+            Expected = "Automatic install must require bridgeReady"
+        },
+        @{
             Name = "update prompt cannot bypass frontend eligibility"
             Path = "apps/desktop/src/components/CoreLifecycle.tsx"
             Old = @"
@@ -540,6 +801,20 @@ OperationInProgress,
       updateCheck?.code !== "update_available" ||
 "@
             Expected = "Update confirmation must use the shared eligibility gate"
+        },
+        @{
+            Name = "lifecycle acceptance docs must retain executable evidence"
+            Path = "docs/operations/development.md"
+            Old = "pwsh tests/scripts/check-foundation-contract.tests.ps1"
+            New = "pwsh tests/scripts/not-the-foundation-contract.tests.ps1"
+            Expected = "lifecycle acceptance evidence"
+        },
+        @{
+            Name = "lifecycle acceptance docs cannot cite a missing fixture"
+            Path = "apps/desktop/src/components/CoreLifecycle.test.tsx"
+            Old = 'it("starts one production install in StrictMode and restores normal content after success", async () => {'
+            New = 'it("renamed lifecycle behavior", async () => {'
+            Expected = "lifecycle acceptance fixture"
         }
     )
     foreach ($mutation in $lifecycleMutations) {
@@ -555,6 +830,123 @@ OperationInProgress,
                 -ExpectedText $mutation.Expected `
                 -Scenario $mutation.Name
         }
+    }
+
+    Invoke-Scenario -Name "installCoreUpdate must remain owned by confirmation" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/components/CoreLifecycle.tsx" `
+            -OldText @"
+  const requestUpdate = useCallback(
+    (trigger?: HTMLButtonElement) => {
+      if (
+        !latestBridgeReady.current ||
+        blocksUpdateInteraction(latestOperation.current) ||
+        !isCoreUpdateEligible(latestStatus.current) ||
+        updateCheck?.code !== "update_available" ||
+        updateCheck.targetVersion === undefined ||
+        updateRequested.current
+      ) {
+        return;
+      }
+      if (trigger) {
+        updateTrigger.current = trigger;
+      }
+      setUpdateConfirmationOpen(true);
+    },
+    [updateCheck],
+  );
+"@ `
+            -NewText @"
+  const requestUpdate = useCallback(
+    (trigger?: HTMLButtonElement) => {
+      if (
+        !latestBridgeReady.current ||
+        blocksUpdateInteraction(latestOperation.current) ||
+        !isCoreUpdateEligible(latestStatus.current) ||
+        updateCheck?.code !== "update_available" ||
+        updateCheck.targetVersion === undefined ||
+        updateRequested.current
+      ) {
+        return;
+      }
+      if (trigger) {
+        updateTrigger.current = trigger;
+      }
+      void installCoreUpdate(updateCheck.targetVersion);
+      setUpdateConfirmationOpen(true);
+    },
+    [updateCheck],
+  );
+"@
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/components/CoreLifecycle.tsx" `
+            -OldText "    void installCoreUpdate(targetVersion)" `
+            -NewText "    void Promise.resolve(targetVersion)"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "confirmation-only installCoreUpdate ownership" `
+            -Scenario "installCoreUpdate outside confirmation"
+    }
+
+    Invoke-Scenario -Name "installCoreUpdate must follow the complete confirmation guard" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/components/CoreLifecycle.tsx" `
+            -OldText @"
+      updateCheck?.code !== "update_available" ||
+      targetVersion === undefined
+"@ `
+            -NewText @"
+      updateCheck?.code !== "update_available" ||
+      (void installCoreUpdate(targetVersion ?? ""), targetVersion === undefined)
+"@
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/components/CoreLifecycle.tsx" `
+            -OldText "    void installCoreUpdate(targetVersion)" `
+            -NewText "    void Promise.resolve(targetVersion)"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "complete confirmation guard" `
+            -Scenario "installCoreUpdate before confirmation guard completion"
+    }
+
+    foreach ($secretFile in @(
+            @{
+                Name = "Minisign private key header is rejected in a .key product file"
+                Path = "apps/desktop/src/product-signing.key"
+            },
+            @{
+                Name = "Minisign private key header is rejected in an extensionless product file"
+                Path = "crates/wokrouter-platform/PRODUCT_SIGNING"
+            }
+        )) {
+        Invoke-Scenario -Name $secretFile.Name -Test {
+            $root = New-ContractFixture
+            Add-FixtureTextFile `
+                -Root $root `
+                -RelativePath $secretFile.Path `
+                -Content "untrusted comment: minisign secret key 0000000000000000"
+            Assert-ContractRejects `
+                -Root $root `
+                -ExpectedText "Minisign private or encrypted secret key header" `
+                -Scenario $secretFile.Name
+        }
+    }
+
+    Invoke-Scenario -Name "generated directories are excluded from product private-key scanning" -Test {
+        $root = New-ContractFixture
+        Add-FixtureTextFile `
+            -Root $root `
+            -RelativePath "apps/desktop/target/generated-signing.key" `
+            -Content "untrusted comment: minisign secret key 0000000000000000"
+        Assert-ContractPasses `
+            -Root $root `
+            -Scenario "generated private-key fixture exclusion"
     }
 
     Invoke-Scenario -Name "development debug gate permits non-semantic trivia" -Test {

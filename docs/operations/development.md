@@ -90,52 +90,71 @@ Runtime status exposed through JSON or the Tauri bridge may include
 `runtime_channel`, but must never include a field named `pid`, `path`, or
 `executable`.
 
-## WokCore lifecycle manual acceptance
+## WokCore lifecycle acceptance evidence
 
-Run these paths in a disposable Windows user account or VM. For a clean
-app-data case, start WokRouter from a shell whose `APPDATA` and `LOCALAPPDATA`
-point to newly created empty directories, with no trusted WokCore install
-record or `wokcore.exe` on `PATH`. For update fault cases, use the signed
-loopback release fixture and a throttled artifact response so every transition
-is observable. Record the loopback request log and child-process list.
+The repository does not currently provide a command that drives a live signed
+loopback WokCore through the packaged desktop GUI. In particular, there is no
+manual signed-loopback CLI for the update, rollback, close/reopen, or
+child-process observations described below. Do not invent one and do not use a
+production Minisign private key for acceptance. The reproducible evidence
+available today is the fixed-host Rust suite, the frontend unit suite, and the
+foundation source-contract suite listed in the quality gate below.
 
-1. **Missing to running without a click.** Open the desktop against clean
-   app-data. Do not press any install or retry action. Confirm the primary
-   panel advances from release checking to a download whose completed bytes
-   start at zero, increase monotonically, and finish at the signed total.
-   Confirm verification, installation, start, authorization, and runtime
-   verification remain indeterminate, then confirm the desktop reaches
-   running and restores management.
-2. **Signed update cancel and confirm.** Serve a valid signed newer loopback
-   release to a trusted running WokCore. Confirm the desktop shows current and
-   target versions. Cancel once and verify that no artifact request or update
-   child occurs. Reopen, confirm, and verify a fresh signed check, real-byte
-   download progress, and the verified version reported by the child.
-3. **Active requests remain.** Keep one or more requests active in the
-   loopback runtime, confirm the update, and verify drain ends with
-   `active_requests_remain` and the bounded active-request count. Confirm the
-   old runtime remains available, management returns, and retry requires a
-   fresh check and confirmation.
-4. **Verification failure and rollback.** First serve an invalid
-   signature/hash and verify `update_verification_failed` without installing
-   untrusted bytes. Then use a correctly signed artifact whose post-install
-   runtime verification fails; confirm rollback runs, `rolled_back` is shown,
-   and the previous trusted runtime/version is restored.
-5. **Close and reopen during an operation.** Start a throttled install or
-   update, close WokRouter during download, and confirm the transactional child
-   remains alive. Reopen the desktop and verify operation status or the
-   installer lease restores progress without a duplicate child; let it finish
-   and confirm the final trusted runtime status.
-6. **IDE Development performs zero update work.** Start `wok: debug` and
-   confirm the desktop reports Development. Observe that startup, refetch, and
-   manual UI paths issue no update check or update-install request. Invoke the
-   backend check and install commands directly and confirm both return
-   `development_runtime_managed_by_ide`; the loopback request log and
-   child-process list must remain unchanged. Closing WokRouter must not stop
-   the IDE-owned WokCore.
-7. **Chinese and English UI.** Verify locale detection and every visible or
-   ARIA lifecycle string through the separate Windows/i18n acceptance plan;
-   do not treat the lifecycle checks above as i18n coverage.
+Run frontend lifecycle evidence with:
+
+```powershell
+pnpm.cmd --dir apps/desktop exec vitest run src/components/CoreLifecycle.test.tsx
+```
+
+On Windows, run all referenced Rust tests through the
+`tests/scripts/run-fixed-test-host.ps1` command in the next section; never run
+Cargo's hashed test binaries directly. Each numbered path maps to these real
+test names and fixtures:
+
+1. **Missing to running without a click.** Frontend fixture `starts one
+   production install in StrictMode and restores normal content after success`;
+   Rust fixtures
+   `missing_production_runtime_installs_starts_authorizes_and_reports_structured_progress`
+   and
+   `signed_release_reports_monotonic_download_and_authoritative_install_phases`.
+2. **Signed update cancel and confirm.** Frontend fixture `requires an
+   accessible confirmation and invokes the expected version once` covers
+   cancel, confirmation, and exactly-once invocation. Rust fixture
+   `system_runner_uses_only_the_three_fixed_child_commands` fixes the real
+   update-install argv. A live signed update artifact request through the GUI
+   remains unautomated because the repository has no such harness.
+3. **Active requests remain.** Frontend fixture `returns management after
+   active requests defer the update and reconfirms retry` covers recovery and
+   fresh confirmation. Parser fixtures
+   `versions_bytes_and_active_requests_are_strictly_validated` and
+   `update_active_requests_are_valid_during_rolling_back` cover the bounded
+   count. A real draining WokCore process remains outside this repository's
+   executable acceptance surface.
+4. **Verification failure and rollback.** Signed-release fixtures
+   `artifact_hash_mismatch_leaves_no_install_or_record` and
+   `invalid_manifest_signature_is_rejected_before_artifact_download` prove
+   untrusted install bytes are rejected. Frontend error fixtures cover
+   `update_verification_failed` and `rolled_back`; a process-level rollback to
+   a previous runtime remains unautomated here.
+5. **Close and reopen during an operation.** Coordinator fixture
+   `duplicate_installs_coalesce_conflicts_fail_and_terminal_allows_retry` and
+   frontend fixtures `subscribes before recovering a running snapshot and
+   unmounts only the listener` and `treats install_in_progress as another
+   process and polls trusted status without retrying` cover reconciliation and
+   duplicate suppression. There is no packaged-GUI process harness that can
+   close the window and inspect the surviving child.
+6. **IDE Development performs zero update work.** Rust fixture
+   `development_suppresses_every_install_and_update_path_before_authority_or_runner`,
+   frontend fixtures `never checks or installs updates for a development
+   runtime` and `never starts production installation for a development
+   status`, and runtime fixture
+   `a_selected_development_session_never_switches_to_production` cover the
+   backend, frontend, and session-lifetime gates.
+7. **Chinese and English UI.** Run
+   `pnpm.cmd --dir apps/desktop exec vitest run src/locale.test.ts` for operating-system
+   locale detection, including `zh-CN`. Full translated visible and ARIA
+   lifecycle strings belong to the separate Windows/i18n acceptance plan and
+   are not claimed by the lifecycle fixtures above.
 
 ## Foundation quality gate
 
