@@ -109,6 +109,71 @@ function Get-PowerShellAst {
     return $ast
 }
 
+function Get-NormalizedAstText {
+    param([Parameter(Mandatory)] $Ast)
+
+    return $Ast.Extent.Text.Replace("`r`n", "`n").Trim()
+}
+
+function Test-ExactFunctionDefinitionAst {
+    param(
+        [Parameter(Mandatory)] $Actual,
+        [Parameter(Mandatory)] $Expected
+    )
+
+    if (
+        $Actual.Name -cne $Expected.Name -or
+        $Actual.IsFilter -ne $Expected.IsFilter -or
+        $Actual.IsWorkflow -ne $Expected.IsWorkflow
+    ) {
+        return $false
+    }
+
+    $actualAttributes = @($Actual.Body.ParamBlock.Attributes)
+    $expectedAttributes = @($Expected.Body.ParamBlock.Attributes)
+    $actualParameters = @($Actual.Body.ParamBlock.Parameters)
+    $expectedParameters = @($Expected.Body.ParamBlock.Parameters)
+    $actualStatements = @($Actual.Body.EndBlock.Statements)
+    $expectedStatements = @($Expected.Body.EndBlock.Statements)
+    foreach ($pair in @(
+            @($actualAttributes, $expectedAttributes),
+            @($actualParameters, $expectedParameters),
+            @($actualStatements, $expectedStatements)
+        )) {
+        $actualItems = @($pair[0])
+        $expectedItems = @($pair[1])
+        if ($actualItems.Count -ne $expectedItems.Count) {
+            return $false
+        }
+        for ($index = 0; $index -lt $actualItems.Count; $index += 1) {
+            if (
+                $actualItems[$index].GetType() -ne
+                $expectedItems[$index].GetType() -or
+                (Get-NormalizedAstText -Ast $actualItems[$index]) -cne
+                (Get-NormalizedAstText -Ast $expectedItems[$index])
+            ) {
+                return $false
+            }
+        }
+    }
+    return $true
+}
+
+function Get-ExactDirectStatementAst {
+    param(
+        [Parameter(Mandatory)] $Block,
+        [Parameter(Mandatory)][string] $Statement
+    )
+
+    $expected = $Statement.Replace("`r`n", "`n").Trim()
+    return @(
+        $Block.Statements |
+            Where-Object {
+                (Get-NormalizedAstText -Ast $_) -ceq $expected
+            }
+    )
+}
+
 function Get-ExactGuardAst {
     param(
         [Parameter(Mandatory)] $Ast,
@@ -590,26 +655,51 @@ if ($failures.Count -eq 0) {
                 -Message "Release contract must define and export the exact script-scope PE subsystem helper."
         }
     }
-    $peSubsystemRequirements = @(
-        "function Get-PeSubsystem {",
-        'if ($bytes.Length -lt 0x40 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {',
-        '$peOffset + 24 + 70 -gt $bytes.Length -or',
-        'if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {',
-        'return [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)',
-        '-Function Get-WokRouterTargetContracts, Get-WokRouterPayloadNames, Get-PeSubsystem'
-    )
+    $expectedPeSubsystemSource = @'
+function Get-PeSubsystem {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $Path)
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 0x40 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+        throw "Windows executable has no valid DOS header."
+    }
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
     if (
-        @(
-            $peSubsystemRequirements |
-                Where-Object {
-                    -not (Test-ContainsExactLine `
-                        -Source $releaseContractSource `
-                        -Line $_)
-                }
-        ).Count -ne 0
+        $peOffset -lt 0 -or
+        $peOffset + 24 + 70 -gt $bytes.Length -or
+        [Text.Encoding]::ASCII.GetString($bytes, $peOffset, 4) -cne "PE`0`0"
+    ) {
+        throw "Windows executable has no valid PE header."
+    }
+    $optionalHeader = $peOffset + 24
+    $magic = [BitConverter]::ToUInt16($bytes, $optionalHeader)
+    if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {
+        throw "Windows executable has an unsupported optional header."
+    }
+    return [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)
+}
+'@
+    $expectedPeSubsystemAst = Get-PowerShellAst `
+        -Source $expectedPeSubsystemSource `
+        -Description "Expected PE subsystem helper"
+    $expectedPeSubsystemFunction = @(
+        $expectedPeSubsystemAst.EndBlock.Statements |
+            Where-Object {
+                $_ -is [Management.Automation.Language.FunctionDefinitionAst]
+            }
+    )[0]
+    if (
+        $scriptScopePeSubsystemFunctions.Count -ne 1 -or
+        -not (Test-ExactFunctionDefinitionAst `
+            -Actual $scriptScopePeSubsystemFunctions[0] `
+            -Expected $expectedPeSubsystemFunction) -or
+        -not (Test-ContainsExactLine `
+            -Source $releaseContractSource `
+            -Line '-Function Get-WokRouterTargetContracts, Get-WokRouterPayloadNames, Get-PeSubsystem')
     ) {
         Add-Failure `
-            -Message "Release contract must define and export the exact PE subsystem helper."
+            -Message "Release contract must define and export the exact script-scope PE subsystem helper."
     }
 
     $windowsPackagerSource = Read-BoundedUtf8Text `
@@ -628,6 +718,7 @@ if ($failures.Count -eq 0) {
 
     $sourceDesktopGuards = @()
     $msiDesktopGuards = @()
+    $portableDesktopCountGuards = @()
     $portableDesktopGuards = @()
     if ($null -ne $windowsPackagerAst) {
         $sourceDesktopGuards = @(
@@ -645,8 +736,14 @@ if ($failures.Count -eq 0) {
         $portableDesktopGuards = @(
             Get-ExactGuardAst `
                 -Ast $windowsPackagerAst `
-                -Condition '(Get-PeSubsystem -Path $portableDesktop[0].FullName) -ne 2' `
+                -Condition '(Get-PeSubsystem -Path $portableDesktop) -ne 2' `
                 -ThrowStatement 'throw "Portable desktop executable must use the GUI subsystem."'
+        )
+        $portableDesktopCountGuards = @(
+            Get-ExactGuardAst `
+                -Ast $windowsPackagerAst `
+                -Condition '$portableDesktopFiles.Count -ne 1' `
+                -ThrowStatement 'throw "Portable archive must contain one desktop executable."'
         )
     }
 
@@ -696,14 +793,62 @@ if ($failures.Count -eq 0) {
         Add-Failure `
             -Message "Windows packager must retain the active Portable desktop GUI subsystem check in the package try block."
     }
-    if (
-        -not (Test-ContainsExactLine `
-            -Source $windowsPackagerSource `
-            -Line '[IO.Compression.ZipFile]::ExtractToDirectory(') -or
-        $portableDesktopGuards.Count -ne 1
-    ) {
+    $portableProvenanceIsOwned = $false
+    if ($null -ne $packageTry) {
+        $portableExtractionStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement @'
+[IO.Compression.ZipFile]::ExtractToDirectory(
+        $zipOutput,
+        $portableExtracted
+    )
+'@
+        )
+        $portableQueryStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement @'
+$portableDesktopFiles = @(
+        Get-ChildItem `
+            -LiteralPath $portableExtracted `
+            -Force `
+            -Recurse `
+            -File |
+            Where-Object Name -CEQ "wokrouter-desktop.exe"
+    )
+'@
+        )
+        $portableAssignmentStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement '$portableDesktop = $portableDesktopFiles[0].FullName'
+        )
+        if (
+            $portableExtractionStatements.Count -eq 1 -and
+            $portableQueryStatements.Count -eq 1 -and
+            $portableDesktopCountGuards.Count -eq 1 -and
+            [object]::ReferenceEquals(
+                $portableDesktopCountGuards[0].Parent,
+                $packageTry.Body
+            ) -and
+            $portableAssignmentStatements.Count -eq 1 -and
+            $portableDesktopGuards.Count -eq 1 -and
+            $portableExtractionStatements[0].Extent.StartOffset -lt
+            $portableQueryStatements[0].Extent.StartOffset -and
+            $portableQueryStatements[0].Extent.StartOffset -lt
+            $portableDesktopCountGuards[0].Extent.StartOffset -and
+            $portableDesktopCountGuards[0].Extent.StartOffset -lt
+            $portableAssignmentStatements[0].Extent.StartOffset -and
+            $portableAssignmentStatements[0].Extent.StartOffset -lt
+            $portableDesktopGuards[0].Extent.StartOffset
+        ) {
+            $portableProvenanceIsOwned = $true
+        }
+    }
+    if (-not $portableProvenanceIsOwned) {
         Add-Failure `
-            -Message "Windows packager must retain the Portable desktop GUI subsystem check."
+            -Message "Windows packager must retain the active Portable desktop extraction provenance and GUI subsystem check."
     }
 
     try {

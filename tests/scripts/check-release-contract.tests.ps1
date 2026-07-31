@@ -416,7 +416,7 @@ if ((Get-PeSubsystem -Path $desktop) -ne 2) {
             Path = "tests/release/package-windows-assets.ps1"
             Expected = "Portable desktop GUI subsystem check"
             Block = @'
-    if ((Get-PeSubsystem -Path $portableDesktop[0].FullName) -ne 2) {
+    if ((Get-PeSubsystem -Path $portableDesktop) -ne 2) {
         throw "Portable desktop executable must use the GUI subsystem."
     }
 '@
@@ -468,6 +468,98 @@ if ((Get-PeSubsystem -Path $desktop) -ne 2) {
         }
     }
 
+    Invoke-Scenario -Name "PE helper behavior cannot be supplied by an unrelated decoy" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/WokRouter.ReleaseContract.psm1" `
+            -OldText 'if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {' `
+            -NewText 'if ($magic -ne [UInt16] 0x20B) {'
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/WokRouter.ReleaseContract.psm1" `
+            -OldText @'
+Export-ModuleMember `
+    -Function Get-WokRouterTargetContracts, Get-WokRouterPayloadNames, Get-PeSubsystem
+'@ `
+            -NewText @'
+function Test-PeSubsystemRequirementDecoy {
+    if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {
+        throw "Windows executable has an unsupported optional header."
+    }
+}
+
+Export-ModuleMember `
+    -Function Get-WokRouterTargetContracts, Get-WokRouterPayloadNames, Get-PeSubsystem
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "exact script-scope PE subsystem helper" `
+            -Scenario "PE32 support supplied by an unrelated function"
+    }
+
+    Invoke-Scenario -Name "PE helper behavior cannot survive only in dead code" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/WokRouter.ReleaseContract.psm1" `
+            -OldText @'
+    if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {
+        throw "Windows executable has an unsupported optional header."
+    }
+'@ `
+            -NewText @'
+    if ($false) {
+        if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {
+            throw "Windows executable has an unsupported optional header."
+        }
+    }
+    if ($magic -ne [UInt16] 0x20B) {
+        throw "Windows executable has an unsupported optional header."
+    }
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "exact script-scope PE subsystem helper" `
+            -Scenario "PE32 support surviving only in dead code"
+    }
+
+    Invoke-Scenario -Name "Portable desktop query must come from the extracted archive" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+    $portableDesktopFiles = @(
+        Get-ChildItem `
+            -LiteralPath $portableExtracted `
+            -Force `
+            -Recurse `
+            -File |
+            Where-Object Name -CEQ "wokrouter-desktop.exe"
+    )
+'@ `
+            -NewText @'
+    $portableDesktopFiles = @(
+        Get-Item -LiteralPath $desktop
+    )
+    if ($false) {
+        $portableDesktopFiles = @(
+            Get-ChildItem `
+                -LiteralPath $portableExtracted `
+                -Force `
+                -Recurse `
+                -File |
+                Where-Object Name -CEQ "wokrouter-desktop.exe"
+        )
+    }
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "Portable desktop extraction provenance" `
+            -Scenario "Portable desktop selected from the source executable"
+    }
+
     Invoke-Scenario -Name "source MSI and Portable GUI checks cannot be removed" -Test {
         foreach ($mutation in @(
                 @{
@@ -493,12 +585,12 @@ if ((Get-PeSubsystem -Path $desktop) -ne 2) {
                 @{
                     Old = (
                         'if ((Get-PeSubsystem -Path ' +
-                        '$portableDesktop[0].FullName) -ne 2) {'
+                        '$portableDesktop) -ne 2) {'
                     )
                     New = (
                         'if ($false) { # ' +
                         'if ((Get-PeSubsystem -Path ' +
-                        '$portableDesktop[0].FullName) -ne 2) {'
+                        '$portableDesktop) -ne 2) {'
                     )
                     Expected = "Portable desktop GUI subsystem check"
                 }

@@ -50,7 +50,9 @@ function Write-MinimalPe {
         [Parameter(Mandatory)][ValidateSet("x86_64", "arm64")]
         [string] $Architecture,
         [Parameter(Mandatory)][string] $Marker,
-        [ValidateSet("gui", "console")][string] $Subsystem = "gui"
+        [ValidateSet("gui", "console")][string] $Subsystem = "gui",
+        [ValidateSet("pe32", "pe32plus")]
+        [string] $OptionalHeaderKind = "pe32plus"
     )
 
     $bytes = [byte[]]::new(256)
@@ -66,7 +68,12 @@ function Write-MinimalPe {
     }
     [BitConverter]::GetBytes($machine).CopyTo($bytes, 132)
     $optionalHeader = 128 + 24
-    [BitConverter]::GetBytes([UInt16] 0x20B).CopyTo($bytes, $optionalHeader)
+    $optionalHeaderMagic = if ($OptionalHeaderKind -ceq "pe32") {
+        [UInt16] 0x10B
+    } else {
+        [UInt16] 0x20B
+    }
+    [BitConverter]::GetBytes($optionalHeaderMagic).CopyTo($bytes, $optionalHeader)
     $subsystemValue = if ($Subsystem -ceq "gui") { [UInt16] 2 } else { [UInt16] 3 }
     [BitConverter]::GetBytes($subsystemValue).CopyTo($bytes, $optionalHeader + 68)
     [Text.Encoding]::ASCII.GetBytes($Marker).CopyTo($bytes, 224)
@@ -577,6 +584,20 @@ try {
         }
         if ([UInt16] (Get-PeSubsystem -Path $console) -ne [UInt16] 3) {
             throw "Console executable did not report subsystem 3."
+        }
+    }
+
+    Invoke-Scenario -Name "PE subsystem reader supports PE32 optional headers" -Test {
+        $root = New-FixtureRoot
+        $gui = Join-Path $root "pe32-gui.exe"
+        Write-MinimalPe `
+            -Path $gui `
+            -Architecture "x86_64" `
+            -Marker "pe32-gui" `
+            -Subsystem "gui" `
+            -OptionalHeaderKind "pe32"
+        if ([UInt16] (Get-PeSubsystem -Path $gui) -ne [UInt16] 2) {
+            throw "PE32 GUI executable did not report subsystem 2."
         }
     }
 

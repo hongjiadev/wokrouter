@@ -476,7 +476,7 @@ try {
     Assert-TreeSafe `
         -Root $portableExtracted `
         -Description "Extracted Portable archive"
-    $portableDesktop = @(
+    $portableDesktopFiles = @(
         Get-ChildItem `
             -LiteralPath $portableExtracted `
             -Force `
@@ -484,10 +484,11 @@ try {
             -File |
             Where-Object Name -CEQ "wokrouter-desktop.exe"
     )
-    if ($portableDesktop.Count -ne 1) {
+    if ($portableDesktopFiles.Count -ne 1) {
         throw "Portable archive must contain one desktop executable."
     }
-    if ((Get-PeSubsystem -Path $portableDesktop[0].FullName) -ne 2) {
+    $portableDesktop = $portableDesktopFiles[0].FullName
+    if ((Get-PeSubsystem -Path $portableDesktop) -ne 2) {
         throw "Portable desktop executable must use the GUI subsystem."
     }
 
