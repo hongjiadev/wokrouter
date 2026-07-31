@@ -1084,13 +1084,43 @@ function Get-RustExecutableTestContainer {
         [string]$Kind,
 
         [Parameter(Mandatory)]
-        [object]$CodeView
+        [object]$CodeView,
+
+        [AllowNull()]
+        [string]$RequiredFileInnerCfg
     )
 
+    $fileInnerCfgAttributes = @(
+        Get-RustDirectConditionalInnerAttributes `
+            -Source $Source `
+            -CodeView $CodeView
+    )
     if ($Kind -eq "TopLevel") {
+        $requiredNormalized = @()
+        if (-not [string]::IsNullOrWhiteSpace($RequiredFileInnerCfg)) {
+            $requiredNormalized += (
+                $RequiredFileInnerCfg -replace '\s', ''
+            )
+        }
+        $actualNormalized = @(
+            $fileInnerCfgAttributes |
+                ForEach-Object { $_.CommentStripped -replace '\s', '' }
+        )
+        if (
+            $actualNormalized.Count -ne $requiredNormalized.Count -or
+            (
+                $requiredNormalized.Count -eq 1 -and
+                $actualNormalized[0] -cne $requiredNormalized[0]
+            )
+        ) {
+            return $null
+        }
         return [pscustomobject]@{
             Kind = "TopLevel"
         }
+    }
+    if ($fileInnerCfgAttributes.Count -ne 0) {
+        return $null
     }
 
     $testModule = Get-UniqueBracedItem `
@@ -1106,12 +1136,103 @@ function Get-RustExecutableTestContainer {
     ) {
         return $null
     }
+    $moduleBodyLength = (
+        $testModule.ClosingBraceIndex -
+        $testModule.OpeningBraceIndex -
+        1
+    )
+    $moduleCodeView = [pscustomobject]@{
+        Code = $testModule.CodeBody
+        CommentStripped = $CodeView.CommentStripped.Substring(
+            $testModule.OpeningBraceIndex + 1,
+            $moduleBodyLength
+        )
+    }
+    $moduleInnerCfgAttributes = @(
+        Get-RustDirectConditionalInnerAttributes `
+            -Source $testModule.Body `
+            -CodeView $moduleCodeView
+    )
+    if ($moduleInnerCfgAttributes.Count -ne 0) {
+        return $null
+    }
 
     return [pscustomobject]@{
         Kind = "CfgTestModule"
         OpeningBraceIndex = $testModule.OpeningBraceIndex
         ClosingBraceIndex = $testModule.ClosingBraceIndex
     }
+}
+
+function Get-RustDirectConditionalInnerAttributes {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [object]$CodeView
+    )
+
+    $attributes = @()
+    $attributeStarts = [regex]::Matches(
+        $CodeView.Code,
+        '(?m)^[ \t]*#!\['
+    )
+    foreach ($attributeStart in $attributeStarts) {
+        $hashIndex = $CodeView.Code.IndexOf(
+            "#",
+            $attributeStart.Index,
+            $attributeStart.Length
+        )
+        $ownership = Get-RustOwnershipAtIndex `
+            -Structure $CodeView.Code `
+            -Index $hashIndex
+        if (-not $ownership.AllDelimiterDepthsZero) {
+            continue
+        }
+
+        $openingBracketIndex = $CodeView.Code.IndexOf(
+            "[",
+            $hashIndex,
+            $attributeStart.Index + $attributeStart.Length - $hashIndex
+        )
+        $bracketDepth = 0
+        $closingBracketIndex = -1
+        for (
+            $index = $openingBracketIndex;
+            $index -lt $CodeView.Code.Length;
+            $index += 1
+        ) {
+            if ($CodeView.Code[$index] -eq "[") {
+                $bracketDepth += 1
+            }
+            elseif ($CodeView.Code[$index] -eq "]") {
+                $bracketDepth -= 1
+                if ($bracketDepth -eq 0) {
+                    $closingBracketIndex = $index
+                    break
+                }
+            }
+        }
+        if ($closingBracketIndex -lt 0) {
+            continue
+        }
+        $attributeLength = $closingBracketIndex - $hashIndex + 1
+        $commentStripped = $CodeView.CommentStripped.Substring(
+            $hashIndex,
+            $attributeLength
+        )
+        if (
+            $commentStripped -match
+            '(?s)^#!\[[ \t\r\n]*(?:cfg|cfg_attr)\b'
+        ) {
+            $attributes += [pscustomobject]@{
+                CommentStripped = $commentStripped
+            }
+        }
+    }
+    return @($attributes)
 }
 
 function Get-TopLevelRustBody {
@@ -2104,6 +2225,7 @@ $lifecycleAcceptanceFixtures = @(
     @{
         Kind = "Rust"
         Container = "TopLevel"
+        RequiredFileInnerCfg = '#![cfg(feature = "test-support")]'
         Source = $wokcoreInstallTests
         Names = @(
             "signed_release_reports_monotonic_download_and_authoritative_install_phases",
@@ -2148,7 +2270,8 @@ foreach ($fixtureGroup in $lifecycleAcceptanceFixtures) {
         Get-RustExecutableTestContainer `
             -Source $fixtureGroup.Source `
             -Kind $fixtureGroup.Container `
-            -CodeView $fixtureCodeView
+            -CodeView $fixtureCodeView `
+            -RequiredFileInnerCfg $fixtureGroup.RequiredFileInnerCfg
     }
     else {
         $null

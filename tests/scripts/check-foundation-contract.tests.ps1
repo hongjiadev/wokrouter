@@ -839,6 +839,39 @@ mod tests {
 mod tests {
 "@
             Expected = "lifecycle acceptance fixture"
+        },
+        @{
+            Name = "lifecycle acceptance fixture cannot live behind a module inner cfg"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+#[cfg(test)]
+mod tests {
+    use std::{
+"@
+            New = @"
+#[cfg(test)]
+mod tests {
+    #![cfg(any())]
+
+    use std::{
+"@
+            Expected = "lifecycle acceptance fixture"
+        },
+        @{
+            Name = "lifecycle acceptance fixture cannot live behind an integration inner cfg"
+            Path = "crates/wokrouter-platform/tests/wokcore_install.rs"
+            Old = @"
+#![cfg(feature = "test-support")]
+
+use std::{fs, path::Path, sync::mpsc};
+"@
+            New = @"
+#![cfg(feature = "test-support")]
+#![cfg(any())]
+
+use std::{fs, path::Path, sync::mpsc};
+"@
+            Expected = "lifecycle acceptance fixture"
         }
     )
     foreach ($mutation in $lifecycleMutations) {
