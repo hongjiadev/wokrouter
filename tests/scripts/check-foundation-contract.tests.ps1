@@ -18,8 +18,10 @@ function New-ContractFixture {
     $root = Join-Path ([System.IO.Path]::GetTempPath()) ("wokrouter-contract-" + [guid]::NewGuid())
     $null = New-Item -ItemType Directory -Path (Join-Path $root ".github/workflows") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/cli/src/commands") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src/components") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri/src") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-platform/src/wokcore_install") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-platform/src") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-platform/tests") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "docs/operations") -Force
@@ -39,14 +41,29 @@ function New-ContractFixture {
         -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src/control.ts") `
         -Destination (Join-Path $root "apps/desktop/src/control.ts")
     Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src/coreUpdateEligibility.ts") `
+        -Destination (Join-Path $root "apps/desktop/src/coreUpdateEligibility.ts")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src/components/CoreLifecycle.tsx") `
+        -Destination (Join-Path $root "apps/desktop/src/components/CoreLifecycle.tsx")
+    Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/src/control.rs") `
         -Destination (Join-Path $root "apps/desktop/src-tauri/src/control.rs")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/src/core_operation.rs") `
+        -Destination (Join-Path $root "apps/desktop/src-tauri/src/core_operation.rs")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/src/lib.rs") `
+        -Destination (Join-Path $root "apps/desktop/src-tauri/src/lib.rs")
     Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "crates/wokrouter-platform/src/wokcore_runtime.rs") `
         -Destination (Join-Path $root "crates/wokrouter-platform/src/wokcore_runtime.rs")
     Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "crates/wokrouter-platform/tests/wokcore_runtime.rs") `
         -Destination (Join-Path $root "crates/wokrouter-platform/tests/wokcore_runtime.rs")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "crates/wokrouter-platform/src/wokcore_install/wokcore-minisign.pub") `
+        -Destination (Join-Path $root "crates/wokrouter-platform/src/wokcore_install/wokcore-minisign.pub")
     $fixtureRoots.Add($root)
     return $root
 }
@@ -277,6 +294,266 @@ try {
         }
         if (-not $rejected) {
             throw "duplicate mutation source should be rejected"
+        }
+    }
+
+    $lifecycleMutations = @(
+        @{
+            Name = "production WokCore key id cannot change"
+            Path = "crates/wokrouter-platform/src/wokcore_install/wokcore-minisign.pub"
+            Old = "untrusted comment: minisign public key 7EF262CD8E9FE136"
+            New = "untrusted comment: minisign public key 0000000000000000"
+            Expected = "production Minisign public key"
+        },
+        @{
+            Name = "Minisign private key header is rejected"
+            Path = "crates/wokrouter-platform/src/wokcore_install/wokcore-minisign.pub"
+            Old = "untrusted comment: minisign public key 7EF262CD8E9FE136"
+            New = "untrusted comment: minisign secret key 7EF262CD8E9FE136"
+            Expected = "Minisign private or encrypted secret key header"
+        },
+        @{
+            Name = "Minisign encrypted private key header is rejected"
+            Path = "crates/wokrouter-platform/src/wokcore_install/wokcore-minisign.pub"
+            Old = "untrusted comment: minisign public key 7EF262CD8E9FE136"
+            New = "untrusted comment: minisign encrypted secret key 7EF262CD8E9FE136"
+            Expected = "Minisign private or encrypted secret key header"
+        },
+        @{
+            Name = "structured WokRouter start arguments cannot change"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = 'Self::raw(program, ["start", "--json", "--progress-jsonl"])'
+            New = 'Self::raw(program, ["start", "--json"])'
+            Expected = "structured WokRouter start arguments"
+        },
+        @{
+            Name = "structured WokCore update arguments cannot change"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = '["update", "--install", "--json", "--progress-jsonl"],'
+            New = '["update", "--install", "--json"],'
+            Expected = "structured WokCore update-install arguments"
+        },
+        @{
+            Name = "long child Windows no-window policy cannot change"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = "creation_flags: 0x0800_0000,"
+            New = "creation_flags: 0,"
+            Expected = "CREATE_NO_WINDOW policy"
+        },
+        @{
+            Name = "long child Windows no-window policy cannot survive only in a comment"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = "creation_flags: 0x0800_0000,"
+            New = @'
+creation_flags: 0,
+/*
+ChildProcessPolicy {
+    kill_on_drop: false,
+    #[cfg(windows)]
+    creation_flags: 0x0800_0000,
+}
+*/
+'@
+            Expected = "CREATE_NO_WINDOW policy"
+        },
+        @{
+            Name = "long child must apply the Windows no-window policy"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = "    command.creation_flags(policy.creation_flags);"
+            New = "    let _ = policy.creation_flags;"
+            Expected = "apply CREATE_NO_WINDOW"
+        },
+        @{
+            Name = "long child Windows no-window application cannot survive only in a comment"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = "    command.creation_flags(policy.creation_flags);"
+            New = @'
+    let _ = policy.creation_flags;
+    /*
+    #[cfg(windows)]
+    command.creation_flags(policy.creation_flags);
+    */
+'@
+            Expected = "apply CREATE_NO_WINDOW"
+        },
+        @{
+            Name = "core operation progress event name cannot change"
+            Path = "apps/desktop/src-tauri/src/lib.rs"
+            Old = 'self.app.emit("core-operation-progress", snapshot)'
+            New = 'self.app.emit("core-progress", snapshot)'
+            Expected = "core-operation-progress event"
+        },
+        @{
+            Name = "core operation progress event cannot survive only in a comment"
+            Path = "apps/desktop/src-tauri/src/lib.rs"
+            Old = 'self.app.emit("core-operation-progress", snapshot)'
+            New = @'
+self.app.emit("core-progress", snapshot) /*
+self.app.emit("core-operation-progress", snapshot)
+*/
+'@
+            Expected = "core-operation-progress event"
+        },
+        @{
+            Name = "operation conflict stable code cannot change"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = '#[error("operation_in_progress")]'
+            New = '#[error("busy")]'
+            Expected = "operation_in_progress"
+        },
+        @{
+            Name = "operation conflict stable code cannot survive only in a comment"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = '#[error("operation_in_progress")]'
+            New = @'
+#[error("busy")]
+/*
+#[error("operation_in_progress")]
+OperationInProgress,
+*/
+'@
+            Expected = "operation_in_progress"
+        },
+        @{
+            Name = "transactional child cannot enable kill-on-drop"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = "        .kill_on_drop(policy.kill_on_drop);"
+            New = "        .kill_on_drop(true);"
+            Expected = "kill_on_drop(true)"
+        },
+        @{
+            Name = "backend trusted executable must reject Development"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+        if runtime.channel() == WokCoreRuntimeChannel::Development {
+            return Err(CoreOperationError::DevelopmentRuntimeManagedByIde);
+        }
+        if let Some(executable) = runtime.executable() {
+"@
+            New = @"
+        if let Some(executable) = runtime.executable() {
+"@
+            Expected = "Backend development update gate"
+        },
+        @{
+            Name = "backend check must use the production-gated trusted executable"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+        if self.state.lock().await.active.is_some() {
+            return Err(CoreOperationError::OperationInProgress);
+        }
+        let executable = self.trusted_production_executable().await?;
+        let completion = self
+"@
+            New = @"
+        if self.state.lock().await.active.is_some() {
+            return Err(CoreOperationError::OperationInProgress);
+        }
+        let executable = self
+            .authority
+            .discover()?
+            .ok_or(CoreOperationError::UpdateUnavailable)?;
+        let completion = self
+"@
+            Expected = "check_update must obtain a production-gated trusted executable"
+        },
+        @{
+            Name = "backend install-update must reject Development first"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+    ) -> Result<CoreOperationSnapshot, CoreOperationError> {
+        self.require_production_channel().await?;
+        Version::parse(expected_version).map_err(|_| CoreOperationError::InvalidProgress)?;
+"@
+            New = @"
+    ) -> Result<CoreOperationSnapshot, CoreOperationError> {
+        Version::parse(expected_version).map_err(|_| CoreOperationError::InvalidProgress)?;
+"@
+            Expected = "install_update must reject Development before validation or child work"
+        },
+        @{
+            Name = "frontend eligibility helper must require Production"
+            Path = "apps/desktop/src/coreUpdateEligibility.ts"
+            Old = '    status?.runtime_channel === "production" &&'
+            New = "    status !== undefined &&"
+            Expected = "Frontend update eligibility must require the production runtime channel"
+        },
+        @{
+            Name = "automatic update check cannot bypass frontend eligibility"
+            Path = "apps/desktop/src/components/CoreLifecycle.tsx"
+            Old = @"
+      operation !== undefined ||
+      !isCoreUpdateEligible(status.data)
+"@
+            New = @"
+      operation !== undefined ||
+      status.data === undefined
+"@
+            Expected = "Automatic update check must use the shared eligibility gate"
+        },
+        @{
+            Name = "manual update check cannot bypass frontend eligibility"
+            Path = "apps/desktop/src/components/CoreLifecycle.tsx"
+            Old = @"
+        activeUpdateCheckRequestId.current !== undefined ||
+        !latestBridgeReady.current ||
+        blocksUpdateInteraction(latestOperation.current) ||
+        !isCoreUpdateEligible(latestStatus.current)
+"@
+            New = @"
+        activeUpdateCheckRequestId.current !== undefined ||
+        !latestBridgeReady.current ||
+        blocksUpdateInteraction(latestOperation.current)
+"@
+            Expected = "Manual update check must use the shared eligibility gate"
+        },
+        @{
+            Name = "update prompt cannot bypass frontend eligibility"
+            Path = "apps/desktop/src/components/CoreLifecycle.tsx"
+            Old = @"
+        blocksUpdateInteraction(latestOperation.current) ||
+        !isCoreUpdateEligible(latestStatus.current) ||
+        updateCheck?.code !== "update_available" ||
+        updateCheck.targetVersion === undefined ||
+"@
+            New = @"
+        blocksUpdateInteraction(latestOperation.current) ||
+        updateCheck?.code !== "update_available" ||
+        updateCheck.targetVersion === undefined ||
+"@
+            Expected = "Update prompt must use the shared eligibility gate"
+        },
+        @{
+            Name = "update confirmation cannot bypass frontend eligibility"
+            Path = "apps/desktop/src/components/CoreLifecycle.tsx"
+            Old = @"
+      updateRequested.current ||
+      !latestBridgeReady.current ||
+      blocksUpdateInteraction(latestOperation.current) ||
+      !isCoreUpdateEligible(latestStatus.current) ||
+      updateCheck?.code !== "update_available" ||
+"@
+            New = @"
+      updateRequested.current ||
+      !latestBridgeReady.current ||
+      blocksUpdateInteraction(latestOperation.current) ||
+      updateCheck?.code !== "update_available" ||
+"@
+            Expected = "Update confirmation must use the shared eligibility gate"
+        }
+    )
+    foreach ($mutation in $lifecycleMutations) {
+        Invoke-Scenario -Name $mutation.Name -Test {
+            $root = New-ContractFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath $mutation.Path `
+                -OldText $mutation.Old `
+                -NewText $mutation.New
+            Assert-ContractRejects `
+                -Root $root `
+                -ExpectedText $mutation.Expected `
+                -Scenario $mutation.Name
         }
     }
 

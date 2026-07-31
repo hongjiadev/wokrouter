@@ -70,30 +70,72 @@ Run these six paths before accepting changes to development runtime selection:
    development variable. Confirm WokRouter does not mistake the system process
    for the configured debug executable and selects it on the production
    channel after five seconds.
-4. **Signed-install production fallback (deferred).** The approved path removes
-   both the development and system WokCore, starts `wokrouter: dev`, then
-   expects the production signed automatic-install flow and real download
-   progress after five seconds. This path is not yet manually acceptable:
-   production start currently reports a missing WokCore instead of invoking
-   automatic installation. Verify it only after the core-lifecycle plan wires
-   the signed installer into production startup.
+4. **Signed-install production fallback.** Remove both the development and
+   system WokCore, start `wokrouter: dev`, and wait for the five-second
+   development deadline. Confirm the desktop enters the production signed
+   automatic-install flow, reports real downloaded and total byte counts, and
+   reaches running without an install click.
 5. **Release ignores the variable.** Set
    `WOKROUTER_DEV_WOKCORE_EXECUTABLE` and start a release build. Confirm it
    selects only through production discovery and never reports the development
    channel. The variable name and its parsing must not be present in release
    metadata.
-6. **Development runtime remains IDE-managed (update suppression deferred).**
-   With the development channel selected, close WokRouter and confirm the
-   IDE-started WokCore keeps running; an explicit stop attempt must return
-   `development_runtime_managed_by_ide`. The approved path also requires that
-   no WokCore upgrade prompt appear, but update suppression is not yet manually
-   acceptable: the lifecycle update coordinator does not exist. Verify the
-   no-update portion only after that coordinator implements and tests the
-   development-channel guard.
+6. **Development runtime remains IDE-managed.** With the development channel
+   selected, close WokRouter and confirm the IDE-started WokCore keeps running.
+   An explicit stop, update check, or update-install backend request must
+   return `development_runtime_managed_by_ide`; no WokCore upgrade prompt or
+   update child may appear.
 
 Runtime status exposed through JSON or the Tauri bridge may include
 `runtime_channel`, but must never include a field named `pid`, `path`, or
 `executable`.
+
+## WokCore lifecycle manual acceptance
+
+Run these paths in a disposable Windows user account or VM. For a clean
+app-data case, start WokRouter from a shell whose `APPDATA` and `LOCALAPPDATA`
+point to newly created empty directories, with no trusted WokCore install
+record or `wokcore.exe` on `PATH`. For update fault cases, use the signed
+loopback release fixture and a throttled artifact response so every transition
+is observable. Record the loopback request log and child-process list.
+
+1. **Missing to running without a click.** Open the desktop against clean
+   app-data. Do not press any install or retry action. Confirm the primary
+   panel advances from release checking to a download whose completed bytes
+   start at zero, increase monotonically, and finish at the signed total.
+   Confirm verification, installation, start, authorization, and runtime
+   verification remain indeterminate, then confirm the desktop reaches
+   running and restores management.
+2. **Signed update cancel and confirm.** Serve a valid signed newer loopback
+   release to a trusted running WokCore. Confirm the desktop shows current and
+   target versions. Cancel once and verify that no artifact request or update
+   child occurs. Reopen, confirm, and verify a fresh signed check, real-byte
+   download progress, and the verified version reported by the child.
+3. **Active requests remain.** Keep one or more requests active in the
+   loopback runtime, confirm the update, and verify drain ends with
+   `active_requests_remain` and the bounded active-request count. Confirm the
+   old runtime remains available, management returns, and retry requires a
+   fresh check and confirmation.
+4. **Verification failure and rollback.** First serve an invalid
+   signature/hash and verify `update_verification_failed` without installing
+   untrusted bytes. Then use a correctly signed artifact whose post-install
+   runtime verification fails; confirm rollback runs, `rolled_back` is shown,
+   and the previous trusted runtime/version is restored.
+5. **Close and reopen during an operation.** Start a throttled install or
+   update, close WokRouter during download, and confirm the transactional child
+   remains alive. Reopen the desktop and verify operation status or the
+   installer lease restores progress without a duplicate child; let it finish
+   and confirm the final trusted runtime status.
+6. **IDE Development performs zero update work.** Start `wok: debug` and
+   confirm the desktop reports Development. Observe that startup, refetch, and
+   manual UI paths issue no update check or update-install request. Invoke the
+   backend check and install commands directly and confirm both return
+   `development_runtime_managed_by_ide`; the loopback request log and
+   child-process list must remain unchanged. Closing WokRouter must not stop
+   the IDE-owned WokCore.
+7. **Chinese and English UI.** Verify locale detection and every visible or
+   ARIA lifecycle string through the separate Windows/i18n acceptance plan;
+   do not treat the lifecycle checks above as i18n coverage.
 
 ## Foundation quality gate
 

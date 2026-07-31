@@ -15,9 +15,14 @@ $denyPath = Join-Path $rootPath "deny.toml"
 $developmentPath = Join-Path $rootPath "docs/operations/development.md"
 $runtimeSelectorPath = Join-Path $rootPath "crates/wokrouter-platform/src/wokcore_runtime.rs"
 $runtimeSelectorTestsPath = Join-Path $rootPath "crates/wokrouter-platform/tests/wokcore_runtime.rs"
+$wokcorePublicKeyPath = Join-Path $rootPath "crates/wokrouter-platform/src/wokcore_install/wokcore-minisign.pub"
 $commandModelPath = Join-Path $rootPath "apps/cli/src/commands/mod.rs"
 $desktopControlPath = Join-Path $rootPath "apps/desktop/src-tauri/src/control.rs"
+$coreOperationPath = Join-Path $rootPath "apps/desktop/src-tauri/src/core_operation.rs"
+$desktopLibPath = Join-Path $rootPath "apps/desktop/src-tauri/src/lib.rs"
 $frontendControlPath = Join-Path $rootPath "apps/desktop/src/control.ts"
+$coreUpdateEligibilityPath = Join-Path $rootPath "apps/desktop/src/coreUpdateEligibility.ts"
+$coreLifecyclePath = Join-Path $rootPath "apps/desktop/src/components/CoreLifecycle.tsx"
 $failures = [System.Collections.Generic.List[string]]::new()
 
 function Add-ContractFailure {
@@ -518,10 +523,18 @@ function Get-UniqueBracedItem {
 
         [switch]$DirectStatement,
 
-        [int]$MatchOrdinal = -1
+        [int]$MatchOrdinal = -1,
+
+        [AllowNull()]
+        [object]$CodeView
     )
 
-    $codeView = Get-RustCodeView -Source $Source -Description $Description
+    $codeView = if ($null -ne $CodeView) {
+        $CodeView
+    }
+    else {
+        Get-RustCodeView -Source $Source -Description $Description
+    }
     if ($null -eq $codeView) {
         return $null
     }
@@ -1349,9 +1362,14 @@ $deny = Get-Content -LiteralPath $denyPath -Raw -Encoding UTF8
 $development = Get-Content -LiteralPath $developmentPath -Raw -Encoding UTF8
 $runtimeSelector = Get-Content -LiteralPath $runtimeSelectorPath -Raw -Encoding UTF8
 $runtimeSelectorTests = Get-Content -LiteralPath $runtimeSelectorTestsPath -Raw -Encoding UTF8
+$wokcorePublicKey = Get-Content -LiteralPath $wokcorePublicKeyPath -Raw -Encoding UTF8
 $commandModel = Get-Content -LiteralPath $commandModelPath -Raw -Encoding UTF8
 $desktopControl = Get-Content -LiteralPath $desktopControlPath -Raw -Encoding UTF8
+$coreOperation = Get-Content -LiteralPath $coreOperationPath -Raw -Encoding UTF8
+$desktopLib = Get-Content -LiteralPath $desktopLibPath -Raw -Encoding UTF8
 $frontendControl = Get-Content -LiteralPath $frontendControlPath -Raw -Encoding UTF8
+$coreUpdateEligibility = Get-Content -LiteralPath $coreUpdateEligibilityPath -Raw -Encoding UTF8
+$coreLifecycle = Get-Content -LiteralPath $coreLifecyclePath -Raw -Encoding UTF8
 $jobs = Get-WorkflowJobs -Lines $workflowLines
 
 $requiredJobs = @(
@@ -1739,6 +1757,325 @@ if ($development -notmatch "cargo deny --version") {
     Add-ContractFailure `
         -Message "Development docs must require cargo-deny version verification."
 }
+
+$expectedWokCorePublicKey = @"
+untrusted comment: minisign public key 7EF262CD8E9FE136
+RWQ24Z+OzWLyfjz0X7JFepiizNYEsUBt/cJisQWQ9o9EAK8TURVs9hts
+"@
+if (
+    $wokcorePublicKey.TrimEnd("`r", "`n") -ne
+    $expectedWokCorePublicKey.TrimEnd("`r", "`n")
+) {
+    Add-ContractFailure `
+        -Message "The production Minisign public key must retain key id 7EF262CD8E9FE136 and its exact validated payload."
+}
+
+$secretHeaderPattern = (
+    '(?im)^[ \t]*untrusted comment:[ \t]*' +
+    'minisign[ \t]+(?:encrypted[ \t]+)?secret[ \t]+key\b'
+)
+$secretHeaderFound = $false
+foreach ($sourceRootName in @("apps", "crates")) {
+    $sourceRoot = Join-Path $rootPath $sourceRootName
+    if (-not (Test-Path -LiteralPath $sourceRoot)) {
+        continue
+    }
+    foreach (
+        $sourceFile in Get-ChildItem -LiteralPath $sourceRoot -Recurse -File |
+            Where-Object {
+                $_.Extension -in @(
+                    ".json",
+                    ".md",
+                    ".pub",
+                    ".rs",
+                    ".toml",
+                    ".ts",
+                    ".tsx",
+                    ".yaml",
+                    ".yml"
+                )
+            }
+    ) {
+        $sourceText = Get-Content `
+            -LiteralPath $sourceFile.FullName `
+            -Raw `
+            -Encoding UTF8
+        if ($sourceText -match $secretHeaderPattern) {
+            $secretHeaderFound = $true
+            break
+        }
+    }
+    if ($secretHeaderFound) {
+        break
+    }
+}
+if ($secretHeaderFound) {
+    Add-ContractFailure `
+        -Message "Product source must not contain a Minisign private or encrypted secret key header."
+}
+
+$coreOperationCodeView = Get-RustCodeView `
+    -Source $coreOperation `
+    -Description "Core operation coordinator source"
+$desktopLibCodeView = Get-RustCodeView `
+    -Source $desktopLib `
+    -Description "Desktop Tauri library source"
+
+$installSpec = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*fn[ \t]+install[ \t]*\([ \t]*program[ \t]*:[ \t]*PathBuf[ \t]*\)[ \t]*->[^{]+' `
+    -Description "Core operation structured install command" `
+    -CodeView $coreOperationCodeView
+if (
+    $null -ne $installSpec -and
+    ($installSpec.Body -replace '\s', '') -ne
+    'Self::raw(program,["start","--json","--progress-jsonl"])'
+) {
+    Add-ContractFailure `
+        -Message "Core operation structured WokRouter start arguments must remain exactly start --json --progress-jsonl."
+}
+
+$updateInstallSpec = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*fn[ \t]+update_install[ \t]*\([ \t]*program[ \t]*:[ \t]*PathBuf[ \t]*\)[ \t]*->[^{]+' `
+    -Description "Core operation structured update-install command" `
+    -CodeView $coreOperationCodeView
+if (
+    $null -ne $updateInstallSpec -and
+    ($updateInstallSpec.Body -replace '\s', '') -ne
+    'Self::raw(program,["update","--install","--json","--progress-jsonl"],)'
+) {
+    Add-ContractFailure `
+        -Message "Core operation structured WokCore update-install arguments must remain exactly update --install --json --progress-jsonl."
+}
+
+$spawnChild = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^fn[ \t]+spawn_child[ \t]*\(' `
+    -Description "Core operation child spawn function" `
+    -TopLevel `
+    -CodeView $coreOperationCodeView
+if ($null -ne $spawnChild) {
+    if (
+        $spawnChild.CodeBody -notmatch
+        '(?m)^[ \t]*#\[cfg\(windows\)\][ \t]*\r?\n[ \t]*command\.creation_flags\(policy\.creation_flags\)[ \t]*;'
+    ) {
+        Add-ContractFailure `
+            -Message "Core operation child spawn must apply CREATE_NO_WINDOW through the Windows policy."
+    }
+    if (
+        $spawnChild.CodeBody -notmatch
+        '\.kill_on_drop\([ \t\r\n]*policy\.kill_on_drop[ \t\r\n]*\)'
+    ) {
+        Add-ContractFailure `
+            -Message "Core operation child spawn must apply the detached kill-on-drop policy."
+    }
+}
+
+$childPolicy = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^fn[ \t]+child_process_policy[ \t]*\(' `
+    -Description "Core operation long-child policy" `
+    -TopLevel `
+    -CodeView $coreOperationCodeView
+$childPolicyBody = if ($null -ne $childPolicy) {
+    $coreOperationCodeView.CommentStripped.Substring(
+        $childPolicy.OpeningBraceIndex + 1,
+        $childPolicy.ClosingBraceIndex - $childPolicy.OpeningBraceIndex - 1
+    )
+}
+else {
+    ""
+}
+if (
+    $null -ne $childPolicy -and
+    $childPolicyBody -notmatch
+    '(?ms)ChildProcessPolicy[ \t\r\n]*\{[ \t\r\n]*kill_on_drop:[ \t]*false,[ \t\r\n]*#\[cfg\(windows\)\][ \t\r\n]*creation_flags:[ \t]*0x0800_0000,[ \t\r\n]*\}'
+) {
+    Add-ContractFailure `
+        -Message "Core operation long-child CREATE_NO_WINDOW policy must remain 0x08000000 with kill_on_drop false."
+}
+
+if (
+    $null -ne $coreOperationCodeView -and
+    $coreOperationCodeView.Code -match
+    '\.kill_on_drop\([ \t\r\n]*true[ \t\r\n]*\)'
+) {
+    Add-ContractFailure `
+        -Message "Core operation coordinator must reject kill_on_drop(true) for transactional children."
+}
+
+$operationEventSink = Get-UniqueBracedItem `
+    -Source $desktopLib `
+    -SignaturePattern '(?m)^impl[ \t]+OperationEventSink[ \t]+for[ \t]+TauriOperationEventSink[ \t]*' `
+    -Description "Desktop operation event sink implementation" `
+    -TopLevel `
+    -CodeView $desktopLibCodeView
+$operationEventEmit = if ($null -ne $operationEventSink) {
+    Get-UniqueBracedItem `
+        -Source $operationEventSink.Body `
+        -SignaturePattern "(?m)^[ \t]*fn[ \t]+emit[ \t]*<'a>[ \t]*\(" `
+        -Description "Desktop operation event sink emit method" `
+        -TopLevel
+}
+else {
+    $null
+}
+$operationEventEmitBody = if ($null -ne $operationEventEmit) {
+    (
+        Get-RustCodeView `
+            -Source $operationEventEmit.Body `
+            -Description "Desktop operation event sink emit body"
+    ).CommentStripped -replace '\s', ''
+}
+else {
+    ""
+}
+if (
+    $null -ne $operationEventEmit -and
+    $operationEventEmitBody -cne
+    'Box::pin(asyncmove{let_=self.app.emit("core-operation-progress",snapshot);})'
+) {
+    Add-ContractFailure `
+        -Message "Desktop operation sink must emit exactly one core-operation-progress event."
+}
+
+$coreOperationError = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^pub\(crate\)[ \t]+enum[ \t]+CoreOperationError[ \t]*' `
+    -Description "CoreOperationError enum" `
+    -TopLevel `
+    -CodeView $coreOperationCodeView
+$coreOperationErrorBody = if ($null -ne $coreOperationError) {
+    $coreOperationCodeView.CommentStripped.Substring(
+        $coreOperationError.OpeningBraceIndex + 1,
+        $coreOperationError.ClosingBraceIndex -
+            $coreOperationError.OpeningBraceIndex -
+            1
+    )
+}
+else {
+    ""
+}
+if ($null -ne $coreOperationError) {
+    $operationConflictMatches = [regex]::Matches(
+        $coreOperationErrorBody,
+        '(?m)^[ \t]*#\[error\("operation_in_progress"\)\][ \t]*\r?\n[ \t]*OperationInProgress[ \t]*,[ \t]*$'
+    )
+    if ($operationConflictMatches.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "CoreOperationError must retain the exact operation_in_progress conflict code."
+    }
+    $developmentManagedMatches = [regex]::Matches(
+        $coreOperationErrorBody,
+        '(?m)^[ \t]*#\[error\("development_runtime_managed_by_ide"\)\][ \t]*\r?\n[ \t]*DevelopmentRuntimeManagedByIde[ \t]*,[ \t]*$'
+    )
+    if ($developmentManagedMatches.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "CoreOperationError must retain development_runtime_managed_by_ide for the backend update gate."
+    }
+}
+
+$trustedProductionExecutable = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+trusted_production_executable[ \t]*\(' `
+    -Description "Core operation trusted production executable gate" `
+    -CodeView $coreOperationCodeView
+if (
+    $null -ne $trustedProductionExecutable -and
+    $trustedProductionExecutable.CodeBody -notmatch
+    '(?ms)if[ \t\r\n]+runtime\.channel\(\)[ \t\r\n]*==[ \t\r\n]*WokCoreRuntimeChannel::Development[ \t\r\n]*\{[ \t\r\n]*return[ \t\r\n]+Err\(CoreOperationError::DevelopmentRuntimeManagedByIde\)[ \t]*;[ \t\r\n]*\}'
+) {
+    Add-ContractFailure `
+        -Message "Backend development update gate must reject Development before trusted executable reuse or discovery."
+}
+
+$checkUpdate = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*pub\(crate\)[ \t]+async[ \t]+fn[ \t]+check_update[ \t]*\(' `
+    -Description "Core operation update check" `
+    -CodeView $coreOperationCodeView
+if ($null -ne $checkUpdate) {
+    $null = Get-UniqueDirectStatementIndex `
+        -Source $checkUpdate.Body `
+        -Pattern '(?m)^[ \t]*let[ \t]+executable[ \t]*=[ \t]*self\.trusted_production_executable\(\)\.await\?[ \t]*;' `
+        -Description "check_update must obtain a production-gated trusted executable"
+}
+
+$installUpdate = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*pub\(crate\)[ \t]+async[ \t]+fn[ \t]+install_update[ \t]*\(' `
+    -Description "Core operation update install" `
+    -CodeView $coreOperationCodeView
+if ($null -ne $installUpdate) {
+    $developmentGateIndex = Get-UniqueDirectStatementIndex `
+        -Source $installUpdate.Body `
+        -Pattern '(?m)^[ \t]*self\.require_production_channel\(\)\.await\?[ \t]*;' `
+        -Description "install_update must reject Development before validation or child work"
+    $versionValidationIndex = Get-UniqueDirectStatementIndex `
+        -Source $installUpdate.Body `
+        -Pattern '(?m)^[ \t]*Version::parse\(expected_version\)\.map_err\(\|_\|[ \t]*CoreOperationError::InvalidProgress\)\?[ \t]*;' `
+        -Description "install_update expected-version validation"
+    if (
+        $developmentGateIndex -ge 0 -and
+        $versionValidationIndex -ge 0 -and
+        $developmentGateIndex -ge $versionValidationIndex
+    ) {
+        Add-ContractFailure `
+            -Message "install_update must reject Development before validation or child work."
+    }
+}
+
+$frontendEligibility = Get-UniqueBracedItem `
+    -Source $coreUpdateEligibility `
+    -SignaturePattern '(?m)^export[ \t]+function[ \t]+isCoreUpdateEligible[ \t]*\(' `
+    -Description "Frontend core update eligibility" `
+    -TopLevel
+if (
+    $null -ne $frontendEligibility -and
+    ($frontendEligibility.Body -replace '\s', '') -ne
+    'return(status?.runtime_channel==="production"&&eligibleUpdateStates.has(status.state));'
+) {
+    Add-ContractFailure `
+        -Message "Frontend update eligibility must require the production runtime channel and an eligible state."
+}
+
+$coreLifecycleCodeView = Get-RustCodeView `
+    -Source $coreLifecycle `
+    -Description "Core lifecycle frontend source"
+if ($null -ne $coreLifecycleCodeView) {
+    $eligibilityCalls = [regex]::Matches(
+        $coreLifecycleCodeView.Code,
+        '(?<![A-Za-z0-9_])isCoreUpdateEligible[ \t\r\n]*\('
+    )
+    if ($eligibilityCalls.Count -ne 9) {
+        Add-ContractFailure `
+            -Message "Core lifecycle must retain all nine active shared update eligibility checks."
+    }
+    foreach ($requiredGate in @(
+            @{
+                Pattern = '(?s)operation[ \t]*!==[ \t]*undefined[ \t\r\n]*\|\|[ \t\r\n]*!isCoreUpdateEligible\([ \t]*status\.data[ \t]*\)'
+                Message = "Automatic update check must use the shared eligibility gate."
+            },
+            @{
+                Pattern = '(?s)activeUpdateCheckRequestId\.current[ \t]*!==[ \t]*undefined[ \t\r\n]*\|\|[ \t\r\n]*!latestBridgeReady\.current[ \t\r\n]*\|\|[ \t\r\n]*blocksUpdateInteraction\(latestOperation\.current\)[ \t\r\n]*\|\|[ \t\r\n]*!isCoreUpdateEligible\(latestStatus\.current\)'
+                Message = "Manual update check must use the shared eligibility gate."
+            },
+            @{
+                Pattern = '(?s)const[ \t]+requestUpdate[ \t]*=[ \t]*useCallback\([ \t\r\n]*\(trigger\?:[ \t]*HTMLButtonElement\)[ \t]*=>[ \t]*\{[ \t\r\n]*if[ \t]*\([ \t\r\n]*!latestBridgeReady\.current[ \t\r\n]*\|\|[ \t\r\n]*blocksUpdateInteraction\(latestOperation\.current\)[ \t\r\n]*\|\|[ \t\r\n]*!isCoreUpdateEligible\(latestStatus\.current\)[ \t\r\n]*\|\|[ \t\r\n]*updateCheck\?\.code[ \t]*!==[ \t]*'
+                Message = "Update prompt must use the shared eligibility gate."
+            },
+            @{
+                Pattern = '(?s)const[ \t]+confirmUpdate[ \t]*=[ \t]*useCallback\(\(\)[ \t]*=>[ \t]*\{[ \t\r\n]*const[ \t]+targetVersion[ \t]*=[ \t]*updateCheck\?\.targetVersion[ \t]*;[ \t\r\n]*if[ \t]*\([ \t\r\n]*updateRequested\.current[ \t\r\n]*\|\|[ \t\r\n]*!latestBridgeReady\.current[ \t\r\n]*\|\|[ \t\r\n]*blocksUpdateInteraction\(latestOperation\.current\)[ \t\r\n]*\|\|[ \t\r\n]*!isCoreUpdateEligible\(latestStatus\.current\)[ \t\r\n]*\|\|[ \t\r\n]*updateCheck\?\.code[ \t]*!==[ \t]*'
+                Message = "Update confirmation must use the shared eligibility gate."
+            }
+        )) {
+        if ($coreLifecycleCodeView.Code -notmatch $requiredGate.Pattern) {
+            Add-ContractFailure -Message $requiredGate.Message
+        }
+    }
+}
+
 $runtimeCodeView = Get-RustCodeView `
     -Source $runtimeSelector `
     -Description "WokCore runtime selector source"
