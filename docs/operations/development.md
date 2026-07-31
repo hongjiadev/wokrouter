@@ -152,9 +152,41 @@ test names and fixtures:
    backend, frontend, and session-lifetime gates.
 7. **Chinese and English UI.** Run
    `pnpm.cmd --dir apps/desktop exec vitest run src/locale.test.ts` for operating-system
-   locale detection, including `zh-CN`. Full translated visible and ARIA
-   lifecycle strings belong to the separate Windows/i18n acceptance plan and
-   are not claimed by the lifecycle fixtures above.
+   locale detection, including `zh-CN`, then complete the Windows desktop
+   checklist below. The automated locale fixture does not claim the manual GUI
+   or screen-reader observations.
+
+## Windows desktop locale and release acceptance
+
+Run `pnpm --dir apps/desktop i18n:check` before this checklist. Record the
+Windows version, configured UI locale, build kind, and observed result for each
+manual run; automated catalog and PE gates do not substitute for these GUI
+observations.
+
+1. Start a debug desktop build and confirm its console remains available for
+   development diagnostics. Then build the packaged Windows release and
+   confirm it opens without a console window. The debug console is intentional;
+   a packaged release showing one is a failure. Independently inspect
+   `target/release/wokrouter-desktop.exe` with `Get-PeSubsystem` from
+   `tests/release/WokRouter.ReleaseContract.psm1`; the release value must be
+   `2`.
+2. Set the Windows UI locale to each supported Simplified Chinese form:
+   `zh-CN`, `zh`, and `zh-Hans`. Fully close and relaunch WokRouter after each
+   change, and verify Simplified Chinese is already present on the first paint,
+   without an English-to-Chinese flash.
+3. Repeat with `zh-TW`, `zh-HK`, and `zh-Hant`. These Traditional Chinese
+   locale forms are intentionally unsupported and must show the English
+   fallback from the first paint.
+4. In a test-only build, disconnect or disable the `system_locale` invoke and
+   relaunch. Verify locale selection falls back first to
+   `navigator.languages`/`navigator.language`; repeat with no supported
+   navigator locale and verify the final English fallback. Do not ship the
+   bridge-disabled test build.
+5. In both `en` and `zh-CN`, walk the shell, WokCore lifecycle states, Provider
+   and Session flows, usage, diagnostics, errors, confirmation dialogs, and
+   recovery paths. Inspect visible copy, placeholders, titles, and every
+   screen-reader label or live announcement. Brand names and reviewed technical
+   identifiers may remain unchanged; untranslated current UI copy is a failure.
 
 ## Foundation quality gate
 

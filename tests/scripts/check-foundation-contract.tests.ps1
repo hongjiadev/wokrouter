@@ -21,6 +21,7 @@ function New-ContractFixture {
     $null = New-Item -ItemType Directory -Path (Join-Path $root ".github/workflows") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/cli/src/commands") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src/components") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src/i18n/locales") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri/src") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri/src/core_operation") -Force
@@ -29,6 +30,7 @@ function New-ContractFixture {
     $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-platform/src") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "crates/wokrouter-platform/tests") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "docs/operations") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "tests/release") -Force
     Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot ".github/workflows/ci.yml") `
         -Destination (Join-Path $root ".github/workflows/ci.yml")
@@ -57,6 +59,21 @@ function New-ContractFixture {
         -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src/locale.test.ts") `
         -Destination (Join-Path $root "apps/desktop/src/locale.test.ts")
     Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/package.json") `
+        -Destination (Join-Path $root "apps/desktop/package.json")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src/main.tsx") `
+        -Destination (Join-Path $root "apps/desktop/src/main.tsx")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src/i18n/index.ts") `
+        -Destination (Join-Path $root "apps/desktop/src/i18n/index.ts")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src/i18n/locales/en.json") `
+        -Destination (Join-Path $root "apps/desktop/src/i18n/locales/en.json")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src/i18n/locales/zh-CN.json") `
+        -Destination (Join-Path $root "apps/desktop/src/i18n/locales/zh-CN.json")
+    Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/src/control.rs") `
         -Destination (Join-Path $root "apps/desktop/src-tauri/src/control.rs")
     Copy-Item `
@@ -68,6 +85,12 @@ function New-ContractFixture {
     Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/src/lib.rs") `
         -Destination (Join-Path $root "apps/desktop/src-tauri/src/lib.rs")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/src/main.rs") `
+        -Destination (Join-Path $root "apps/desktop/src-tauri/src/main.rs")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "tests/release/package-windows-assets.ps1") `
+        -Destination (Join-Path $root "tests/release/package-windows-assets.ps1")
     Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "crates/wokrouter-platform/src/wokcore_runtime.rs") `
         -Destination (Join-Path $root "crates/wokrouter-platform/src/wokcore_runtime.rs")
@@ -341,6 +364,91 @@ try {
         if (-not $rejected) {
             throw "duplicate mutation source should be rejected"
         }
+    }
+
+    Invoke-Scenario -Name "desktop bootstrap cannot render before i18n initialization" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/main.tsx" `
+            -OldText "  await initializeI18n(locale);`n" `
+            -NewText ""
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/main.tsx" `
+            -OldText @"
+  createRoot(root).render(
+    <StrictMode>
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
+    </StrictMode>,
+  );
+"@ `
+            -NewText @"
+  createRoot(root).render(
+    <StrictMode>
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
+    </StrictMode>,
+  );
+  await initializeI18n(locale);
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "before desktop rendering" `
+            -Scenario "desktop bootstrap with reversed i18n initialization order"
+    }
+
+    Invoke-Scenario -Name "Simplified Chinese catalog cannot be removed" -Test {
+        $root = New-ContractFixture
+        Remove-Item `
+            -LiteralPath (Join-Path $root "apps/desktop/src/i18n/locales/zh-CN.json") `
+            -Force
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "Simplified Chinese catalog" `
+            -Scenario "desktop without the Simplified Chinese catalog"
+    }
+
+    Invoke-Scenario -Name "desktop PE check cannot survive only in dead code" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @"
+if ((Get-PeSubsystem -Path `$desktop) -ne 2) {
+    throw "Windows desktop executable must use the GUI subsystem."
+}
+"@ `
+            -NewText @"
+if (`$false) {
+    if ((Get-PeSubsystem -Path `$desktop) -ne 2) {
+        throw "Windows desktop executable must use the GUI subsystem."
+    }
+}
+"@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "active script-scope source desktop GUI subsystem check" `
+            -Scenario "desktop PE subsystem check retained only in dead code"
+    }
+
+    Invoke-Scenario -Name "frontend CI cannot omit the catalog check" -Test {
+        $root = New-ContractFixture
+        Edit-WorkflowJob `
+            -Root $root `
+            -JobName "frontend" `
+            -OldText @"
+      - name: Check desktop translation catalogs
+        run: pnpm --dir apps/desktop i18n:check
+"@ `
+            -NewText ""
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "pnpm --dir apps/desktop i18n:check" `
+            -Scenario "frontend CI without the desktop catalog check"
     }
 
     $lifecycleMutations = @(

@@ -25,6 +25,13 @@ $coreUpdateEligibilityPath = Join-Path $rootPath "apps/desktop/src/coreUpdateEli
 $coreLifecyclePath = Join-Path $rootPath "apps/desktop/src/components/CoreLifecycle.tsx"
 $coreLifecycleTestsPath = Join-Path $rootPath "apps/desktop/src/components/CoreLifecycle.test.tsx"
 $localeTestsPath = Join-Path $rootPath "apps/desktop/src/locale.test.ts"
+$desktopPackagePath = Join-Path $rootPath "apps/desktop/package.json"
+$desktopBootstrapPath = Join-Path $rootPath "apps/desktop/src/main.tsx"
+$desktopI18nPath = Join-Path $rootPath "apps/desktop/src/i18n/index.ts"
+$englishCatalogPath = Join-Path $rootPath "apps/desktop/src/i18n/locales/en.json"
+$simplifiedChineseCatalogPath = Join-Path $rootPath "apps/desktop/src/i18n/locales/zh-CN.json"
+$desktopMainPath = Join-Path $rootPath "apps/desktop/src-tauri/src/main.rs"
+$windowsPackagerPath = Join-Path $rootPath "tests/release/package-windows-assets.ps1"
 $coreOperationParserPath = Join-Path $rootPath "apps/desktop/src-tauri/src/core_operation/parser.rs"
 $wokcoreInstallTestsPath = Join-Path $rootPath "crates/wokrouter-platform/tests/wokcore_install.rs"
 $cliStartTestsPath = Join-Path $rootPath "apps/cli/src/commands/start/tests.rs"
@@ -39,6 +46,65 @@ function Add-ContractFailure {
     if (-not $failures.Contains($Message)) {
         $failures.Add($Message)
     }
+}
+
+function Get-PowerShellAst {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput(
+        $Source,
+        [ref] $tokens,
+        [ref] $parseErrors
+    )
+    if ($parseErrors.Count -ne 0) {
+        throw "$Description contains invalid PowerShell syntax."
+    }
+    return $ast
+}
+
+function Get-ExactPowerShellGuardAst {
+    param(
+        [Parameter(Mandatory)]
+        [object]$Ast,
+
+        [Parameter(Mandatory)]
+        [string]$Condition,
+
+        [Parameter(Mandatory)]
+        [string]$ThrowStatement
+    )
+
+    return @(
+        $Ast.FindAll(
+            {
+                param($node)
+
+                if (
+                    $node -isnot [Management.Automation.Language.IfStatementAst] -or
+                    $node.Clauses.Count -ne 1 -or
+                    $null -ne $node.ElseClause
+                ) {
+                    return $false
+                }
+                $statements = @($node.Clauses[0].Item2.Statements)
+                return (
+                    $node.Clauses[0].Item1.Extent.Text.Trim() -ceq $Condition -and
+                    $statements.Count -eq 1 -and
+                    $statements[0] -is [Management.Automation.Language.ThrowStatementAst] -and
+                    $statements[0].Extent.Text.Trim() -ceq $ThrowStatement
+                )
+            },
+            $true
+        )
+    )
 }
 
 function Set-RustMaskedRange {
@@ -1768,6 +1834,11 @@ $coreUpdateEligibility = Get-Content -LiteralPath $coreUpdateEligibilityPath -Ra
 $coreLifecycle = Get-Content -LiteralPath $coreLifecyclePath -Raw -Encoding UTF8
 $coreLifecycleTests = Get-Content -LiteralPath $coreLifecycleTestsPath -Raw -Encoding UTF8
 $localeTests = Get-Content -LiteralPath $localeTestsPath -Raw -Encoding UTF8
+$desktopPackageSource = Get-Content -LiteralPath $desktopPackagePath -Raw -Encoding UTF8
+$desktopBootstrap = Get-Content -LiteralPath $desktopBootstrapPath -Raw -Encoding UTF8
+$desktopI18n = Get-Content -LiteralPath $desktopI18nPath -Raw -Encoding UTF8
+$desktopMain = Get-Content -LiteralPath $desktopMainPath -Raw -Encoding UTF8
+$windowsPackager = Get-Content -LiteralPath $windowsPackagerPath -Raw -Encoding UTF8
 $coreOperationParser = Get-Content -LiteralPath $coreOperationParserPath -Raw -Encoding UTF8
 $wokcoreInstallTests = Get-Content -LiteralPath $wokcoreInstallTestsPath -Raw -Encoding UTF8
 $cliStartTests = Get-Content -LiteralPath $cliStartTestsPath -Raw -Encoding UTF8
@@ -1784,6 +1855,169 @@ $requiredJobs = @(
 foreach ($jobName in $requiredJobs) {
     if (-not $jobs.ContainsKey($jobName)) {
         Add-ContractFailure -Message "Workflow jobs mapping is missing '$jobName'."
+    }
+}
+
+$desktopPackage = $null
+try {
+    $desktopPackage = $desktopPackageSource | ConvertFrom-Json
+}
+catch {
+    Add-ContractFailure -Message "Desktop package manifest must contain valid JSON."
+}
+if (
+    $null -ne $desktopPackage -and
+    $desktopPackage.scripts.'i18n:check' -cne
+    "node scripts/check-i18n-catalogs.mjs"
+) {
+    Add-ContractFailure `
+        -Message "Desktop package must expose the standalone i18n:check catalog command."
+}
+
+foreach ($catalog in @(
+        @{
+            Path = $englishCatalogPath
+            Description = "English catalog"
+        },
+        @{
+            Path = $simplifiedChineseCatalogPath
+            Description = "Simplified Chinese catalog"
+        }
+    )) {
+    if (-not (Test-Path -LiteralPath $catalog.Path -PathType Leaf)) {
+        Add-ContractFailure `
+            -Message "Desktop i18n must retain the $($catalog.Description)."
+    }
+}
+
+$bootstrap = Get-UniqueBracedItem `
+    -Source $desktopBootstrap `
+    -SignaturePattern '(?m)^export[ \t]+async[ \t]+function[ \t]+bootstrap[ \t]*\(' `
+    -Description "Desktop bootstrap" `
+    -TopLevel
+if ($null -ne $bootstrap) {
+    $systemLocaleCalls = @()
+    foreach ($candidate in @([regex]::Matches(
+                $bootstrap.CodeBody,
+                '(?<![A-Za-z0-9_$])invoke[ \t\r\n]*<[ \t\r\n]*string[ \t\r\n]*>[ \t\r\n]*\('
+            ))) {
+        $sourceTail = $bootstrap.Body.Substring($candidate.Index)
+        if (
+            $sourceTail -match
+            '^invoke[ \t\r\n]*<[ \t\r\n]*string[ \t\r\n]*>[ \t\r\n]*\([ \t\r\n]*"system_locale"[ \t\r\n]*\)'
+        ) {
+            $systemLocaleCalls += $candidate
+        }
+    }
+    $initializeCalls = @([regex]::Matches(
+            $bootstrap.CodeBody,
+            '(?<![A-Za-z0-9_$])await[ \t\r\n]+initializeI18n[ \t\r\n]*\([ \t\r\n]*locale[ \t\r\n]*\)'
+        ))
+    $renderCalls = @([regex]::Matches(
+            $bootstrap.CodeBody,
+            '(?<![A-Za-z0-9_$])createRoot[ \t\r\n]*\([ \t\r\n]*root[ \t\r\n]*\)[ \t\r\n]*\.[ \t\r\n]*render[ \t\r\n]*\('
+        ))
+    if ($systemLocaleCalls.Count -ne 1) {
+        Add-ContractFailure `
+            -Message 'Desktop bootstrap must call invoke<string>("system_locale") exactly once.'
+    }
+    if ($initializeCalls.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "Desktop bootstrap must await initializeI18n(locale) exactly once."
+    }
+    if ($renderCalls.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "Desktop bootstrap must call createRoot(root).render exactly once."
+    }
+    if (
+        $systemLocaleCalls.Count -eq 1 -and
+        $initializeCalls.Count -eq 1 -and
+        $renderCalls.Count -eq 1 -and
+        (
+            $systemLocaleCalls[0].Index -ge $initializeCalls[0].Index -or
+            $initializeCalls[0].Index -ge $renderCalls[0].Index
+        )
+    ) {
+        Add-ContractFailure `
+            -Message "Desktop bootstrap must resolve the system locale and await i18n before desktop rendering."
+    }
+}
+
+$i18nInitializer = Get-UniqueBracedItem `
+    -Source $desktopI18n `
+    -SignaturePattern '(?m)^export[ \t]+async[ \t]+function[ \t]+initializeI18n[ \t]*\(' `
+    -Description "Desktop i18n initializer" `
+    -TopLevel
+if ($null -ne $i18nInitializer) {
+    $supportedLanguageProperties = @([regex]::Matches(
+            $i18nInitializer.CodeBody,
+            '(?<![A-Za-z0-9_$])supportedLngs[ \t\r\n]*:'
+        ))
+    $exactSupportedLanguageProperties = @()
+    foreach ($candidate in $supportedLanguageProperties) {
+        $sourceTail = $i18nInitializer.Body.Substring($candidate.Index)
+        if (
+            $sourceTail -match
+            '^supportedLngs[ \t\r\n]*:[ \t\r\n]*\[[ \t\r\n]*"en"[ \t\r\n]*,[ \t\r\n]*"zh-CN"[ \t\r\n]*\]'
+        ) {
+            $exactSupportedLanguageProperties += $candidate
+        }
+    }
+    if (
+        $supportedLanguageProperties.Count -ne 1 -or
+        $exactSupportedLanguageProperties.Count -ne 1
+    ) {
+        Add-ContractFailure `
+            -Message 'Desktop i18n must define supportedLngs: ["en", "zh-CN"] exactly once in initializeI18n.'
+    }
+}
+
+$desktopMainCodeView = Get-RustCodeView `
+    -Source $desktopMain `
+    -Description "Desktop Rust entry point"
+if ($null -ne $desktopMainCodeView) {
+    $subsystemAttributes = @([regex]::Matches(
+            $desktopMainCodeView.Code,
+            '(?m)^#!\[cfg_attr\([ \t]*all\([ \t]*windows[ \t]*,[ \t]*not\([ \t]*debug_assertions[ \t]*\)[ \t]*\)[ \t]*,[ \t]*windows_subsystem[ \t]*=[ \t]+\)[ \t]*\][ \t]*$'
+        ))
+    $exactSubsystemAttributes = @(
+        $subsystemAttributes | Where-Object {
+            ($desktopMain.Substring($_.Index, $_.Length) -replace '\s', '') -ceq
+            '#![cfg_attr(all(windows,not(debug_assertions)),windows_subsystem="windows")]'
+        }
+    )
+    if ($exactSubsystemAttributes.Count -ne 1) {
+        Add-ContractFailure `
+            -Message 'Desktop Rust entry point must retain windows_subsystem = "windows" for non-debug Windows builds.'
+    }
+}
+
+$windowsPackagerAst = $null
+try {
+    $windowsPackagerAst = Get-PowerShellAst `
+        -Source $windowsPackager `
+        -Description "Windows packager"
+}
+catch {
+    Add-ContractFailure `
+        -Message "Windows packager GUI subsystem checks are invalid: $($_.Exception.Message)"
+}
+if ($null -ne $windowsPackagerAst) {
+    $sourceDesktopGuards = @(
+        Get-ExactPowerShellGuardAst `
+            -Ast $windowsPackagerAst `
+            -Condition '(Get-PeSubsystem -Path $desktop) -ne 2' `
+            -ThrowStatement 'throw "Windows desktop executable must use the GUI subsystem."'
+    )
+    if (
+        $sourceDesktopGuards.Count -ne 1 -or
+        -not [object]::ReferenceEquals(
+            $sourceDesktopGuards[0].Parent,
+            $windowsPackagerAst.EndBlock
+        )
+    ) {
+        Add-ContractFailure `
+            -Message "Windows packager must retain the active script-scope source desktop GUI subsystem check."
     }
 }
 
@@ -1870,11 +2104,52 @@ if ($jobs.ContainsKey("frontend")) {
     $frontendSteps = @(Get-JobSteps -Job $jobs["frontend"])
     foreach ($command in @(
             "pnpm --dir apps/desktop install --frozen-lockfile",
+            "pnpm --dir apps/desktop i18n:check",
             "pnpm --dir apps/desktop typecheck",
             "pnpm --dir apps/desktop test:unit",
             "pnpm --dir apps/desktop build"
         )) {
         Assert-JobRunStep -JobName "frontend" -Steps $frontendSteps -Command $command
+    }
+
+    $installIndex = -1
+    $catalogIndex = -1
+    $testIndex = -1
+    for ($index = 0; $index -lt $frontendSteps.Count; $index += 1) {
+        if (-not $frontendSteps[$index].Fields.ContainsKey("run")) {
+            continue
+        }
+        switch ($frontendSteps[$index].Fields["run"]) {
+            "pnpm --dir apps/desktop install --frozen-lockfile" {
+                $installIndex = $index
+            }
+            "pnpm --dir apps/desktop i18n:check" {
+                $catalogIndex = $index
+                if (
+                    -not $frontendSteps[$index].Fields.ContainsKey("name") -or
+                    $frontendSteps[$index].Fields["name"] -cne
+                    "Check desktop translation catalogs"
+                ) {
+                    Add-ContractFailure `
+                        -Message "Frontend catalog check step must use the documented name."
+                }
+            }
+            "pnpm --dir apps/desktop test:unit" {
+                $testIndex = $index
+            }
+        }
+    }
+    if (
+        $installIndex -ge 0 -and
+        $catalogIndex -ge 0 -and
+        $testIndex -ge 0 -and
+        (
+            $installIndex -ge $catalogIndex -or
+            $catalogIndex -ge $testIndex
+        )
+    ) {
+        Add-ContractFailure `
+            -Message "Frontend catalog check must run after frozen install and before tests."
     }
 
     $pnpmStep = Get-ActionStep -Steps $frontendSteps -Action "pnpm/action-setup@v6"
@@ -2261,7 +2536,7 @@ $lifecycleAcceptanceFixtures = @(
         Kind = "TypeScript"
         Source = $localeTests
         Names = @(
-            "keeps zh-CN left-to-right"
+            "initializes the document from the selected %s catalog"
         )
     }
 )

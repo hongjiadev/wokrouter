@@ -93,6 +93,8 @@ jobs:
           cache-dependency-path: apps/desktop/pnpm-lock.yaml
       - name: Install frontend dependencies
         run: pnpm --dir apps/desktop install --frozen-lockfile
+      - name: Check desktop translation catalogs
+        run: pnpm --dir apps/desktop i18n:check
       - name: Typecheck frontend
         run: pnpm --dir apps/desktop typecheck
       - name: Test frontend
