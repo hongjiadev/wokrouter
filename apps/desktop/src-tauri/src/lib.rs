@@ -105,6 +105,11 @@ async fn install_core_update_for(
 }
 
 #[tauri::command]
+fn system_locale() -> String {
+    wokrouter_platform::detect_system_locale()
+}
+
+#[tauri::command]
 async fn core_status(state: tauri::State<'_, DesktopState>) -> Result<CoreStatus, String> {
     core_status_for(&state).await
 }
@@ -160,6 +165,7 @@ pub fn run() -> tauri::Result<()> {
         .manage(state)
         .manage(ManagementState::discover(runtime))
         .invoke_handler(tauri::generate_handler![
+            system_locale,
             core_status,
             start_core,
             stop_core,
@@ -183,4 +189,18 @@ pub fn run() -> tauri::Result<()> {
             wokcore::export_diagnostics,
         ])
         .run(tauri::generate_context!())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_locale_command_returns_a_safe_non_empty_candidate() {
+        let locale = system_locale();
+
+        assert!(!locale.is_empty());
+        assert!(!locale.contains(['/', '\\']));
+        assert!(!locale.chars().any(char::is_control));
+    }
 }

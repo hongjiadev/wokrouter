@@ -1,51 +1,57 @@
+import type { SupportedLocale } from "./i18n";
+
+export type { SupportedLocale } from "./i18n";
+
 export type DocumentDirection = "ltr" | "rtl";
 
 export interface DocumentLocale {
-  lang: string;
+  lang: SupportedLocale;
   dir: DocumentDirection;
 }
 
-interface NavigatorLocaleSource {
+export interface NavigatorLocaleSource {
   languages?: readonly string[];
   language?: string;
 }
 
-const rightToLeftLanguages = new Set(["ar", "fa", "ur"]);
-
-export function resolveDocumentLocale(
-  candidates: readonly unknown[],
-): DocumentLocale {
-  for (const candidate of candidates) {
-    if (typeof candidate !== "string" || candidate.trim() === "") {
-      continue;
-    }
-    try {
-      const [lang] = Intl.getCanonicalLocales(
-        candidate.trim().replaceAll("_", "-"),
-      );
-      if (lang) {
-        const language = lang.split("-", 1)[0].toLowerCase();
-        return {
-          lang,
-          dir: rightToLeftLanguages.has(language) ? "rtl" : "ltr",
-        };
-      }
-    } catch {
-      // Try the next operating-system locale candidate.
-    }
+function matchCandidate(candidate: string): SupportedLocale {
+  const value = candidate.trim().replaceAll("_", "-").toLowerCase();
+  if (
+    value === "zh" ||
+    value === "zh-cn" ||
+    value === "zh-hans" ||
+    value.startsWith("zh-hans-")
+  ) {
+    return "zh-CN";
   }
-  return { lang: "en", dir: "ltr" };
+  return "en";
+}
+
+export function resolveSupportedLocale(
+  systemLocale: string | undefined,
+  browserLocales: readonly string[],
+): SupportedLocale {
+  if (systemLocale?.trim()) {
+    return matchCandidate(systemLocale);
+  }
+  const browser = browserLocales.find((candidate) => candidate.trim());
+  return browser ? matchCandidate(browser) : "en";
+}
+
+export function browserLocaleCandidates(
+  source: NavigatorLocaleSource,
+): string[] {
+  return [...new Set([...(source.languages ?? []), source.language])].filter(
+    (candidate): candidate is string => typeof candidate === "string",
+  );
 }
 
 export function initializeDocumentLocale(
-  root: HTMLElement = document.documentElement,
-  source: NavigatorLocaleSource = navigator,
+  root: HTMLElement,
+  locale: SupportedLocale,
 ): DocumentLocale {
-  const locale = resolveDocumentLocale([
-    ...(source.languages ?? []),
-    source.language,
-  ]);
-  root.lang = locale.lang;
-  root.dir = locale.dir;
-  return locale;
+  const documentLocale = { lang: locale, dir: "ltr" } as const;
+  root.lang = documentLocale.lang;
+  root.dir = documentLocale.dir;
+  return documentLocale;
 }

@@ -11,7 +11,7 @@ pub use client::{
     MutationError, MutationId, MutationJournal, MutationOperation, MutationStatus, OwnedMutation,
     PreparedMutation, RestoreResult,
 };
-pub use system::locale::{SystemContext, detect_system_context};
+pub use system::locale::{SystemContext, detect_system_context, detect_system_locale};
 pub use system::paths::AppPaths;
 pub use system::wokcore::discover_wokcore_executable;
 pub use wokcore_install::{

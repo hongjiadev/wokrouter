@@ -1,12 +1,16 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import { App } from "./App";
-import { initializeDocumentLocale } from "./locale";
+import { initializeI18n } from "./i18n";
+import {
+  browserLocaleCandidates,
+  initializeDocumentLocale,
+  resolveSupportedLocale,
+} from "./locale";
 import "./styles.css";
-
-initializeDocumentLocale();
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -19,15 +23,29 @@ const queryClient = new QueryClient({
   },
 });
 
-const root = document.getElementById("root");
-if (!root) {
-  throw new Error("WokRouter desktop root is missing.");
+export async function bootstrap(): Promise<void> {
+  const systemLocale = await invoke<string>("system_locale").catch(
+    () => undefined,
+  );
+  const locale = resolveSupportedLocale(
+    systemLocale,
+    browserLocaleCandidates(window.navigator),
+  );
+  await initializeI18n(locale);
+  initializeDocumentLocale(document.documentElement, locale);
+
+  const root = document.getElementById("root");
+  if (!root) {
+    throw new Error("WokRouter desktop root is missing.");
+  }
+
+  createRoot(root).render(
+    <StrictMode>
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
+    </StrictMode>,
+  );
 }
 
-createRoot(root).render(
-  <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <App />
-    </QueryClientProvider>
-  </StrictMode>,
-);
+void bootstrap();
