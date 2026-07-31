@@ -91,9 +91,12 @@ export function CoreLifecycle() {
     setRequestedManagementAreaRequestId,
   ] = useState(0);
   const installRequested = useRef(false);
-  const startupCheckRequested = useRef(false);
+  const startupCheckConsumed = useRef(false);
   const startupCheckRevision = useRef(0);
-  const updateCheckRequested = useRef(false);
+  const nextUpdateCheckRequestId = useRef(0);
+  const activeUpdateCheckRequestId = useRef<number | undefined>(
+    undefined,
+  );
   const updateRequested = useRef(false);
   const updateTrigger = useRef<HTMLButtonElement | null>(null);
   const confirmUpdateButton = useRef<HTMLButtonElement>(null);
@@ -128,6 +131,13 @@ export function CoreLifecycle() {
       if (!mounted.current) {
         return;
       }
+      const terminalKey = `${incoming.operationId}:${incoming.sequence}`;
+      if (
+        incoming.state === "succeeded" &&
+        processedSuccesses.current.has(terminalKey)
+      ) {
+        return;
+      }
       const reconciled = reconcileOperation(
         latestOperation.current,
         incoming,
@@ -135,6 +145,7 @@ export function CoreLifecycle() {
       latestOperation.current = reconciled;
       if (blocksUpdateInteraction(reconciled)) {
         startupCheckRevision.current += 1;
+        activeUpdateCheckRequestId.current = undefined;
       }
       if (
         incoming.operation === "update" &&
@@ -143,13 +154,6 @@ export function CoreLifecycle() {
       ) {
         rememberCoreUpdateCompletion(incoming);
         startupCheckRevision.current += 1;
-      }
-      const terminalKey = `${incoming.operationId}:${incoming.sequence}`;
-      if (
-        incoming.state === "succeeded" &&
-        processedSuccesses.current.has(terminalKey)
-      ) {
-        return;
       }
       setOperation((current) => reconcileOperation(current, incoming));
     },
@@ -280,6 +284,8 @@ export function CoreLifecycle() {
         unlisten?.();
         unlisten = undefined;
         if (active) {
+          latestOperation.current = undefined;
+          setOperation(undefined);
           setBridgeReady(false);
           setSetupFailure((failure) => failure ?? "bridge");
         }
@@ -295,13 +301,13 @@ export function CoreLifecycle() {
   useEffect(() => {
     if (
       !bridgeReady ||
-      startupCheckRequested.current ||
+      startupCheckConsumed.current ||
       operation !== undefined ||
       !isCoreUpdateEligible(status.data)
     ) {
       return;
     }
-    startupCheckRequested.current = true;
+    startupCheckConsumed.current = true;
     const revision = startupCheckRevision.current;
     void checkCoreUpdateOnce()
       .then((result) => {
@@ -450,20 +456,24 @@ export function CoreLifecycle() {
   const runManualUpdateCheck = useCallback(
     (openConfirmation: boolean, trigger?: HTMLButtonElement) => {
       if (
-        updateCheckRequested.current ||
+        activeUpdateCheckRequestId.current !== undefined ||
         !latestBridgeReady.current ||
         blocksUpdateInteraction(latestOperation.current) ||
         !isCoreUpdateEligible(latestStatus.current)
       ) {
         return;
       }
-      updateCheckRequested.current = true;
+      nextUpdateCheckRequestId.current += 1;
+      const requestId = nextUpdateCheckRequestId.current;
+      activeUpdateCheckRequestId.current = requestId;
+      startupCheckConsumed.current = true;
       setUpdateCheckPending(true);
       const revision = startupCheckRevision.current;
       void retryCoreUpdateCheck()
         .then((result) => {
           if (
             !mounted.current ||
+            activeUpdateCheckRequestId.current !== requestId ||
             revision !== startupCheckRevision.current ||
             !latestBridgeReady.current ||
             blocksUpdateInteraction(latestOperation.current) ||
@@ -495,6 +505,7 @@ export function CoreLifecycle() {
         .catch(() => {
           if (
             !mounted.current ||
+            activeUpdateCheckRequestId.current !== requestId ||
             revision !== startupCheckRevision.current ||
             !latestBridgeReady.current ||
             blocksUpdateInteraction(latestOperation.current) ||
@@ -506,7 +517,11 @@ export function CoreLifecycle() {
           setUpdateCheckFailed(true);
         })
         .finally(() => {
-          updateCheckRequested.current = false;
+          if (activeUpdateCheckRequestId.current === requestId) {
+            activeUpdateCheckRequestId.current = undefined;
+          } else {
+            return;
+          }
           if (mounted.current) {
             setUpdateCheckPending(false);
           }
@@ -544,6 +559,8 @@ export function CoreLifecycle() {
       return;
     }
     startupCheckRevision.current += 1;
+    startupCheckConsumed.current = false;
+    activeUpdateCheckRequestId.current = undefined;
     setUpdateCheck(undefined);
     setUpdateCheckFailed(false);
     setUpdateCheckPending(false);
@@ -713,7 +730,6 @@ export function CoreLifecycle() {
 
   if (
     status.data?.runtime_channel === "production" &&
-    status.data.state !== "missing" &&
     setupFailure === "bridge"
   ) {
     return (
@@ -733,7 +749,8 @@ export function CoreLifecycle() {
           </div>
           <p className="health-summary">
             WokRouter could not reconcile trusted operation progress.
-            Reconnect monitoring before checking for or starting an update.
+            Reconnect monitoring before starting or monitoring WokCore
+            setup and updates.
           </p>
           <div className="recovery">
             <button

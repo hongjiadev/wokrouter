@@ -521,6 +521,105 @@ it.each(ineligibleUpdateStatuses)(
   },
 );
 
+it.each([
+  ["candidate", "before"],
+  ["error", "before"],
+  ["candidate", "while"],
+  ["error", "while"],
+] as const)(
+  "restores a cached automatic %s result settled %s a transient ineligible state",
+  async (outcome, settleTiming) => {
+    vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
+    const automaticResult = deferred<
+      Awaited<ReturnType<typeof checkCoreUpdateOnce>>
+    >();
+    const underlyingCheck = vi.fn(() => automaticResult.promise);
+    const cachedAutomaticResult = underlyingCheck();
+    vi.mocked(checkCoreUpdateOnce).mockImplementation(
+      () => cachedAutomaticResult,
+    );
+    const view = renderLifecycle(undefined, false);
+
+    await waitFor(() => {
+      expect(checkCoreUpdateOnce).toHaveBeenCalledOnce();
+    });
+    if (settleTiming === "before") {
+      await act(async () => {
+        if (outcome === "candidate") {
+          automaticResult.resolve({
+            code: "update_available",
+            currentVersion: "0.2.0",
+            targetVersion: "0.2.1",
+          });
+          await automaticResult.promise;
+        } else {
+          automaticResult.reject(new Error("automatic check failed"));
+          await automaticResult.promise.catch(() => undefined);
+        }
+      });
+      if (outcome === "candidate") {
+        expect(
+          await screen.findByRole("button", {
+            name: "Upgrade WokCore",
+          }),
+        ).toBeEnabled();
+      } else {
+        expect(
+          await screen.findByText("WokCore update check unavailable"),
+        ).toBeInTheDocument();
+      }
+    }
+
+    act(() => {
+      view.queryClient.setQueryData(["core-status"], {
+        ...runningStatus,
+        state: "starting",
+        phase: "starting",
+      });
+    });
+    expect(await screen.findByText("WokCore starting")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Upgrade WokCore" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("WokCore update check unavailable"),
+    ).not.toBeInTheDocument();
+
+    if (settleTiming === "while") {
+      await act(async () => {
+        if (outcome === "candidate") {
+          automaticResult.resolve({
+            code: "update_available",
+            currentVersion: "0.2.0",
+            targetVersion: "0.2.1",
+          });
+          await automaticResult.promise;
+        } else {
+          automaticResult.reject(new Error("automatic check failed"));
+          await automaticResult.promise.catch(() => undefined);
+        }
+      });
+    }
+
+    act(() => {
+      view.queryClient.setQueryData(["core-status"], runningStatus);
+    });
+    if (outcome === "candidate") {
+      expect(
+        await screen.findByRole("button", {
+          name: "Upgrade WokCore",
+        }),
+      ).toBeEnabled();
+    } else {
+      expect(
+        await screen.findByText("WokCore update check unavailable"),
+      ).toBeInTheDocument();
+    }
+    expect(checkCoreUpdateOnce).toHaveBeenCalledTimes(2);
+    expect(underlyingCheck).toHaveBeenCalledOnce();
+  },
+);
+
 it("discards a manual update result when production becomes development", async () => {
   vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
   vi.mocked(checkCoreUpdateOnce).mockRejectedValue(
@@ -649,6 +748,108 @@ it("discards a fresh retry result when operation monitoring reports active updat
   ).not.toBeInTheDocument();
   expect(installCoreUpdate).not.toHaveBeenCalled();
 });
+
+it.each(["resolve", "reject"] as const)(
+  "releases invalidated manual ownership without letting stale %s override a newer retry",
+  async (staleOutcome) => {
+    vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
+    vi.mocked(getCoreOperation).mockResolvedValue({
+      ...checkingUpdateOperation,
+      sequence: 8,
+      state: "failed",
+      phase: "completed",
+      errorCode: "recovery_required",
+    });
+    const firstRetry = deferred<
+      Awaited<ReturnType<typeof retryCoreUpdateCheck>>
+    >();
+    const secondRetry = deferred<
+      Awaited<ReturnType<typeof retryCoreUpdateCheck>>
+    >();
+    const unexpectedRetry = deferred<
+      Awaited<ReturnType<typeof retryCoreUpdateCheck>>
+    >();
+    vi.mocked(retryCoreUpdateCheck)
+      .mockReturnValueOnce(firstRetry.promise)
+      .mockReturnValueOnce(secondRetry.promise)
+      .mockReturnValue(unexpectedRetry.promise);
+    const user = userEvent.setup();
+
+    renderLifecycle(undefined, false);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Try update again",
+      }),
+    );
+    const concurrentOperation: CoreOperation = {
+      ...checkingUpdateOperation,
+      operationId: "55555555-5555-4555-8555-555555555555",
+    };
+    act(() => {
+      operationListener?.(concurrentOperation);
+    });
+    expect(
+      await screen.findByRole("heading", {
+        name: "Checking for a WokCore release",
+      }),
+    ).toBeInTheDocument();
+    act(() => {
+      operationListener?.({
+        ...concurrentOperation,
+        sequence: 1,
+        state: "failed",
+        phase: "completed",
+        errorCode: "recovery_required",
+      });
+    });
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Try update again",
+      }),
+    );
+    expect(retryCoreUpdateCheck).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      if (staleOutcome === "resolve") {
+        firstRetry.resolve({
+          code: "update_available",
+          currentVersion: "0.2.0",
+          targetVersion: "0.2.9",
+        });
+        await firstRetry.promise;
+      } else {
+        firstRetry.reject(new Error("stale retry failed"));
+        await firstRetry.promise.catch(() => undefined);
+      }
+    });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Try update again",
+      }),
+    );
+    expect(retryCoreUpdateCheck).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      secondRetry.resolve({
+        code: "update_available",
+        currentVersion: "0.2.0",
+        targetVersion: "0.2.2",
+      });
+      await secondRetry.promise;
+    });
+
+    expect(
+      await screen.findByRole("dialog", {
+        name: "Upgrade WokCore?",
+      }),
+    ).toHaveTextContent("0.2.2");
+    expect(screen.queryByText("0.2.9")).not.toBeInTheDocument();
+  },
+);
 
 it.each([
   "running",
@@ -1025,11 +1226,16 @@ it("returns management after active requests defer the update and reconfirms ret
 
 it("clears a stale current result without claiming an installation", async () => {
   vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
-  vi.mocked(checkCoreUpdateOnce).mockResolvedValue({
-    code: "update_available",
-    currentVersion: "0.2.0",
-    targetVersion: "0.2.1",
-  });
+  vi.mocked(checkCoreUpdateOnce)
+    .mockResolvedValueOnce({
+      code: "update_available",
+      currentVersion: "0.2.0",
+      targetVersion: "0.2.1",
+    })
+    .mockResolvedValue({
+      code: "current",
+      currentVersion: "0.2.0",
+    });
   const user = userEvent.setup();
 
   renderLifecycle(undefined, false);
@@ -1239,7 +1445,7 @@ it.each([
     "0.2.0",
   ],
 ] as const)(
-  "replaces the process update cache with %s before a remount",
+  "replaces the process update cache with %s for the next eligible epoch and a remount",
   async (_scenario, terminalOperation, currentVersion) => {
     vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
     const underlyingCheck = vi.fn().mockResolvedValue({
@@ -1278,12 +1484,15 @@ it.each([
         terminalOperation,
       );
     });
+    await waitFor(() => {
+      expect(checkCoreUpdateOnce).toHaveBeenCalledTimes(2);
+    });
     first.unmount();
 
     renderLifecycle(undefined, false);
     await screen.findByText("WokCore running");
     await waitFor(() => {
-      expect(checkCoreUpdateOnce).toHaveBeenCalledTimes(2);
+      expect(checkCoreUpdateOnce).toHaveBeenCalledTimes(3);
     });
     expect(underlyingCheck).toHaveBeenCalledTimes(1);
     expect(
@@ -1548,7 +1757,7 @@ it("offers safe recovery when operation listener registration fails", async () =
 
   expect(
     await screen.findByRole("heading", {
-      name: "WokCore setup unavailable",
+      name: "WokCore operation monitoring unavailable",
     }),
   ).toBeInTheDocument();
   expect(
@@ -1557,7 +1766,11 @@ it("offers safe recovery when operation listener registration fails", async () =
   expect(getCoreOperation).not.toHaveBeenCalled();
   expect(installAndStartCore).not.toHaveBeenCalled();
 
-  await user.click(screen.getByRole("button", { name: "Try again" }));
+  await user.click(
+    screen.getByRole("button", {
+      name: "Reconnect operation monitoring",
+    }),
+  );
 
   expect(listenForCoreOperation).toHaveBeenCalledTimes(2);
   expect(getCoreOperation).toHaveBeenCalledTimes(1);
@@ -1583,7 +1796,7 @@ it("removes a partial listener and recovers safely when initial status reconcili
 
   expect(
     await screen.findByRole("heading", {
-      name: "WokCore setup unavailable",
+      name: "WokCore operation monitoring unavailable",
     }),
   ).toBeInTheDocument();
   expect(
@@ -1592,7 +1805,11 @@ it("removes a partial listener and recovers safely when initial status reconcili
   expect(unlisten).toHaveBeenCalledTimes(1);
   expect(installAndStartCore).not.toHaveBeenCalled();
 
-  await user.click(screen.getByRole("button", { name: "Try again" }));
+  await user.click(
+    screen.getByRole("button", {
+      name: "Reconnect operation monitoring",
+    }),
+  );
 
   expect(listenForCoreOperation).toHaveBeenCalledTimes(2);
   expect(getCoreOperation).toHaveBeenCalledTimes(2);
@@ -1602,6 +1819,81 @@ it("removes a partial listener and recovers safely when initial status reconcili
       name: "Checking for a WokCore release",
     }),
   ).toBeInTheDocument();
+});
+
+it("recovers missing setup from repeated bridge arbitration without retaining stale progress", async () => {
+  vi.mocked(getCoreStatus).mockResolvedValue(missingStatus);
+  const initialOperation = deferred<CoreOperation | null>();
+  vi.mocked(getCoreOperation)
+    .mockReturnValueOnce(initialOperation.promise)
+    .mockRejectedValueOnce(
+      new Error("retry failed at C:\\private\\operation.json"),
+    )
+    .mockResolvedValueOnce(downloadingOperation);
+  const user = userEvent.setup();
+
+  renderLifecycle(undefined, false);
+
+  await waitFor(() => {
+    expect(operationListener).toBeDefined();
+    expect(getCoreOperation).toHaveBeenCalledOnce();
+  });
+  act(() => {
+    operationListener?.(checkingOperation);
+  });
+  expect(
+    await screen.findByRole("heading", {
+      name: "Checking for a WokCore release",
+    }),
+  ).toBeInTheDocument();
+
+  await act(async () => {
+    initialOperation.reject(
+      new Error("snapshot failed at C:\\private\\operation.json"),
+    );
+    await initialOperation.promise.catch(() => undefined);
+  });
+
+  expect(
+    await screen.findByRole("heading", {
+      name: "WokCore operation monitoring unavailable",
+    }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("progressbar", {
+      name: "WokCore release check progress",
+    }),
+  ).not.toBeInTheDocument();
+  expect(installAndStartCore).not.toHaveBeenCalled();
+
+  await user.click(
+    screen.getByRole("button", {
+      name: "Reconnect operation monitoring",
+    }),
+  );
+  await waitFor(() => {
+    expect(getCoreOperation).toHaveBeenCalledTimes(2);
+  });
+  expect(
+    screen.getByRole("heading", {
+      name: "WokCore operation monitoring unavailable",
+    }),
+  ).toBeInTheDocument();
+
+  await user.click(
+    screen.getByRole("button", {
+      name: "Reconnect operation monitoring",
+    }),
+  );
+
+  expect(
+    await screen.findByRole("progressbar", {
+      name: "Download WokCore progress",
+    }),
+  ).toHaveAttribute("aria-valuenow", "25");
+  expect(listenForCoreOperation).toHaveBeenCalledTimes(3);
+  expect(getCoreOperation).toHaveBeenCalledTimes(3);
+  expect(installAndStartCore).not.toHaveBeenCalled();
 });
 
 it("hides management behind indeterminate preflight for production missing", async () => {
@@ -1658,6 +1950,53 @@ it("invalidates lifecycle queries once when listener delivery precedes the match
     expect(invalidateQueries).toHaveBeenCalledTimes(7);
   });
   expect(installAndStartCore).toHaveBeenCalledTimes(1);
+});
+
+it("ignores a delayed terminal invoke receipt after success cleanup", async () => {
+  vi.mocked(getCoreStatus)
+    .mockResolvedValueOnce(missingStatus)
+    .mockResolvedValue(runningStatus);
+  vi.mocked(getCoreOperation).mockResolvedValue(null);
+  vi.mocked(checkCoreUpdateOnce).mockResolvedValue({
+    code: "update_available",
+    currentVersion: "0.2.0",
+    targetVersion: "0.2.1",
+  });
+  const installResult = deferred<CoreOperation>();
+  vi.mocked(installAndStartCore).mockReturnValue(installResult.promise);
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
+  const user = userEvent.setup();
+
+  renderLifecycle(queryClient, false);
+
+  await waitFor(() => {
+    expect(installAndStartCore).toHaveBeenCalledOnce();
+  });
+  act(() => {
+    operationListener?.(completedOperation);
+  });
+
+  const upgrade = await screen.findByRole("button", {
+    name: "Upgrade WokCore",
+  });
+  expect(invalidateQueries).toHaveBeenCalledTimes(7);
+
+  await act(async () => {
+    installResult.resolve(completedOperation);
+    await installResult.promise;
+  });
+  await user.click(upgrade);
+
+  expect(
+    screen.getByRole("dialog", { name: "Upgrade WokCore?" }),
+  ).toBeInTheDocument();
+  expect(invalidateQueries).toHaveBeenCalledTimes(7);
 });
 
 it("settles a rejected query refresh and still restores normal content once", async () => {
