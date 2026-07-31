@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   checkCoreUpdate,
@@ -42,6 +42,29 @@ function deferred<T>() {
 }
 
 type EventHandler = (event: { payload: unknown }) => void;
+
+function mockEventBus() {
+  const handlers = new Set<EventHandler>();
+  const rawUnlistens: ReturnType<typeof vi.fn>[] = [];
+  vi.mocked(listen).mockImplementation(async (_event, callback) => {
+    const handler = callback as EventHandler;
+    handlers.add(handler);
+    const rawUnlisten = vi.fn(() => {
+      handlers.delete(handler);
+    });
+    rawUnlistens.push(rawUnlisten);
+    return rawUnlisten;
+  });
+  return {
+    emit(payload: unknown) {
+      for (const handler of [...handlers]) {
+        handler({ payload });
+      }
+    },
+    rawUnlistens,
+    listenerCount: () => handlers.size,
+  };
+}
 
 describe("core operation schemas", () => {
   it("copies only recognized fields from a same-schema determinate download", () => {
@@ -172,12 +195,28 @@ describe("core operation schemas", () => {
 });
 
 describe("core operation bridge", () => {
+  const subscriptions: UnlistenFn[] = [];
+
   beforeEach(async () => {
     vi.mocked(invoke).mockReset();
     vi.mocked(listen).mockReset();
     vi.mocked(invoke).mockResolvedValueOnce(null);
     await getCoreOperation();
   });
+
+  afterEach(() => {
+    for (const unlisten of subscriptions.splice(0)) {
+      unlisten();
+    }
+  });
+
+  async function subscribe(
+    listener: (snapshot: CoreOperation) => void,
+  ): Promise<UnlistenFn> {
+    const unlisten = await listenForCoreOperation(listener);
+    subscriptions.push(unlisten);
+    return unlisten;
+  }
 
   it("invokes the narrow commands and parses every unknown response", async () => {
     vi.mocked(invoke)
@@ -222,58 +261,184 @@ describe("core operation bridge", () => {
     );
   });
 
-  it("ignores stale sequence and invalid cross-event byte progress", async () => {
-    let handler: EventHandler | undefined;
-    const unlisten = vi.fn();
-    vi.mocked(listen).mockImplementation(async (_event, callback) => {
-      handler = callback as EventHandler;
-      return unlisten;
-    });
+  it("delivers a terminal status authority exactly once before its matching event", async () => {
+    const bus = mockEventBus();
     const delivered: CoreOperation[] = [];
-    const stop = await listenForCoreOperation((snapshot) => {
+    await subscribe((snapshot) => delivered.push(snapshot));
+    bus.emit(operation({ sequence: 1, phase: "starting" }));
+    const terminal = operation({
+      sequence: 2,
+      state: "succeeded",
+      phase: "completed",
+    });
+    vi.mocked(invoke).mockResolvedValueOnce(terminal);
+
+    await expect(getCoreOperation()).resolves.toMatchObject({
+      operationId: INSTALL_ID,
+      sequence: 2,
+      state: "succeeded",
+    });
+    bus.emit(terminal);
+
+    expect(delivered.map(({ sequence, state }) => [sequence, state])).toEqual([
+      [1, "running"],
+      [2, "succeeded"],
+    ]);
+  });
+
+  it("delivers one authoritative terminal snapshot to every listener", async () => {
+    const bus = mockEventBus();
+    const first: CoreOperation[] = [];
+    const second: CoreOperation[] = [];
+    await subscribe((snapshot) => first.push(snapshot));
+    await subscribe((snapshot) => second.push(snapshot));
+    bus.emit(operation({ sequence: 1, phase: "starting" }));
+    const terminal = operation({
+      sequence: 2,
+      state: "failed",
+      phase: "completed",
+      error_code: "start_failed",
+    });
+    vi.mocked(invoke).mockResolvedValueOnce(terminal);
+
+    await getCoreOperation();
+    bus.emit(terminal);
+
+    expect(first.map(({ sequence }) => sequence)).toEqual([1, 2]);
+    expect(second.map(({ sequence }) => sequence)).toEqual([1, 2]);
+  });
+
+  it("returns the newer event authority when an older invoke resolves late", async () => {
+    const oldInvoke = deferred<unknown>();
+    vi.mocked(invoke).mockReturnValueOnce(oldInvoke.promise);
+    const pendingInvoke = installAndStartCore();
+    const bus = mockEventBus();
+    const delivered: CoreOperation[] = [];
+    await subscribe((snapshot) => delivered.push(snapshot));
+    bus.emit(
+      operation({
+        operation_id: RETRY_ID,
+        sequence: 2,
+        phase: "starting",
+      }),
+    );
+
+    oldInvoke.resolve(operation({ sequence: 0 }));
+
+    await expect(pendingInvoke).resolves.toMatchObject({
+      operationId: RETRY_ID,
+      sequence: 2,
+    });
+    expect(delivered).toHaveLength(1);
+  });
+
+  it("does not compare sequence values across authoritative UUID changes", async () => {
+    const bus = mockEventBus();
+    const delivered: CoreOperation[] = [];
+    await subscribe((snapshot) => delivered.push(snapshot));
+    bus.emit(operation({ sequence: 9, phase: "starting" }));
+    vi.mocked(invoke).mockResolvedValueOnce(
+      operation({
+        operation_id: RETRY_ID,
+        sequence: 0,
+      }),
+    );
+
+    await expect(installAndStartCore()).resolves.toMatchObject({
+      operationId: RETRY_ID,
+      sequence: 0,
+    });
+    expect(delivered.map(({ operationId, sequence }) => [operationId, sequence]))
+      .toEqual([
+        [INSTALL_ID, 9],
+        [RETRY_ID, 0],
+      ]);
+  });
+
+  it("keeps subscriptions independent and makes unlisten idempotent", async () => {
+    const bus = mockEventBus();
+    const first: CoreOperation[] = [];
+    const second: CoreOperation[] = [];
+    const stopFirst = await subscribe((snapshot) => first.push(snapshot));
+    const stopSecond = await subscribe((snapshot) => second.push(snapshot));
+    bus.emit(operation());
+
+    stopFirst();
+    stopFirst();
+    expect(bus.rawUnlistens[0]).toHaveBeenCalledOnce();
+    expect(bus.listenerCount()).toBe(1);
+    bus.emit(operation({ sequence: 1, phase: "starting" }));
+
+    expect(first.map(({ sequence }) => sequence)).toEqual([0]);
+    expect(second.map(({ sequence }) => sequence)).toEqual([0, 1]);
+
+    stopSecond();
+    stopSecond();
+    expect(bus.rawUnlistens[1]).toHaveBeenCalledOnce();
+    expect(bus.listenerCount()).toBe(0);
+    vi.mocked(invoke).mockResolvedValueOnce(
+      operation({
+        sequence: 2,
+        state: "succeeded",
+        phase: "completed",
+      }),
+    );
+    await getCoreOperation();
+    expect(first.map(({ sequence }) => sequence)).toEqual([0]);
+    expect(second.map(({ sequence }) => sequence)).toEqual([0, 1]);
+
+    const remounted: CoreOperation[] = [];
+    await subscribe((snapshot) => remounted.push(snapshot));
+    expect(remounted).toEqual([]);
+  });
+
+  it("ignores stale sequence and invalid cross-event byte progress", async () => {
+    const bus = mockEventBus();
+    const delivered: CoreOperation[] = [];
+    const stop = await subscribe((snapshot) => {
       delivered.push(snapshot);
     });
 
-    handler?.({
-      payload: operation({
+    bus.emit(
+      operation({
         sequence: 3,
         phase: "downloading",
         bytes_completed: 512,
         bytes_total: 1024,
       }),
-    });
-    handler?.({
-      payload: operation({
+    );
+    bus.emit(
+      operation({
         sequence: 3,
         phase: "downloading",
         bytes_completed: 600,
         bytes_total: 1024,
       }),
-    });
-    handler?.({
-      payload: operation({
+    );
+    bus.emit(
+      operation({
         sequence: 4,
         phase: "downloading",
         bytes_completed: 511,
         bytes_total: 1024,
       }),
-    });
-    handler?.({
-      payload: operation({
+    );
+    bus.emit(
+      operation({
         sequence: 4,
         phase: "downloading",
         bytes_completed: 600,
         bytes_total: 2048,
       }),
-    });
-    handler?.({
-      payload: operation({
+    );
+    bus.emit(
+      operation({
         sequence: 4,
         phase: "downloading",
         bytes_completed: 768,
         bytes_total: 1024,
       }),
-    });
+    );
 
     expect(delivered.map(({ sequence }) => sequence)).toEqual([3, 4]);
     expect(delivered.at(-1)).toMatchObject({
@@ -281,47 +446,43 @@ describe("core operation bridge", () => {
       bytesTotal: 1024,
     });
     stop();
-    expect(unlisten).toHaveBeenCalledOnce();
+    expect(bus.rawUnlistens[0]).toHaveBeenCalledOnce();
   });
 
   it("allows a new UUID after terminal and never lets the retired UUID overwrite it", async () => {
-    let handler: EventHandler | undefined;
-    vi.mocked(listen).mockImplementation(async (_event, callback) => {
-      handler = callback as EventHandler;
-      return () => undefined;
-    });
+    const bus = mockEventBus();
     const delivered: CoreOperation[] = [];
-    await listenForCoreOperation((snapshot) => delivered.push(snapshot));
+    await subscribe((snapshot) => delivered.push(snapshot));
 
-    handler?.({
-      payload: operation({
+    bus.emit(
+      operation({
         sequence: 8,
         state: "failed",
         phase: "completed",
         error_code: "start_failed",
       }),
-    });
-    handler?.({
-      payload: operation({
+    );
+    bus.emit(
+      operation({
         operation_id: RETRY_ID,
         sequence: 0,
       }),
-    });
-    handler?.({
-      payload: operation({
+    );
+    bus.emit(
+      operation({
         sequence: 9,
         state: "failed",
         phase: "completed",
         error_code: "start_failed",
       }),
-    });
-    handler?.({
-      payload: operation({
+    );
+    bus.emit(
+      operation({
         operation_id: RETRY_ID,
         sequence: 1,
         phase: "starting",
       }),
-    });
+    );
 
     expect(delivered.map(({ operationId, sequence }) => [operationId, sequence]))
       .toEqual([
@@ -332,36 +493,28 @@ describe("core operation bridge", () => {
   });
 
   it("does not revive an old UUID after the retry reaches terminal state", async () => {
-    let handler: EventHandler | undefined;
-    vi.mocked(listen).mockImplementation(async (_event, callback) => {
-      handler = callback as EventHandler;
-      return () => undefined;
-    });
+    const bus = mockEventBus();
     const delivered: CoreOperation[] = [];
-    await listenForCoreOperation((snapshot) => delivered.push(snapshot));
+    await subscribe((snapshot) => delivered.push(snapshot));
 
-    handler?.({
-      payload: operation({
+    bus.emit(
+      operation({
         sequence: 4,
         state: "failed",
         phase: "completed",
         error_code: "start_failed",
       }),
-    });
-    handler?.({
-      payload: operation({ operation_id: RETRY_ID, sequence: 0 }),
-    });
-    handler?.({
-      payload: operation({
+    );
+    bus.emit(operation({ operation_id: RETRY_ID, sequence: 0 }));
+    bus.emit(
+      operation({
         operation_id: RETRY_ID,
         sequence: 1,
         state: "succeeded",
         phase: "completed",
       }),
-    });
-    handler?.({
-      payload: operation({ sequence: 3, phase: "starting" }),
-    });
+    );
+    bus.emit(operation({ sequence: 3, phase: "starting" }));
 
     expect(delivered.map(({ operationId, sequence }) => [operationId, sequence]))
       .toEqual([
@@ -372,51 +525,46 @@ describe("core operation bridge", () => {
   });
 
   it("uses an invoke result as authority when a retry event races the response", async () => {
-    let handler: EventHandler | undefined;
-    vi.mocked(listen).mockImplementation(async (_event, callback) => {
-      handler = callback as EventHandler;
-      return () => undefined;
-    });
+    const bus = mockEventBus();
     const delivered: CoreOperation[] = [];
-    await listenForCoreOperation((snapshot) => delivered.push(snapshot));
-    handler?.({
-      payload: operation({ sequence: 4, phase: "starting" }),
-    });
+    await subscribe((snapshot) => delivered.push(snapshot));
+    bus.emit(operation({ sequence: 4, phase: "starting" }));
 
     const retry = deferred<unknown>();
     vi.mocked(invoke).mockReturnValueOnce(retry.promise);
     const accepted = installAndStartCore();
-    handler?.({
-      payload: operation({
+    bus.emit(
+      operation({
         operation_id: RETRY_ID,
         sequence: 1,
         phase: "starting",
       }),
-    });
+    );
     retry.resolve(operation({ operation_id: RETRY_ID, sequence: 0 }));
     await expect(accepted).resolves.toMatchObject({
       operationId: RETRY_ID,
       sequence: 0,
     });
-    handler?.({
-      payload: operation({
+    bus.emit(
+      operation({
         sequence: 5,
         state: "failed",
         phase: "completed",
         error_code: "start_failed",
       }),
-    });
-    handler?.({
-      payload: operation({
+    );
+    bus.emit(
+      operation({
         operation_id: RETRY_ID,
         sequence: 2,
         phase: "authorizing",
       }),
-    });
+    );
 
     expect(delivered.map(({ operationId, sequence }) => [operationId, sequence]))
       .toEqual([
         [INSTALL_ID, 4],
+        [RETRY_ID, 0],
         [RETRY_ID, 2],
       ]);
   });
@@ -426,47 +574,49 @@ describe("core operation bridge", () => {
     vi.mocked(invoke).mockReturnValueOnce(oldStatus.promise);
     const pendingStatus = getCoreOperation();
 
-    let handler: EventHandler | undefined;
-    vi.mocked(listen).mockImplementation(async (_event, callback) => {
-      handler = callback as EventHandler;
-      return () => undefined;
-    });
+    const bus = mockEventBus();
     const delivered: CoreOperation[] = [];
-    await listenForCoreOperation((snapshot) => delivered.push(snapshot));
-    handler?.({
-      payload: operation({
+    await subscribe((snapshot) => delivered.push(snapshot));
+    bus.emit(
+      operation({
         operation_id: RETRY_ID,
         sequence: 2,
         phase: "starting",
       }),
-    });
+    );
     oldStatus.resolve(
       operation({
         sequence: 7,
         phase: "starting",
       }),
     );
-    await pendingStatus;
-    handler?.({
-      payload: operation({
+    await expect(pendingStatus).resolves.toMatchObject({
+      operationId: RETRY_ID,
+      sequence: 2,
+    });
+    bus.emit(
+      operation({
         sequence: 8,
         state: "failed",
         phase: "completed",
         error_code: "start_failed",
       }),
-    });
+    );
     const remounted: CoreOperation[] = [];
-    await listenForCoreOperation((snapshot) => remounted.push(snapshot));
-    handler?.({
-      payload: operation({
+    await subscribe((snapshot) => remounted.push(snapshot));
+    bus.emit(
+      operation({
         operation_id: RETRY_ID,
         sequence: 3,
         phase: "authorizing",
       }),
-    });
+    );
 
     expect(delivered.map(({ operationId, sequence }) => [operationId, sequence]))
-      .toEqual([[RETRY_ID, 2]]);
+      .toEqual([
+        [RETRY_ID, 2],
+        [RETRY_ID, 3],
+      ]);
     expect(remounted.map(({ operationId, sequence }) => [operationId, sequence]))
       .toEqual([[RETRY_ID, 3]]);
   });

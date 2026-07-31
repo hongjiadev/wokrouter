@@ -293,7 +293,10 @@ class OperationTracker {
   private readonly retiredOperationOrder: string[] = [];
   private revision = 0;
 
-  constructor(authority = lastAuthority) {
+  constructor(
+    private readonly listener: (operation: CoreOperation) => void,
+    authority = lastAuthority,
+  ) {
     if (authority?.snapshot) {
       this.replace(authority.snapshot, authority.revision);
     } else if (authority) {
@@ -355,12 +358,18 @@ class OperationTracker {
         downloadFollows(this.download, operation)
       ) {
         this.replace(operation, this.revision, false);
+        this.listener(operation);
       }
       return;
     }
     if (revision >= this.revision) {
       this.replace(operation, revision);
+      this.listener(operation);
     }
+  }
+
+  deliver(operation: CoreOperation): void {
+    this.listener(operation);
   }
 
   private replace(
@@ -397,17 +406,18 @@ class OperationTracker {
 function applyAuthority(
   snapshot: CoreOperation | null,
   revision: number,
-): void {
-  recordKnownSnapshot(snapshot, revision);
+): { snapshot: CoreOperation | null; revision: number } {
+  const authority = recordKnownSnapshot(snapshot, revision);
   for (const tracker of operationTrackers) {
-    tracker.acceptAuthority(snapshot, revision);
+    tracker.acceptAuthority(authority.snapshot, authority.revision);
   }
+  return authority;
 }
 
 function recordKnownSnapshot(
   snapshot: CoreOperation | null,
   revision: number,
-): void {
+): { snapshot: CoreOperation | null; revision: number } {
   if (
     lastAuthority === undefined ||
     revision >= lastAuthority.revision ||
@@ -427,6 +437,7 @@ function recordKnownSnapshot(
       lastAuthority = { snapshot, revision };
     }
   }
+  return lastAuthority;
 }
 
 async function invokeOperation(
@@ -439,20 +450,21 @@ async function invokeOperation(
       ? await invoke<unknown>(command)
       : await invoke<unknown>(command, args);
   const operation = parseCoreOperation(value);
-  applyAuthority(operation, revision);
-  return operation;
+  const authority = applyAuthority(operation, revision);
+  if (authority.snapshot === null) {
+    throw new Error("WokCore operation is no longer current.");
+  }
+  return authority.snapshot;
 }
 
 export async function getCoreOperation(): Promise<CoreOperation | null> {
   const revision = nextRevision();
   const value = await invoke<unknown>("core_operation_status");
   if (value === null) {
-    applyAuthority(null, revision);
-    return null;
+    return applyAuthority(null, revision).snapshot;
   }
   const operation = parseCoreOperation(value);
-  applyAuthority(operation, revision);
-  return operation;
+  return applyAuthority(operation, revision).snapshot;
 }
 
 export function installAndStartCore(): Promise<CoreOperation> {
@@ -478,7 +490,7 @@ export function installCoreUpdate(
 export async function listenForCoreOperation(
   listener: (operation: CoreOperation) => void,
 ): Promise<UnlistenFn> {
-  const tracker = new OperationTracker();
+  const tracker = new OperationTracker(listener);
   operationTrackers.add(tracker);
   let unlisten: UnlistenFn;
   try {
@@ -492,7 +504,7 @@ export async function listenForCoreOperation(
       const revision = tracker.acceptEvent(operation);
       if (revision !== undefined) {
         recordKnownSnapshot(operation, revision);
-        listener(operation);
+        tracker.deliver(operation);
       }
     });
   } catch (error) {
