@@ -332,6 +332,72 @@ describe("core operation bridge", () => {
     expect(delivered).toHaveLength(1);
   });
 
+  it("keeps an equal-sequence event authoritative over a delayed null status", async () => {
+    const matchingInvoke = deferred<unknown>();
+    const staleStatus = deferred<unknown>();
+    vi.mocked(invoke)
+      .mockReturnValueOnce(matchingInvoke.promise)
+      .mockReturnValueOnce(staleStatus.promise);
+    const pendingInvoke = installAndStartCore();
+    const pendingStatus = getCoreOperation();
+    const bus = mockEventBus();
+    const delivered: CoreOperation[] = [];
+    await subscribe((snapshot) => delivered.push(snapshot));
+    bus.emit(operation());
+
+    matchingInvoke.resolve(operation());
+    await expect(pendingInvoke).resolves.toMatchObject({
+      operationId: INSTALL_ID,
+      sequence: 0,
+    });
+    staleStatus.resolve(null);
+    await expect(pendingStatus).resolves.toMatchObject({
+      operationId: INSTALL_ID,
+      sequence: 0,
+    });
+
+    expect(delivered.map(({ operationId, sequence }) => [operationId, sequence]))
+      .toEqual([[INSTALL_ID, 0]]);
+    const remounted: CoreOperation[] = [];
+    await subscribe((snapshot) => remounted.push(snapshot));
+    expect(remounted).toEqual([]);
+    bus.emit(operation({ sequence: 1, phase: "starting" }));
+    expect(remounted.map(({ sequence }) => sequence)).toEqual([1]);
+  });
+
+  it("keeps an equal-sequence event authoritative over an older UUID status", async () => {
+    const matchingStatus = deferred<unknown>();
+    const staleStatus = deferred<unknown>();
+    vi.mocked(invoke)
+      .mockReturnValueOnce(matchingStatus.promise)
+      .mockReturnValueOnce(staleStatus.promise);
+    const pendingMatching = getCoreOperation();
+    const pendingStale = getCoreOperation();
+    const bus = mockEventBus();
+    const delivered: CoreOperation[] = [];
+    await subscribe((snapshot) => delivered.push(snapshot));
+    bus.emit(operation());
+
+    matchingStatus.resolve(operation());
+    await expect(pendingMatching).resolves.toMatchObject({
+      operationId: INSTALL_ID,
+      sequence: 0,
+    });
+    staleStatus.resolve(
+      operation({
+        operation_id: RETRY_ID,
+        sequence: 9,
+        phase: "starting",
+      }),
+    );
+    await expect(pendingStale).resolves.toMatchObject({
+      operationId: INSTALL_ID,
+      sequence: 0,
+    });
+    expect(delivered.map(({ operationId, sequence }) => [operationId, sequence]))
+      .toEqual([[INSTALL_ID, 0]]);
+  });
+
   it("does not compare sequence values across authoritative UUID changes", async () => {
     const bus = mockEventBus();
     const delivered: CoreOperation[] = [];

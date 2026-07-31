@@ -418,26 +418,29 @@ function recordKnownSnapshot(
   snapshot: CoreOperation | null,
   revision: number,
 ): { snapshot: CoreOperation | null; revision: number } {
+  const known = lastAuthority;
   if (
-    lastAuthority === undefined ||
-    revision >= lastAuthority.revision ||
-    (snapshot !== null &&
-      snapshot.operationId === lastAuthority.snapshot?.operationId)
+    snapshot !== null &&
+    known?.snapshot !== null &&
+    known?.snapshot !== undefined &&
+    snapshot.operationId === known.snapshot.operationId
   ) {
-    if (
-      snapshot !== null &&
-      snapshot.operationId === lastAuthority?.snapshot?.operationId &&
-      snapshot.sequence < lastAuthority.snapshot.sequence
-    ) {
-      lastAuthority = {
-        snapshot: lastAuthority.snapshot,
-        revision: Math.max(lastAuthority.revision, revision),
-      };
-    } else {
-      lastAuthority = { snapshot, revision };
-    }
+    const next = {
+      snapshot:
+        snapshot.sequence > known.snapshot.sequence
+          ? snapshot
+          : known.snapshot,
+      revision: Math.max(known.revision, revision),
+    };
+    lastAuthority = next;
+    return next;
   }
-  return lastAuthority;
+  if (known === undefined || revision >= known.revision) {
+    const next = { snapshot, revision };
+    lastAuthority = next;
+    return next;
+  }
+  return known;
 }
 
 async function invokeOperation(
