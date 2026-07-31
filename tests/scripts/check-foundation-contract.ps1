@@ -736,10 +736,18 @@ function Get-RustOuterAttributesBeforeItem {
         [int]$ItemStart,
 
         [Parameter(Mandatory)]
-        [string]$Description
+        [string]$Description,
+
+        [AllowNull()]
+        [object]$CodeView
     )
 
-    $codeView = Get-RustCodeView -Source $Source -Description $Description
+    $codeView = if ($null -ne $CodeView) {
+        $CodeView
+    }
+    else {
+        Get-RustCodeView -Source $Source -Description $Description
+    }
     if ($null -eq $codeView) {
         return $null
     }
@@ -850,6 +858,188 @@ function Get-RustOuterAttributesBeforeItem {
         Items = @($attributes)
         Code = (($attributes | ForEach-Object { $_.Code }) -join "`n")
     }
+}
+
+function Get-PreviousNonWhitespaceIndex {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [int]$BeforeIndex
+    )
+
+    for ($index = $BeforeIndex - 1; $index -ge 0; $index -= 1) {
+        if (-not [char]::IsWhiteSpace($Source[$index])) {
+            return $index
+        }
+    }
+    return -1
+}
+
+function Get-MatchingOpeningParenthesisIndex {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [int]$ClosingIndex
+    )
+
+    if (
+        $ClosingIndex -lt 0 -or
+        $ClosingIndex -ge $Source.Length -or
+        $Source[$ClosingIndex] -ne ")"
+    ) {
+        return -1
+    }
+    $depth = 0
+    for ($index = $ClosingIndex; $index -ge 0; $index -= 1) {
+        if ($Source[$index] -eq ")") {
+            $depth += 1
+        }
+        elseif ($Source[$index] -eq "(") {
+            $depth -= 1
+            if ($depth -eq 0) {
+                return $index
+            }
+        }
+    }
+    return -1
+}
+
+function Test-TypeScriptExecutableTestDescription {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$TestDescription,
+
+        [Parameter(Mandatory)]
+        [object]$CodeView
+    )
+
+    $descriptionMatches = [regex]::Matches(
+        $CodeView.CommentStripped,
+        [regex]::Escape($TestDescription)
+    )
+    foreach ($descriptionMatch in $descriptionMatches) {
+        $quoteIndex = $descriptionMatch.Index - 1
+        $closingQuoteIndex = (
+            $descriptionMatch.Index + $descriptionMatch.Length
+        )
+        if (
+            $quoteIndex -lt 0 -or
+            $closingQuoteIndex -ge $Source.Length
+        ) {
+            continue
+        }
+        $quote = $Source[$quoteIndex]
+        if (
+            ($quote -ne '"' -and $quote -ne "'") -or
+            $Source[$closingQuoteIndex] -ne $quote
+        ) {
+            continue
+        }
+
+        $callOpeningIndex = Get-PreviousNonWhitespaceIndex `
+            -Source $CodeView.Code `
+            -BeforeIndex $quoteIndex
+        if (
+            $callOpeningIndex -lt 0 -or
+            $CodeView.Code[$callOpeningIndex] -ne "("
+        ) {
+            continue
+        }
+        $calleeEndIndex = Get-PreviousNonWhitespaceIndex `
+            -Source $CodeView.Code `
+            -BeforeIndex $callOpeningIndex
+        if ($calleeEndIndex -lt 0) {
+            continue
+        }
+        $directPrefix = $CodeView.Code.Substring(0, $calleeEndIndex + 1)
+        if (
+            $directPrefix -match
+            '(?<![A-Za-z0-9_$\.])(?:it|test)$'
+        ) {
+            return $true
+        }
+        if ($CodeView.Code[$calleeEndIndex] -ne ")") {
+            continue
+        }
+        $eachOpeningIndex = Get-MatchingOpeningParenthesisIndex `
+            -Source $CodeView.Code `
+            -ClosingIndex $calleeEndIndex
+        if ($eachOpeningIndex -lt 0) {
+            continue
+        }
+        $eachCalleeEndIndex = Get-PreviousNonWhitespaceIndex `
+            -Source $CodeView.Code `
+            -BeforeIndex $eachOpeningIndex
+        if ($eachCalleeEndIndex -lt 0) {
+            continue
+        }
+        $eachPrefix = $CodeView.Code.Substring(0, $eachCalleeEndIndex + 1)
+        if (
+            $eachPrefix -match
+            '(?<![A-Za-z0-9_$\.])(?:it|test)\.each$'
+        ) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Test-RustExecutableTestFunction {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$FunctionName,
+
+        [Parameter(Mandatory)]
+        [object]$CodeView
+    )
+
+    $functionPattern = (
+        '(?m)^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?' +
+        '(?:async[ \t]+)?fn[ \t]+' +
+        [regex]::Escape($FunctionName) +
+        '[ \t]*\('
+    )
+    $functionMatches = [regex]::Matches(
+        $CodeView.Code,
+        $functionPattern
+    )
+    if ($functionMatches.Count -ne 1) {
+        return $false
+    }
+    $attributes = Get-RustOuterAttributesBeforeItem `
+        -Source $Source `
+        -ItemStart $functionMatches[0].Index `
+        -Description "Rust lifecycle acceptance test function" `
+        -CodeView $CodeView
+    if ($null -eq $attributes) {
+        return $false
+    }
+    $testAttributes = [regex]::Matches(
+        $attributes.Code,
+        '(?m)^[ \t]*#\[(?:test|tokio::test)\][ \t]*$'
+    )
+    if (
+        $testAttributes.Count -ne 1 -or
+        $attributes.Code -match
+        '(?m)^[ \t]*#\[(?:cfg|cfg_attr|ignore|should_panic)\b'
+    ) {
+        return $false
+    }
+    return $true
 }
 
 function Get-TopLevelRustBody {
@@ -1808,6 +1998,7 @@ if (-not $lifecycleEvidenceComplete) {
 }
 $lifecycleAcceptanceFixtures = @(
     @{
+        Kind = "TypeScript"
         Source = $coreLifecycleTests
         Names = @(
             "starts one production install in StrictMode and restores normal content after success",
@@ -1820,6 +2011,7 @@ $lifecycleAcceptanceFixtures = @(
         )
     },
     @{
+        Kind = "Rust"
         Source = $coreOperation
         Names = @(
             "system_runner_uses_only_the_three_fixed_child_commands",
@@ -1828,6 +2020,7 @@ $lifecycleAcceptanceFixtures = @(
         )
     },
     @{
+        Kind = "Rust"
         Source = $coreOperationParser
         Names = @(
             "versions_bytes_and_active_requests_are_strictly_validated",
@@ -1835,6 +2028,7 @@ $lifecycleAcceptanceFixtures = @(
         )
     },
     @{
+        Kind = "Rust"
         Source = $wokcoreInstallTests
         Names = @(
             "signed_release_reports_monotonic_download_and_authoritative_install_phases",
@@ -1843,18 +2037,21 @@ $lifecycleAcceptanceFixtures = @(
         )
     },
     @{
+        Kind = "Rust"
         Source = $cliStartTests
         Names = @(
             "missing_production_runtime_installs_starts_authorizes_and_reports_structured_progress"
         )
     },
     @{
+        Kind = "Rust"
         Source = $runtimeSelectorTests
         Names = @(
             "a_selected_development_session_never_switches_to_production"
         )
     },
     @{
+        Kind = "TypeScript"
         Source = $localeTests
         Names = @(
             "keeps zh-CN left-to-right"
@@ -1863,8 +2060,27 @@ $lifecycleAcceptanceFixtures = @(
 )
 $lifecycleAcceptanceFixturesExist = $true
 foreach ($fixtureGroup in $lifecycleAcceptanceFixtures) {
+    $fixtureCodeView = Get-RustCodeView `
+        -Source $fixtureGroup.Source `
+        -Description "$($fixtureGroup.Kind) lifecycle acceptance test source"
+    if ($null -eq $fixtureCodeView) {
+        $lifecycleAcceptanceFixturesExist = $false
+        break
+    }
     foreach ($fixtureName in $fixtureGroup.Names) {
-        if (-not $fixtureGroup.Source.Contains($fixtureName)) {
+        $fixtureExists = if ($fixtureGroup.Kind -eq "TypeScript") {
+            Test-TypeScriptExecutableTestDescription `
+                -Source $fixtureGroup.Source `
+                -TestDescription $fixtureName `
+                -CodeView $fixtureCodeView
+        }
+        else {
+            Test-RustExecutableTestFunction `
+                -Source $fixtureGroup.Source `
+                -FunctionName $fixtureName `
+                -CodeView $fixtureCodeView
+        }
+        if (-not $fixtureExists) {
             $lifecycleAcceptanceFixturesExist = $false
             break
         }

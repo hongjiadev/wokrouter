@@ -815,6 +815,16 @@ OperationInProgress,
             Old = 'it("starts one production install in StrictMode and restores normal content after success", async () => {'
             New = 'it("renamed lifecycle behavior", async () => {'
             Expected = "lifecycle acceptance fixture"
+        },
+        @{
+            Name = "lifecycle acceptance fixture cannot survive only in a comment"
+            Path = "apps/desktop/src/components/CoreLifecycle.test.tsx"
+            Old = 'it("starts one production install in StrictMode and restores normal content after success", async () => {'
+            New = @'
+// Former fixture: starts one production install in StrictMode and restores normal content after success
+it("renamed lifecycle behavior", async () => {
+'@
+            Expected = "lifecycle acceptance fixture"
         }
     )
     foreach ($mutation in $lifecycleMutations) {
