@@ -504,6 +504,67 @@ it("invalidates lifecycle queries once when listener delivery precedes the match
   expect(installAndStartCore).toHaveBeenCalledTimes(1);
 });
 
+it("settles a rejected query refresh and still restores normal content once", async () => {
+  vi.mocked(getCoreStatus)
+    .mockResolvedValueOnce(missingStatus)
+    .mockResolvedValue(runningStatus);
+  vi.mocked(getCoreOperation).mockResolvedValue(null);
+  vi.mocked(installAndStartCore).mockResolvedValue(checkingOperation);
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  const originalInvalidate =
+    queryClient.invalidateQueries.bind(queryClient);
+  const invalidateQueries = vi
+    .spyOn(queryClient, "invalidateQueries")
+    .mockImplementation((filters, options) => {
+      if (filters?.queryKey?.[0] === "provider-runtime") {
+        return Promise.reject(
+          new Error("refresh failed at C:\\private\\provider.json"),
+        );
+      }
+      if (filters?.queryKey?.[0] === "provider-models") {
+        throw new Error(
+          "refresh threw at C:\\private\\models.json",
+        );
+      }
+      return originalInvalidate(filters, options);
+    });
+
+  renderLifecycle(queryClient);
+
+  expect(
+    await screen.findByRole("heading", {
+      name: "Checking for a WokCore release",
+    }),
+  ).toBeInTheDocument();
+  operationListener?.(completedOperation);
+
+  expect(await screen.findByText("WokCore running")).toBeInTheDocument();
+  expect(screen.getByText("WokCore workspace")).toBeInTheDocument();
+  expect(invalidateQueries).toHaveBeenCalledTimes(7);
+  for (const queryKey of [
+    ["core-status"],
+    ["provider-catalog"],
+    ["provider-runtime"],
+    ["provider-models"],
+    ["sessions"],
+    ["usage"],
+    ["diagnostic-logs"],
+  ]) {
+    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey });
+  }
+
+  operationListener?.(completedOperation);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(invalidateQueries).toHaveBeenCalledTimes(7);
+});
+
 it("subscribes before recovering a running snapshot and unmounts only the listener", async () => {
   vi.mocked(getCoreStatus).mockResolvedValue(missingStatus);
   vi.mocked(getCoreOperation).mockResolvedValue(downloadingOperation);

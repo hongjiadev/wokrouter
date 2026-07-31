@@ -11,6 +11,7 @@ import {
   listenForCoreOperation,
   type CoreOperation,
 } from "../coreOperation";
+import { RecentSuccesses } from "../recentSuccesses";
 import { CoreHealth } from "./CoreHealth";
 import { CoreOperationPanel } from "./CoreOperationPanel";
 import { ManagementPanel } from "./ManagementPanel";
@@ -52,7 +53,7 @@ export function CoreLifecycle() {
   const [setupFailure, setSetupFailure] = useState<SetupFailure>();
   const installRequested = useRef(false);
   const mounted = useRef(false);
-  const processedSuccesses = useRef(new Set<string>());
+  const processedSuccesses = useRef(new RecentSuccesses());
   const retryPending = useRef(false);
   const waitsForAnotherProcess =
     status.data?.runtime_channel === "production" &&
@@ -91,10 +92,12 @@ export function CoreLifecycle() {
     if (processedSuccesses.current.has(terminalKey)) {
       return;
     }
-    processedSuccesses.current.add(terminalKey);
-    void Promise.all(
+    processedSuccesses.current.remember(terminalKey);
+    void Promise.allSettled(
       lifecycleQueryKeys.map((queryKey) =>
-        queryClient.invalidateQueries({ queryKey }),
+        Promise.resolve().then(() =>
+          queryClient.invalidateQueries({ queryKey }),
+        ),
       ),
     ).then(() => {
       if (!mounted.current) {
