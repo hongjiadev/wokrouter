@@ -360,11 +360,55 @@ describe("CoreOperationPanel", () => {
     );
 
     expect(
-      screen.getByText(/1,000,000 active requests remain/i),
+      screen.getByText(
+        "1,000,000 active requests remain. WokCore is still serving them; try the update again later.",
+      ),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Try update later" }),
     ).toBeEnabled();
+  });
+
+  it("uses singular English copy for one active request", () => {
+    render(
+      <CoreOperationPanel
+        operation={operation({
+          operation: "update",
+          state: "failed",
+          phase: "completed",
+          activeRequests: 1,
+          errorCode: "active_requests_remain",
+        })}
+        onRetry={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        "1 active request remains. WokCore is still serving it; try the update again later.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("uses natural Simplified Chinese copy for active requests", async () => {
+    await initializeI18n("zh-CN");
+
+    render(
+      <CoreOperationPanel
+        operation={operation({
+          operation: "update",
+          state: "failed",
+          phase: "completed",
+          activeRequests: 1,
+          errorCode: "active_requests_remain",
+        })}
+        onRetry={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText("仍有 1 个活动请求正在处理中。请稍后重试更新。"),
+    ).toBeInTheDocument();
   });
 
   it.each([

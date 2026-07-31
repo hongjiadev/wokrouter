@@ -132,6 +132,26 @@ describe("CoreHealth", () => {
     );
   });
 
+  it.each([
+    ["en", "Active requests"],
+    ["zh-CN", "活动请求"],
+  ] as const)(
+    "formats active-request counts with the selected %s locale",
+    async (locale, label) => {
+      await initializeI18n(locale);
+      vi.mocked(getCoreStatus).mockResolvedValue(
+        status("running", { active_requests: 1_000_000 }),
+      );
+
+      renderHealth();
+
+      const field = await screen.findByText(label);
+      expect(field.nextElementSibling).toHaveTextContent(
+        new Intl.NumberFormat(locale).format(1_000_000),
+      );
+    },
+  );
+
   it("translates unavailable status and its live announcement without bridge details", async () => {
     await initializeI18n("zh-CN");
     vi.mocked(getCoreStatus).mockRejectedValue(

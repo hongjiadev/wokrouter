@@ -170,7 +170,8 @@
       "installed": "The verified WokCore operation completed successfully.",
       "updated": "Verified WokCore {{targetVersion}} is installed and ready.",
       "current": "The fresh signed check reports WokCore {{currentVersion}} is already current.",
-      "activeRequests": "{{count}} active requests remain. WokCore is still serving them; try the update again later.",
+      "activeRequests_one": "{{formattedCount}} active request remains. WokCore is still serving it; try the update again later.",
+      "activeRequests_other": "{{formattedCount}} active requests remain. WokCore is still serving them; try the update again later.",
       "rolledBack": "The WokCore update failed and the previous version was restored.",
       "recoveryRequired": "WokCore recovery required"
     },

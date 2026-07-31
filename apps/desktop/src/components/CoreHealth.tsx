@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -119,7 +119,11 @@ export function CoreHealth({
   onCheckForUpdates,
   onUpgrade,
 }: CoreHealthProps = {}) {
-  const { t } = useTranslation();
+  const { i18n, t } = useTranslation();
+  const numberFormatter = useMemo(
+    () => new Intl.NumberFormat(i18n.resolvedLanguage),
+    [i18n.resolvedLanguage],
+  );
   const queryClient = useQueryClient();
   const status = useQuery({
     queryKey: coreStatusQueryKey,
@@ -265,7 +269,7 @@ export function CoreHealth({
           {status.data.active_requests !== undefined && (
             <div>
               <dt>{t("core.field.activeRequests")}</dt>
-              <dd>{status.data.active_requests}</dd>
+              <dd>{numberFormatter.format(status.data.active_requests)}</dd>
             </div>
           )}
         </dl>

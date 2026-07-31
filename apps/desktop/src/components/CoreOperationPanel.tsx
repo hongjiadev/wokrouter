@@ -152,6 +152,10 @@ export function CoreOperationPanel({
 }: CoreOperationPanelProps) {
   const { i18n, t } = useTranslation();
   const formatBytes = useByteFormatter(i18n.resolvedLanguage);
+  const countFormatter = useMemo(
+    () => new Intl.NumberFormat(i18n.resolvedLanguage),
+    [i18n.resolvedLanguage],
+  );
   const determinate =
     operation.phase === "downloading" &&
     operation.bytesTotal !== undefined &&
@@ -189,9 +193,8 @@ export function CoreOperationPanel({
     operation.errorCode === "active_requests_remain" &&
     operation.activeRequests !== undefined
       ? t("operation.result.activeRequests", {
-          count: new Intl.NumberFormat(i18n.resolvedLanguage).format(
-            operation.activeRequests,
-          ),
+          count: operation.activeRequests,
+          formattedCount: countFormatter.format(operation.activeRequests),
         })
       : t(errorTranslationKey(operation.errorCode));
   const successCopy = isUpdate

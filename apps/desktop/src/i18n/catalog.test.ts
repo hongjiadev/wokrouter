@@ -210,6 +210,19 @@ describe("desktop translation catalogs", () => {
     expect(validateCatalogs(en, zhCN)).toBe(flattenKeys(en).length);
   });
 
+  it("defines matching active-request plural variants", () => {
+    expect(en.operation.result).toMatchObject({
+      activeRequests_one:
+        "{{formattedCount}} active request remains. WokCore is still serving it; try the update again later.",
+      activeRequests_other:
+        "{{formattedCount}} active requests remain. WokCore is still serving them; try the update again later.",
+    });
+    expect(zhCN.operation.result).toMatchObject({
+      activeRequests_one: "仍有 {{formattedCount}} 个活动请求正在处理中。请稍后重试更新。",
+      activeRequests_other: "仍有 {{formattedCount}} 个活动请求正在处理中。请稍后重试更新。",
+    });
+  });
+
   it("contains the exact initial English and Simplified Chinese copy", () => {
     expect(en).toMatchObject({
       app: {

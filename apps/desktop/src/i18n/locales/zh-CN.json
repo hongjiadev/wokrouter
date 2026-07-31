@@ -170,7 +170,8 @@
       "installed": "经过验证的 WokCore 操作已成功完成。",
       "updated": "经过验证的 WokCore {{targetVersion}} 已安装并就绪。",
       "current": "最新签名检查表明 WokCore {{currentVersion}} 已是最新版本。",
-      "activeRequests": "仍有 {{count}} 个活动请求。WokCore 仍在为它们提供服务；请稍后重试更新。",
+      "activeRequests_one": "仍有 {{formattedCount}} 个活动请求正在处理中。请稍后重试更新。",
+      "activeRequests_other": "仍有 {{formattedCount}} 个活动请求正在处理中。请稍后重试更新。",
       "rolledBack": "WokCore 更新失败，已恢复旧版本。",
       "recoveryRequired": "WokCore 需要恢复"
     },
