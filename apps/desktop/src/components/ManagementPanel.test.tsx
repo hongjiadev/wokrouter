@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { getCoreStatus } from "../control";
 import type { CoreOperation } from "../coreOperation";
+import { initializeI18n } from "../i18n";
 import {
   commitProviderConfig,
   exportDiagnostics,
@@ -168,7 +169,8 @@ function mockProviderData() {
 }
 
 describe("ManagementPanel", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await initializeI18n("en");
     vi.clearAllMocks();
     vi.mocked(getCoreStatus).mockResolvedValue({
       state: "running",

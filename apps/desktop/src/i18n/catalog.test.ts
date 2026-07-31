@@ -206,8 +206,8 @@ describe("desktop translation catalogs", () => {
     }
   });
 
-  it("accepts every current leaf through the standalone catalog rules", () => {
-    expect(validateCatalogs(en, zhCN)).toBe(7);
+  it("accepts every current leaf without pinning future catalog growth", () => {
+    expect(validateCatalogs(en, zhCN)).toBe(flattenKeys(en).length);
   });
 
   it("contains the exact initial English and Simplified Chinese copy", () => {

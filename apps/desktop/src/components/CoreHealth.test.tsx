@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps, ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,6 +10,7 @@ import {
   stopCore,
   type CoreStatus,
 } from "../control";
+import { initializeI18n } from "../i18n";
 import { CoreHealth } from "./CoreHealth";
 
 vi.mock("../control", () => ({
@@ -56,7 +57,8 @@ function deferred<T>() {
 }
 
 describe("CoreHealth", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await initializeI18n("en");
     vi.mocked(getCoreStatus).mockReset();
     vi.mocked(startCore).mockReset();
     vi.mocked(stopCore).mockReset();
@@ -75,6 +77,124 @@ describe("CoreHealth", () => {
     renderHealth();
 
     expect(await screen.findByText(title)).toBeInTheDocument();
+  });
+
+  it("renders missing runtime metadata in Simplified Chinese", async () => {
+    await initializeI18n("zh-CN");
+    vi.mocked(getCoreStatus).mockResolvedValue(status("missing"));
+
+    renderHealth();
+
+    expect(await screen.findByText("WokCore 未安装")).toBeInTheDocument();
+    expect(screen.getByText("运行状态")).toBeInTheDocument();
+    expect(screen.getByText("版本")).toBeInTheDocument();
+    expect(screen.getByText("未连接")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["missing", "WokCore 未安装"],
+    ["stopped", "WokCore 已停止"],
+    ["starting", "WokCore 正在启动"],
+    ["running", "WokCore 正在运行"],
+    ["draining", "WokCore 正在排空请求"],
+    ["authorization_required", "需要授权 WokRouter"],
+    ["incompatible", "需要更新 WokCore"],
+    ["invalid_runtime", "WokCore 运行时无效"],
+  ] as const)("translates the %s state title", async (stateName, title) => {
+    await initializeI18n("zh-CN");
+    vi.mocked(getCoreStatus).mockResolvedValue(status(stateName));
+
+    renderHealth();
+
+    expect(await screen.findByRole("heading", { name: title })).toBeInTheDocument();
+  });
+
+  it("translates runtime channel, phase, active requests, and actions", async () => {
+    await initializeI18n("zh-CN");
+    vi.mocked(getCoreStatus).mockResolvedValue(
+      status("stopped", {
+        version: "0.1.23",
+        phase: "awaiting_cancellation",
+        active_requests: 3,
+      }),
+    );
+
+    renderHealth();
+
+    expect(await screen.findByText("生产环境")).toBeInTheDocument();
+    expect(screen.getByText("正在等待取消")).toBeInTheDocument();
+    expect(screen.getByText("活动请求")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "启动 WokCore" })).toBeEnabled();
+    expect(screen.getByText("关闭此窗口不会停止 WokCore。")).toBeInTheDocument();
+    expect(screen.getByText("0.1.23").closest("dd")).toHaveAttribute(
+      "dir",
+      "ltr",
+    );
+  });
+
+  it("translates unavailable status and its live announcement without bridge details", async () => {
+    await initializeI18n("zh-CN");
+    vi.mocked(getCoreStatus).mockRejectedValue(
+      new Error("failed at C:\\private\\status.json"),
+    );
+
+    renderHealth();
+
+    expect(
+      await screen.findByRole("heading", { name: "WokCore 状态不可用" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("status", { name: "WokCore 状态不可用。请重新检查。" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重新检查" })).toBeEnabled();
+    expect(screen.queryByText(/private|status\.json/i)).not.toBeInTheDocument();
+  });
+
+  it("translates update availability and failed-check recovery", async () => {
+    await initializeI18n("zh-CN");
+    vi.mocked(getCoreStatus).mockResolvedValue(
+      status("running", { version: "0.1.22" }),
+    );
+
+    const view = renderHealth({
+      updateCheck: {
+        code: "update_available",
+        currentVersion: "0.1.22",
+        targetVersion: "0.1.23",
+      },
+      onUpgrade: vi.fn(),
+    });
+
+    expect(
+      await screen.findByRole("button", { name: "升级 WokCore" }),
+    ).toBeEnabled();
+
+    view.rerender(
+      <CoreHealth
+        updateCheckFailed
+        onCheckForUpdates={vi.fn()}
+      />,
+    );
+    expect(await screen.findByText("无法检查 WokCore 更新")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "检查更新" })).toBeEnabled();
+  });
+
+  it("updates static state maps when the locale changes without remounting", async () => {
+    vi.mocked(getCoreStatus).mockResolvedValue(status("stopped"));
+
+    renderHealth();
+
+    const heading = await screen.findByRole("heading", {
+      name: "WokCore stopped",
+    });
+    const liveRegion = screen.getByRole("status");
+    await act(async () => {
+      await initializeI18n("zh-CN");
+    });
+
+    expect(screen.getByRole("heading", { name: "WokCore 已停止" })).toBe(heading);
+    expect(screen.getByRole("status")).toBe(liveRegion);
+    expect(liveRegion).toHaveAccessibleName("WokCore 已停止。");
   });
 
   it.each([

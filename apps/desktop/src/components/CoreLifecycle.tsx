@@ -6,6 +6,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import { useTranslation } from "react-i18next";
 
 import {
   coreStatusQueryKey,
@@ -67,6 +68,7 @@ function blocksUpdateInteraction(
 }
 
 export function CoreLifecycle() {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const status = useQuery({
     queryKey: coreStatusQueryKey,
@@ -687,21 +689,25 @@ export function CoreLifecycle() {
           aria-describedby="update-confirmation-description"
           onKeyDown={handleDialogKeyDown}
         >
-          <p className="section-label">WokCore update</p>
-          <h2 id="update-confirmation-heading">Upgrade WokCore?</h2>
+          <p className="section-label">{t("operation.update.title")}</p>
+          <h2 id="update-confirmation-heading">
+            {t("operation.update.confirmTitle")}
+          </h2>
           <p id="update-confirmation-description">
-            WokCore may briefly stop while the verified update is
-            installed. Active requests can defer the update safely.
+            {t("operation.update.available", {
+              currentVersion: updateCheck.currentVersion,
+              targetVersion: updateCheck.targetVersion,
+            })} {t("operation.update.confirmBody")}
           </p>
           <dl className="core-operation__versions">
             <div>
-              <dt>Current version</dt>
+              <dt>{t("operation.version.current")}</dt>
               <dd>
                 <code dir="ltr">{updateCheck.currentVersion}</code>
               </dd>
             </div>
             <div>
-              <dt>Target version</dt>
+              <dt>{t("operation.version.target")}</dt>
               <dd>
                 <code dir="ltr">{updateCheck.targetVersion}</code>
               </dd>
@@ -713,7 +719,7 @@ export function CoreLifecycle() {
               type="button"
               onClick={closeUpdateConfirmation}
             >
-              Cancel
+              {t("operation.update.cancel")}
             </button>
             <button
               ref={confirmUpdateButton}
@@ -721,7 +727,7 @@ export function CoreLifecycle() {
               type="button"
               onClick={confirmUpdate}
             >
-              Confirm upgrade
+              {t("operation.update.confirmAction")}
             </button>
           </div>
         </div>
@@ -738,19 +744,17 @@ export function CoreLifecycle() {
           className="health-panel"
           aria-labelledby="core-bridge-recovery-heading"
         >
-          <p className="section-label">Operation monitoring</p>
+          <p className="section-label">{t("operation.monitoring.title")}</p>
           <div className="status-line status-line--error">
             <span className="status-mark" aria-hidden="true">
               !
             </span>
             <h1 id="core-bridge-recovery-heading" tabIndex={-1}>
-              WokCore operation monitoring unavailable
+              {t("operation.monitoring.unavailableTitle")}
             </h1>
           </div>
           <p className="health-summary">
-            WokRouter could not reconcile trusted operation progress.
-            Reconnect monitoring before starting or monitoring WokCore
-            setup and updates.
+            {t("operation.monitoring.unavailableSummary")}
           </p>
           <div className="recovery">
             <button
@@ -758,10 +762,10 @@ export function CoreLifecycle() {
               type="button"
               onClick={retrySetup}
             >
-              Reconnect operation monitoring
+              {t("operation.monitoring.reconnect")}
             </button>
             <p className="action-note">
-              This only reconnects read-only operation monitoring.
+              {t("operation.monitoring.reconnectNote")}
             </p>
           </div>
         </section>
@@ -776,18 +780,17 @@ export function CoreLifecycle() {
         className="health-panel core-operation-panel"
         aria-labelledby="external-core-operation-heading"
       >
-        <p className="section-label">WokCore setup</p>
+        <p className="section-label">{t("operation.install.title")}</p>
         <h1 id="external-core-operation-heading" tabIndex={-1}>
-          WokCore operation continues in another process
+          {t("operation.install.otherProcess")}
         </h1>
         <p className="health-summary">
-          The trusted installation is still in progress. WokRouter will
-          reconnect when it finishes.
+          {t("operation.install.otherProcessSummary")}
         </p>
         <div
           className="core-progress"
           role="progressbar"
-          aria-label="Waiting for WokCore installation"
+          aria-label={t("operation.install.waitAria")}
         >
           <span className="core-progress__bar core-progress__bar--indeterminate" />
         </div>
@@ -846,23 +849,23 @@ export function CoreLifecycle() {
         >
           <p className="section-label">
             {updateStatusUnavailable
-              ? "WokCore update"
-              : "WokCore setup"}
+              ? t("operation.update.title")
+              : t("operation.install.title")}
           </p>
           <div className="status-line status-line--error">
             <span className="status-mark" aria-hidden="true">
               !
             </span>
             <h1 id="core-status-recovery-heading" tabIndex={-1}>
-              WokCore{" "}
-              {updateStatusUnavailable ? "update" : "setup"} completed,
-              but status is unavailable
+              {updateStatusUnavailable
+                ? t("operation.statusRecovery.updateTitle")
+                : t("operation.statusRecovery.setupTitle")}
             </h1>
           </div>
           <p className="health-summary">
-            WokRouter could not confirm the new WokCore status. Check the
-            trusted status again without repeating{" "}
-            {updateStatusUnavailable ? "the update" : "installation"}.
+            {updateStatusUnavailable
+              ? t("operation.statusRecovery.updateSummary")
+              : t("operation.statusRecovery.setupSummary")}
           </p>
           <div className="recovery">
             <button
@@ -870,10 +873,10 @@ export function CoreLifecycle() {
               type="button"
               onClick={retrySetup}
             >
-              Check status again
+              {t("operation.statusRecovery.checkAgain")}
             </button>
             <p className="action-note">
-              Closing this window never cancels a WokCore operation.
+              {t("operation.recovery.actionNote")}
             </p>
           </div>
         </section>
@@ -892,18 +895,17 @@ export function CoreLifecycle() {
           className="health-panel"
           aria-labelledby="core-update-start-failure-heading"
         >
-          <p className="section-label">WokCore update</p>
+          <p className="section-label">{t("operation.update.title")}</p>
           <div className="status-line status-line--error">
             <span className="status-mark" aria-hidden="true">
               !
             </span>
             <h1 id="core-update-start-failure-heading" tabIndex={-1}>
-              WokCore update could not start
+              {t("operation.update.startFailedTitle")}
             </h1>
           </div>
           <p className="health-summary">
-            WokRouter could not begin or recover a verified update
-            operation. The current WokCore was not assumed to have changed.
+            {t("operation.update.startFailedSummary")}
           </p>
           <div className="recovery">
             <button
@@ -913,12 +915,11 @@ export function CoreLifecycle() {
               onClick={(event) => retryUpdate(event.currentTarget)}
             >
               {updateCheckPending
-                ? "Checking for updates…"
-                : "Retry update safely"}
+                ? t("operation.update.checkingLong")
+                : t("operation.update.retrySafely")}
             </button>
             <p className="action-note">
-              A fresh signed check and confirmation are required before
-              retrying.
+              {t("operation.update.retryRequirement")}
             </p>
           </div>
         </section>
@@ -938,19 +939,17 @@ export function CoreLifecycle() {
         className="health-panel"
         aria-labelledby="core-setup-failure-heading"
       >
-        <p className="section-label">WokCore setup</p>
+        <p className="section-label">{t("operation.install.title")}</p>
         <div className="status-line status-line--error">
           <span className="status-mark" aria-hidden="true">
             !
           </span>
           <h1 id="core-setup-failure-heading" tabIndex={-1}>
-            WokCore setup unavailable
+            {t("operation.install.unavailableTitle")}
           </h1>
         </div>
         <p className="health-summary">
-          WokRouter could not begin or recover the verified setup
-          operation. Your local configuration was not assumed to have
-          changed.
+          {t("operation.install.unavailableSummary")}
         </p>
         <div className="recovery">
           <button
@@ -958,10 +957,10 @@ export function CoreLifecycle() {
             type="button"
             onClick={retrySetup}
           >
-            Try again
+            {t("operation.install.retry")}
           </button>
           <p className="action-note">
-            Closing this window never cancels a WokCore operation.
+            {t("operation.recovery.actionNote")}
           </p>
         </div>
       </section>
@@ -977,18 +976,17 @@ export function CoreLifecycle() {
         className="health-panel core-operation-panel"
         aria-labelledby="core-setup-preflight-heading"
       >
-        <p className="section-label">WokCore setup</p>
+        <p className="section-label">{t("operation.install.title")}</p>
         <h1 id="core-setup-preflight-heading" tabIndex={-1}>
-          Checking existing WokCore setup
+          {t("operation.install.preflightTitle")}
         </h1>
         <p className="health-summary">
-          WokRouter is checking for an operation it can safely resume
-          before starting installation.
+          {t("operation.install.preflightSummary")}
         </p>
         <div
           className="core-progress"
           role="progressbar"
-          aria-label="Check WokCore setup progress"
+          aria-label={t("operation.install.preflightAria")}
         >
           <span className="core-progress__bar core-progress__bar--indeterminate" />
         </div>

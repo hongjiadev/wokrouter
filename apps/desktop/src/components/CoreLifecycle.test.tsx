@@ -26,6 +26,7 @@ import {
   retryCoreUpdateCheck,
   type CoreOperation,
 } from "../coreOperation";
+import { initializeI18n } from "../i18n";
 import { CoreLifecycle } from "./CoreLifecycle";
 
 vi.mock("./ManagementPanel", () => ({
@@ -219,7 +220,8 @@ function queryClientWithCoreRefreshFailure(
   return { invalidateQueries, queryClient };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  await initializeI18n("en");
   operationListener = undefined;
   unlisten.mockReset();
   vi.mocked(getCoreStatus).mockReset();
@@ -251,6 +253,117 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+it("translates the verified update confirmation without changing ownership", async () => {
+  await initializeI18n("zh-CN");
+  vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
+  vi.mocked(checkCoreUpdateOnce).mockResolvedValue({
+    code: "update_available",
+    currentVersion: "0.2.0",
+    targetVersion: "0.2.1",
+  });
+  const user = userEvent.setup();
+
+  renderLifecycle(undefined, false);
+
+  await user.click(
+    await screen.findByRole("button", { name: "升级 WokCore" }),
+  );
+  const dialog = screen.getByRole("dialog", { name: "升级 WokCore？" });
+  expect(dialog).toHaveTextContent("将 WokCore 从 0.2.0 升级到 0.2.1");
+  expect(dialog).toHaveTextContent(
+    "安装经过验证的更新时，WokCore 可能会短暂停止。活动请求可以安全地延后更新。",
+  );
+  expect(screen.getByText("当前版本")).toBeInTheDocument();
+  expect(screen.getByText("目标版本")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "确认升级" })).toHaveFocus();
+  expect(screen.getByRole("button", { name: "取消" })).toBeEnabled();
+  expect(installCoreUpdate).not.toHaveBeenCalled();
+});
+
+it("translates operation-monitoring recovery without exposing bridge details", async () => {
+  await initializeI18n("zh-CN");
+  vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
+  vi.mocked(listenForCoreOperation).mockRejectedValue(
+    new Error("listener failed at C:\\private\\events.json"),
+  );
+
+  renderLifecycle(undefined, false);
+
+  expect(
+    await screen.findByRole("heading", { name: "WokCore 操作监控不可用" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "重新连接操作监控" }),
+  ).toBeEnabled();
+  expect(screen.getByText("操作监控")).toBeInTheDocument();
+  expect(screen.queryByText(/private|events\.json/i)).not.toBeInTheDocument();
+});
+
+it("translates another-process install progress", async () => {
+  await initializeI18n("zh-CN");
+  vi.mocked(getCoreStatus).mockResolvedValue(missingStatus);
+  vi.mocked(getCoreOperation).mockResolvedValue({
+    ...failedOperation,
+    errorCode: "install_in_progress",
+  });
+
+  renderLifecycle(undefined, false);
+
+  expect(
+    await screen.findByRole("heading", {
+      name: "WokCore 操作正在另一个进程中继续",
+    }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("progressbar", { name: "正在等待 WokCore 安装" }),
+  ).not.toHaveAttribute("aria-valuenow");
+  expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+});
+
+it("translates missing-runtime preflight progress", async () => {
+  await initializeI18n("zh-CN");
+  const operationStatus = deferred<CoreOperation | null>();
+  vi.mocked(getCoreStatus).mockResolvedValue(missingStatus);
+  vi.mocked(getCoreOperation).mockReturnValue(operationStatus.promise);
+
+  renderLifecycle(undefined, false);
+
+  expect(
+    await screen.findByRole("heading", {
+      name: "正在检查现有 WokCore 设置",
+    }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("progressbar", { name: "检查 WokCore 设置进度" }),
+  ).not.toHaveAttribute("aria-valuenow");
+  expect(installAndStartCore).not.toHaveBeenCalled();
+});
+
+it("updates an open confirmation in place and preserves its target across locale changes", async () => {
+  vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
+  vi.mocked(checkCoreUpdateOnce).mockResolvedValue({
+    code: "update_available",
+    currentVersion: "0.2.0",
+    targetVersion: "0.2.1",
+  });
+  const user = userEvent.setup();
+
+  renderLifecycle(undefined, false);
+
+  await user.click(
+    await screen.findByRole("button", { name: "Upgrade WokCore" }),
+  );
+  const dialog = screen.getByRole("dialog", { name: "Upgrade WokCore?" });
+  await act(async () => {
+    await initializeI18n("zh-CN");
+  });
+
+  expect(screen.getByRole("dialog", { name: "升级 WokCore？" })).toBe(dialog);
+  await user.click(screen.getByRole("button", { name: "确认升级" }));
+  expect(installCoreUpdate).toHaveBeenCalledOnce();
+  expect(installCoreUpdate).toHaveBeenCalledWith("0.2.1");
 });
 
 it.each([

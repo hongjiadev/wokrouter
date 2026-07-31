@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { CoreOperation } from "../coreOperation";
 
@@ -9,89 +10,94 @@ type CoreOperationPanelProps = {
   onOpenDiagnostics?: () => void;
 };
 
-const phaseCopy: Record<CoreOperation["phase"], string> = {
-  checking_release: "Checking for a WokCore release",
-  downloading: "Downloading WokCore",
-  verifying: "Verifying WokCore",
-  installing: "Installing WokCore",
-  preparing_service: "Preparing the WokCore service",
-  draining: "Waiting for active requests",
-  stopping: "Stopping WokCore",
-  starting: "Starting WokCore",
-  authorizing: "Authorizing WokRouter",
-  verifying_runtime: "Verifying the WokCore runtime",
-  rolling_back: "Restoring the previous WokCore version",
-  completed: "WokCore operation complete",
-};
+const phaseKeys = {
+  checking_release: "operation.phase.checkingRelease",
+  downloading: "operation.phase.downloading",
+  verifying: "operation.phase.verifying",
+  installing: "operation.phase.installing",
+  preparing_service: "operation.phase.preparingService",
+  draining: "operation.phase.draining",
+  stopping: "operation.phase.stopping",
+  starting: "operation.phase.starting",
+  authorizing: "operation.phase.authorizing",
+  verifying_runtime: "operation.phase.verifyingRuntime",
+  rolling_back: "operation.phase.rollingBack",
+  completed: "operation.phase.completed",
+} as const satisfies Record<CoreOperation["phase"], string>;
 
-const progressLabel: Record<CoreOperation["phase"], string> = {
-  checking_release: "WokCore release check progress",
-  downloading: "Download WokCore progress",
-  verifying: "Verify WokCore progress",
-  installing: "Install WokCore progress",
-  preparing_service: "Prepare WokCore service progress",
-  draining: "Drain WokCore requests progress",
-  stopping: "Stop WokCore progress",
-  starting: "Start WokCore progress",
-  authorizing: "Authorize WokRouter progress",
-  verifying_runtime: "Verify WokCore runtime progress",
-  rolling_back: "Restore WokCore progress",
-  completed: "Complete WokCore operation progress",
-};
+const progressPhaseKeys = {
+  checking_release: "operation.progress.ariaPhase.checkingRelease",
+  downloading: "operation.phase.downloading",
+  verifying: "operation.progress.ariaPhase.verifying",
+  installing: "operation.progress.ariaPhase.installing",
+  preparing_service: "operation.progress.ariaPhase.preparingService",
+  draining: "operation.progress.ariaPhase.draining",
+  stopping: "operation.progress.ariaPhase.stopping",
+  starting: "operation.progress.ariaPhase.starting",
+  authorizing: "operation.progress.ariaPhase.authorizing",
+  verifying_runtime: "operation.progress.ariaPhase.verifyingRuntime",
+  rolling_back: "operation.progress.ariaPhase.rollingBack",
+  completed: "operation.progress.ariaPhase.completed",
+} as const satisfies Record<CoreOperation["phase"], string>;
 
-const errorCopy: Record<string, string> = {
-  download_failed:
-    "WokCore could not be downloaded. Check the network and try again.",
-  invalid_install_state:
-    "The configured WokCore installation could not be trusted. Review the installation before retrying.",
-  invalid_manifest:
-    "The WokCore release information was invalid. Nothing was installed.",
-  invalid_signature:
-    "The WokCore signature could not be verified. Nothing untrusted was installed.",
-  incompatible_manifest:
-    "This WokCore release is not compatible with the current system.",
-  artifact_size_mismatch:
-    "The downloaded WokCore package was incomplete. Nothing was installed.",
-  artifact_hash_mismatch:
-    "The downloaded WokCore package did not pass verification. Nothing was installed.",
-  invalid_archive:
-    "The WokCore package could not be opened safely. Nothing was installed.",
-  unsafe_install_location:
-    "WokCore cannot be installed in the configured location safely.",
-  install_in_progress:
-    "Another WokCore installation is still in progress. Try again after it finishes.",
-  install_failed:
-    "WokCore could not be installed. The current configuration was left unchanged.",
-  install_record_failed:
-    "WokCore was installed, but its trusted installation record could not be saved.",
-  start_failed:
-    "WokCore was installed but could not be started. You can safely try again.",
-  authorization_failed:
-    "WokRouter could not be authorized to manage WokCore. You can safely try again.",
-  update_unavailable: "No verified WokCore update is currently available.",
-  update_verification_failed:
-    "The WokCore update could not be verified. No untrusted update was installed.",
-  update_install_failed:
-    "The WokCore update could not be completed safely. Review diagnostics and try again.",
-  active_requests_remain:
-    "WokCore is still serving active requests. Try the update again later.",
-  rolled_back:
-    "The WokCore update failed and the previous version was restored.",
-  recovery_required:
-    "WokCore could not recover automatically. Review diagnostics before retrying.",
-  operation_in_progress:
-    "Another WokCore operation is still in progress. Wait for it to finish.",
-  invalid_progress:
-    "WokRouter could not verify the operation progress. Check WokCore status before retrying.",
-};
+function errorTranslationKey(errorCode: string | undefined) {
+  switch (errorCode) {
+    case "download_failed":
+      return "errors.downloadFailed" as const;
+    case "invalid_install_state":
+      return "errors.invalidInstallState" as const;
+    case "invalid_manifest":
+      return "errors.invalidManifest" as const;
+    case "invalid_signature":
+      return "errors.invalidSignature" as const;
+    case "incompatible_manifest":
+      return "errors.incompatibleManifest" as const;
+    case "artifact_size_mismatch":
+      return "errors.artifactSizeMismatch" as const;
+    case "artifact_hash_mismatch":
+      return "errors.artifactHashMismatch" as const;
+    case "invalid_archive":
+      return "errors.invalidArchive" as const;
+    case "unsafe_install_location":
+      return "errors.unsafeInstallLocation" as const;
+    case "install_in_progress":
+      return "errors.installInProgress" as const;
+    case "install_failed":
+      return "errors.installFailed" as const;
+    case "install_record_failed":
+      return "errors.installRecordFailed" as const;
+    case "start_failed":
+      return "errors.startFailed" as const;
+    case "authorization_failed":
+      return "errors.authorizationFailed" as const;
+    case "update_unavailable":
+      return "errors.updateUnavailable" as const;
+    case "update_verification_failed":
+      return "errors.updateVerificationFailed" as const;
+    case "active_requests_remain":
+      return "errors.activeRequestsRemain" as const;
+    case "rolled_back":
+      return "errors.rolledBack" as const;
+    case "update_install_failed":
+      return "errors.updateInstallFailed" as const;
+    case "recovery_required":
+      return "errors.recoveryRequired" as const;
+    case "operation_in_progress":
+      return "errors.operationInProgress" as const;
+    case "invalid_progress":
+      return "errors.invalidProgress" as const;
+    default:
+      return "errors.unknown" as const;
+  }
+}
 
-function useByteFormatter(): (bytes: number) => string {
+function useByteFormatter(locale: string | undefined): (bytes: number) => string {
   const numberFormat = useMemo(
     () =>
-      new Intl.NumberFormat(undefined, {
+      new Intl.NumberFormat(locale, {
         maximumFractionDigits: 1,
       }),
-    [],
+    [locale],
   );
   return (bytes) => {
     const units = ["B", "KB", "MB", "GB", "TB"] as const;
@@ -105,7 +111,11 @@ function useByteFormatter(): (bytes: number) => string {
   };
 }
 
-function versionRows(operation: CoreOperation) {
+function versionRows(
+  operation: CoreOperation,
+  currentLabel: string,
+  targetLabel: string,
+) {
   if (
     operation.currentVersion === undefined &&
     operation.targetVersion === undefined
@@ -116,7 +126,7 @@ function versionRows(operation: CoreOperation) {
     <dl className="core-operation__versions">
       {operation.currentVersion !== undefined && (
         <div>
-          <dt>Current version</dt>
+          <dt>{currentLabel}</dt>
           <dd>
             <code dir="ltr">{operation.currentVersion}</code>
           </dd>
@@ -124,7 +134,7 @@ function versionRows(operation: CoreOperation) {
       )}
       {operation.targetVersion !== undefined && (
         <div>
-          <dt>Target version</dt>
+          <dt>{targetLabel}</dt>
           <dd>
             <code dir="ltr">{operation.targetVersion}</code>
           </dd>
@@ -140,7 +150,8 @@ export function CoreOperationPanel({
   diagnosticsAvailable = false,
   onOpenDiagnostics,
 }: CoreOperationPanelProps) {
-  const formatBytes = useByteFormatter();
+  const { i18n, t } = useTranslation();
+  const formatBytes = useByteFormatter(i18n.resolvedLanguage);
   const determinate =
     operation.phase === "downloading" &&
     operation.bytesTotal !== undefined &&
@@ -162,29 +173,41 @@ export function CoreOperationPanel({
   const updateIsCurrent =
     isUpdate && succeeded && operation.targetVersion === undefined;
   const announcement = recoveryRequired
-    ? "WokCore recovery required"
+    ? t("operation.result.recoveryRequired")
     : failed
       ? isUpdate
-        ? "WokCore update did not finish"
-        : "WokCore setup did not finish"
+        ? t("operation.result.updateDidNotFinish")
+        : t("operation.result.setupDidNotFinish")
       : succeeded
         ? isUpdate
           ? updateIsCurrent
-            ? "WokCore is already current"
-            : "WokCore updated"
-          : "WokCore is ready"
-        : phaseCopy[operation.phase];
+            ? t("operation.result.alreadyCurrent")
+            : t("operation.result.updatedHeading")
+          : t("operation.result.ready")
+        : t(phaseKeys[operation.phase]);
   const failureCopy =
     operation.errorCode === "active_requests_remain" &&
     operation.activeRequests !== undefined
-      ? `${new Intl.NumberFormat().format(operation.activeRequests)} active requests remain. WokCore is still serving them; try the update again later.`
-      : (errorCopy[operation.errorCode ?? ""] ??
-        "WokRouter could not complete the operation safely. Check WokCore status and try again.");
+      ? t("operation.result.activeRequests", {
+          count: new Intl.NumberFormat(i18n.resolvedLanguage).format(
+            operation.activeRequests,
+          ),
+        })
+      : t(errorTranslationKey(operation.errorCode));
   const successCopy = isUpdate
     ? updateIsCurrent
-      ? `The fresh signed check reports WokCore ${operation.currentVersion ?? ""} is already current.`.trim()
-      : `Verified WokCore ${operation.targetVersion ?? ""} is installed and ready.`.trim()
-    : "The verified WokCore operation completed successfully.";
+      ? t("operation.result.current", {
+          currentVersion: operation.currentVersion ?? "",
+        })
+      : t("operation.result.updated", {
+          targetVersion: operation.targetVersion ?? "",
+        })
+    : t("operation.result.installed");
+  const progressLabel = determinate
+    ? t("operation.progress.downloadAria")
+    : t("operation.progress.indeterminateAria", {
+        phase: t(progressPhaseKeys[operation.phase]),
+      });
 
   return (
     <section
@@ -201,8 +224,8 @@ export function CoreOperationPanel({
       </p>
       <p className="section-label">
         {operation.operation === "install"
-          ? "WokCore setup"
-          : "WokCore update"}
+          ? t("operation.install.title")
+          : t("operation.update.title")}
       </p>
       <h1 id="core-operation-heading" tabIndex={-1}>
         {announcement}
@@ -212,7 +235,7 @@ export function CoreOperationPanel({
           ? failureCopy
           : succeeded
             ? successCopy
-            : phaseCopy[operation.phase]}
+            : t(phaseKeys[operation.phase])}
       </p>
 
       {operation.state === "running" && (
@@ -220,7 +243,7 @@ export function CoreOperationPanel({
           <div
             className="core-progress"
             role="progressbar"
-            aria-label={progressLabel[operation.phase]}
+            aria-label={progressLabel}
             {...(percent === undefined
               ? {}
               : {
@@ -242,14 +265,20 @@ export function CoreOperationPanel({
           </div>
           {determinate && (
             <p className="core-progress__bytes">
-              {formatBytes(operation.bytesCompleted!)} /{" "}
-              {formatBytes(operation.bytesTotal!)}
+              {t("operation.progress.bytes", {
+                completed: formatBytes(operation.bytesCompleted!),
+                total: formatBytes(operation.bytesTotal!),
+              })}
             </p>
           )}
         </>
       )}
 
-      {versionRows(operation)}
+      {versionRows(
+        operation,
+        t("operation.version.current"),
+        t("operation.version.target"),
+      )}
 
       {failed && (
         <div className="recovery">
@@ -259,10 +288,10 @@ export function CoreOperationPanel({
             onClick={(event) => onRetry(event.currentTarget)}
           >
             {isUpdate && operation.errorCode === "active_requests_remain"
-              ? "Try update later"
+              ? t("operation.recovery.retryUpdateLater")
               : isUpdate
-                ? "Try update again"
-                : "Try again"}
+                ? t("operation.recovery.retryUpdate")
+                : t("operation.install.retry")}
           </button>
           {recoveryRequired &&
             (diagnosticsAvailable && onOpenDiagnostics ? (
@@ -271,17 +300,14 @@ export function CoreOperationPanel({
                 type="button"
                 onClick={onOpenDiagnostics}
               >
-                Open diagnostics
+                {t("operation.recovery.openDiagnostics")}
               </button>
             ) : (
               <p className="action-note">
-                Diagnostics are unavailable because this WokCore runtime
-                does not provide diagnostic events.
+                {t("operation.recovery.diagnosticsUnavailable")}
               </p>
             ))}
-          <p className="action-note">
-            Closing this window never cancels a WokCore operation.
-          </p>
+          <p className="action-note">{t("operation.recovery.actionNote")}</p>
         </div>
       )}
     </section>

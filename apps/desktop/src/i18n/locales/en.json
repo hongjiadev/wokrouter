@@ -3,15 +3,230 @@
     "localDesktopControl": "Local desktop control",
     "loopbackFooter": "Desktop controls communicate with WokCore over loopback HTTP."
   },
-  "core": {},
-  "operation": {},
+  "core": {
+    "heading": "WokCore health",
+    "runtimeStatus": "Runtime status",
+    "state": {
+      "missing": {
+        "title": "WokCore not installed",
+        "summary": "Install WokCore or register its trusted installation before starting local routing."
+      },
+      "stopped": {
+        "title": "WokCore stopped",
+        "summary": "The desktop app is available, but local routing stays offline until WokCore starts."
+      },
+      "starting": {
+        "title": "WokCore starting",
+        "summary": "WokCore is preparing its local management service."
+      },
+      "running": {
+        "title": "WokCore running",
+        "summary": "WokCore is ready to accept local client traffic."
+      },
+      "draining": {
+        "title": "WokCore draining",
+        "summary": "Existing requests are finishing. New work remains offline until draining completes."
+      },
+      "authorizationRequired": {
+        "title": "WokRouter authorization required",
+        "summary": "Authorize this desktop client before it can inspect or control the WokCore service."
+      },
+      "incompatible": {
+        "title": "WokCore update required",
+        "summary": "The installed WokCore management API is not compatible with this WokRouter version."
+      },
+      "invalidRuntime": {
+        "title": "WokCore runtime invalid",
+        "summary": "WokRouter could not verify the configured WokCore installation or runtime response."
+      }
+    },
+    "statusUnavailable": {
+      "title": "WokCore status unavailable",
+      "summary": "WokRouter could not confirm whether WokCore is available. Your configuration has not been changed.",
+      "announcement": "WokCore status unavailable. Check again."
+    },
+    "field": {
+      "runtimeChannel": "Runtime channel",
+      "version": "Version",
+      "connection": "Connection",
+      "phase": "Phase",
+      "activeRequests": "Active requests"
+    },
+    "runtimeChannel": {
+      "development": "Development",
+      "production": "Production"
+    },
+    "connection": {
+      "loopbackHttp": "Loopback HTTP",
+      "notConnected": "Not connected"
+    },
+    "action": {
+      "checking": "Checking…",
+      "checkAgain": "Check again",
+      "start": "Start WokCore",
+      "starting": "Starting WokCore…",
+      "stop": "Stop WokCore",
+      "stopping": "Stopping WokCore…",
+      "authorize": "Authorize WokRouter",
+      "retryStart": "Try starting again",
+      "retryStop": "Try stopping again"
+    },
+    "actionNote": "Closing this window never stops WokCore.",
+    "developmentActionNote": "This development WokCore is managed by the IDE.",
+    "actionFailure": {
+      "start": "WokCore could not start",
+      "stop": "WokCore could not stop",
+      "safeRetry": "{{error}}. You can safely try again.",
+      "summary": "The service state was not assumed to have changed. Check its status or safely try the action again."
+    },
+    "announcement": {
+      "checking": "Checking WokCore status",
+      "starting": "Starting WokCore.",
+      "stopping": "Stopping WokCore.",
+      "state": "{{title}}.",
+      "version": "{{title}}. Version {{version}}."
+    },
+    "phase": {
+      "starting": "Starting",
+      "running": "Running",
+      "draining": "Draining",
+      "awaitingCancellation": "Awaiting Cancellation",
+      "stopping": "Stopping"
+    }
+  },
+  "operation": {
+    "install": {
+      "title": "WokCore setup",
+      "otherProcess": "WokCore operation continues in another process",
+      "otherProcessSummary": "The trusted installation is still in progress. WokRouter will reconnect when it finishes.",
+      "waitAria": "Waiting for WokCore installation",
+      "unavailableTitle": "WokCore setup unavailable",
+      "unavailableSummary": "WokRouter could not begin or recover the verified setup operation. Your local configuration was not assumed to have changed.",
+      "preflightTitle": "Checking existing WokCore setup",
+      "preflightSummary": "WokRouter is checking for an operation it can safely resume before starting installation.",
+      "preflightAria": "Check WokCore setup progress",
+      "retry": "Try again"
+    },
+    "update": {
+      "title": "WokCore update",
+      "available": "Upgrade WokCore from {{currentVersion}} to {{targetVersion}}",
+      "trigger": "Upgrade WokCore",
+      "confirmTitle": "Upgrade WokCore?",
+      "confirmBody": "WokCore may briefly stop while the verified update is installed. Active requests can defer the update safely.",
+      "confirmAction": "Confirm upgrade",
+      "cancel": "Cancel",
+      "checkUnavailable": "WokCore update check unavailable",
+      "checkUnavailableSummary": "WokRouter could not verify whether an update is available. The current WokCore remains unchanged.",
+      "check": "Check for updates",
+      "checking": "Checking…",
+      "checkingLong": "Checking for updates…",
+      "startFailedTitle": "WokCore update could not start",
+      "startFailedSummary": "WokRouter could not begin or recover a verified update operation. The current WokCore was not assumed to have changed.",
+      "retrySafely": "Retry update safely",
+      "retryRequirement": "A fresh signed check and confirmation are required before retrying."
+    },
+    "phase": {
+      "checkingRelease": "Checking for a WokCore release",
+      "downloading": "Downloading WokCore",
+      "verifying": "Verifying WokCore",
+      "installing": "Installing WokCore",
+      "preparingService": "Preparing the WokCore service",
+      "draining": "Waiting for active requests",
+      "stopping": "Stopping WokCore",
+      "starting": "Starting WokCore",
+      "authorizing": "Authorizing WokRouter",
+      "verifyingRuntime": "Verifying the WokCore runtime",
+      "rollingBack": "Restoring the previous WokCore version",
+      "completed": "WokCore operation complete"
+    },
+    "progress": {
+      "downloadAria": "Download WokCore progress",
+      "indeterminateAria": "{{phase}} progress",
+      "bytes": "{{completed}} / {{total}}",
+      "ariaPhase": {
+        "checkingRelease": "WokCore release check",
+        "verifying": "Verify WokCore",
+        "installing": "Install WokCore",
+        "preparingService": "Prepare WokCore service",
+        "draining": "Drain WokCore requests",
+        "stopping": "Stop WokCore",
+        "starting": "Start WokCore",
+        "authorizing": "Authorize WokRouter",
+        "verifyingRuntime": "Verify WokCore runtime",
+        "rollingBack": "Restore WokCore",
+        "completed": "Complete WokCore operation"
+      }
+    },
+    "version": {
+      "current": "Current version",
+      "target": "Target version"
+    },
+    "result": {
+      "setupDidNotFinish": "WokCore setup did not finish",
+      "updateDidNotFinish": "WokCore update did not finish",
+      "alreadyCurrent": "WokCore is already current",
+      "updatedHeading": "WokCore updated",
+      "ready": "WokCore is ready",
+      "installed": "The verified WokCore operation completed successfully.",
+      "updated": "Verified WokCore {{targetVersion}} is installed and ready.",
+      "current": "The fresh signed check reports WokCore {{currentVersion}} is already current.",
+      "activeRequests": "{{count}} active requests remain. WokCore is still serving them; try the update again later.",
+      "rolledBack": "The WokCore update failed and the previous version was restored.",
+      "recoveryRequired": "WokCore recovery required"
+    },
+    "recovery": {
+      "retryUpdateLater": "Try update later",
+      "retryUpdate": "Try update again",
+      "openDiagnostics": "Open diagnostics",
+      "diagnosticsUnavailable": "Diagnostics are unavailable because this WokCore runtime does not provide diagnostic events.",
+      "actionNote": "Closing this window never cancels a WokCore operation."
+    },
+    "monitoring": {
+      "title": "Operation monitoring",
+      "unavailableTitle": "WokCore operation monitoring unavailable",
+      "unavailableSummary": "WokRouter could not reconcile trusted operation progress. Reconnect monitoring before starting or monitoring WokCore setup and updates.",
+      "reconnect": "Reconnect operation monitoring",
+      "reconnectNote": "This only reconnects read-only operation monitoring."
+    },
+    "statusRecovery": {
+      "setupTitle": "WokCore setup completed, but status is unavailable",
+      "setupSummary": "WokRouter could not confirm the new WokCore status. Check the trusted status again without repeating installation.",
+      "updateTitle": "WokCore update completed, but status is unavailable",
+      "updateSummary": "WokRouter could not confirm the new WokCore status. Check the trusted status again without repeating the update.",
+      "checkAgain": "Check status again"
+    }
+  },
   "management": {
     "providers": {},
     "sessions": {},
     "usage": {},
     "diagnostics": {}
   },
-  "errors": {},
+  "errors": {
+    "downloadFailed": "WokCore could not be downloaded. Check the network and try again.",
+    "invalidInstallState": "The configured WokCore installation could not be trusted. Review the installation before retrying.",
+    "invalidManifest": "The WokCore release information was invalid. Nothing was installed.",
+    "invalidSignature": "The WokCore signature could not be verified. Nothing untrusted was installed.",
+    "incompatibleManifest": "This WokCore release is not compatible with the current system.",
+    "artifactSizeMismatch": "The downloaded WokCore package was incomplete. Nothing was installed.",
+    "artifactHashMismatch": "The downloaded WokCore package did not pass verification. Nothing was installed.",
+    "invalidArchive": "The WokCore package could not be opened safely. Nothing was installed.",
+    "unsafeInstallLocation": "WokCore cannot be installed in the configured location safely.",
+    "installInProgress": "Another WokCore installation is still in progress. Try again after it finishes.",
+    "installFailed": "WokCore could not be installed. The current configuration was left unchanged.",
+    "installRecordFailed": "WokCore was installed, but its trusted installation record could not be saved.",
+    "startFailed": "WokCore was installed but could not be started. You can safely try again.",
+    "authorizationFailed": "WokRouter could not be authorized to manage WokCore. You can safely try again.",
+    "updateUnavailable": "No verified WokCore update is currently available.",
+    "updateVerificationFailed": "The WokCore update could not be verified. No untrusted update was installed.",
+    "activeRequestsRemain": "WokCore is still serving active requests. Try the update again later.",
+    "rolledBack": "The WokCore update failed and the previous version was restored.",
+    "updateInstallFailed": "The WokCore update could not be completed safely. Review diagnostics and try again.",
+    "recoveryRequired": "WokCore could not recover automatically. Review diagnostics before retrying.",
+    "operationInProgress": "Another WokCore operation is still in progress. Wait for it to finish.",
+    "invalidProgress": "WokRouter could not verify the operation progress. Check WokCore status before retrying.",
+    "unknown": "WokRouter could not complete the operation safely. Check WokCore status and try again."
+  },
   "common": {
     "retry": "Try again",
     "cancel": "Cancel",

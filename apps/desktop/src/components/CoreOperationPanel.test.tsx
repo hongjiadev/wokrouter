@@ -1,7 +1,8 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CoreOperation } from "../coreOperation";
+import { initializeI18n } from "../i18n";
 import { CoreOperationPanel } from "./CoreOperationPanel";
 
 const OPERATION_ID = "64c09bda-7afd-4e86-8d61-43bc39a8bc51";
@@ -19,6 +20,156 @@ function operation(fields: Partial<CoreOperation> = {}): CoreOperation {
 }
 
 describe("CoreOperationPanel", () => {
+  beforeEach(async () => {
+    await initializeI18n("en");
+  });
+
+  it("translates determinate download progress and technical values", async () => {
+    await initializeI18n("zh-CN");
+
+    render(
+      <CoreOperationPanel
+        operation={operation({
+          phase: "downloading",
+          currentVersion: "0.1.22",
+          targetVersion: "0.1.23",
+          bytesCompleted: 512,
+          bytesTotal: 1024,
+        })}
+        onRetry={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("progressbar", { name: "正在下载 WokCore" }),
+    ).toHaveAttribute("aria-valuenow", "50");
+    expect(
+      screen.getByRole("heading", { name: "正在下载 WokCore" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/512 B.*1 KB/)).toBeInTheDocument();
+    expect(screen.getByText("当前版本")).toBeInTheDocument();
+    expect(screen.getByText("目标版本")).toBeInTheDocument();
+    expect(screen.getByText("0.1.22")).toHaveAttribute("dir", "ltr");
+    expect(screen.getByText("0.1.23")).toHaveAttribute("dir", "ltr");
+  });
+
+  it("translates indeterminate progress and the live phase announcement", async () => {
+    await initializeI18n("zh-CN");
+
+    render(
+      <CoreOperationPanel
+        operation={operation({ phase: "verifying" })}
+        onRetry={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("progressbar", { name: "正在验证 WokCore 进度" }),
+    ).not.toHaveAttribute("aria-valuenow");
+    expect(screen.getByRole("status")).toHaveTextContent("正在验证 WokCore");
+  });
+
+  it("translates update rollback and active-request recovery", async () => {
+    await initializeI18n("zh-CN");
+    const view = render(
+      <CoreOperationPanel
+        operation={operation({
+          operation: "update",
+          state: "failed",
+          phase: "completed",
+          errorCode: "rolled_back",
+        })}
+        onRetry={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/已恢复旧版本/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "再次尝试更新" })).toBeEnabled();
+
+    view.rerender(
+      <CoreOperationPanel
+        operation={operation({
+          operation: "update",
+          state: "failed",
+          phase: "completed",
+          activeRequests: 1_000_000,
+          errorCode: "active_requests_remain",
+        })}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/仍有 1,000,000 个活动请求/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "稍后重试更新" })).toBeEnabled();
+  });
+
+  it("translates high-priority recovery and diagnostics accessibility", async () => {
+    await initializeI18n("zh-CN");
+
+    render(
+      <CoreOperationPanel
+        operation={operation({
+          operation: "update",
+          state: "failed",
+          phase: "completed",
+          errorCode: "recovery_required",
+        })}
+        onRetry={vi.fn()}
+        diagnosticsAvailable
+        onOpenDiagnostics={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "WokCore 需要恢复" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开诊断" })).toBeEnabled();
+    expect(
+      screen.getByText("关闭此窗口不会取消 WokCore 操作。"),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps unknown backend details private in Simplified Chinese", async () => {
+    await initializeI18n("zh-CN");
+    const failed = {
+      ...operation({ state: "failed", phase: "completed" }),
+      errorCode: "C:\\Users\\someone\\token.json",
+      rawError: "failed at C:\\private\\wokcore.exe",
+    } as CoreOperation;
+
+    render(<CoreOperationPanel operation={failed} onRetry={vi.fn()} />);
+
+    expect(
+      screen.getByText("WokRouter 无法安全完成此操作。请检查 WokCore 状态后重试。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/someone|token\.json|private|wokcore\.exe/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("updates progress maps when the locale changes without remounting", async () => {
+    render(
+      <CoreOperationPanel
+        operation={operation({ phase: "downloading", bytesCompleted: 1, bytesTotal: 2 })}
+        onRetry={vi.fn()}
+      />,
+    );
+    const heading = screen.getByRole("heading", { name: "Downloading WokCore" });
+    const progress = screen.getByRole("progressbar", {
+      name: "Download WokCore progress",
+    });
+    const liveRegion = screen.getByRole("status");
+
+    await act(async () => {
+      await initializeI18n("zh-CN");
+    });
+
+    expect(screen.getByRole("heading", { name: "正在下载 WokCore" })).toBe(heading);
+    expect(screen.getByRole("progressbar", { name: "正在下载 WokCore" })).toBe(
+      progress,
+    );
+    expect(screen.getByRole("status")).toBe(liveRegion);
+  });
+
   it("renders real download bytes as a determinate progressbar", () => {
     render(
       <CoreOperationPanel
