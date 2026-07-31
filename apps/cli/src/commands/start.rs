@@ -88,11 +88,21 @@ pub fn render_structured_platform_error(
 trait StartService: Send + Sync {
     async fn connection(&self, client: &WokCoreClient) -> Result<CoreConnection, CommandError>;
     fn spawn(&self, executable: &Path) -> Result<Box<dyn StartedCore>, CommandError>;
-    async fn ensure_authorized(
+    async fn authorize(
         &self,
         client: &WokCoreClient,
         executable: &Path,
     ) -> Result<SecretString, CommandError>;
+    async fn reauthorize(
+        &self,
+        client: &WokCoreClient,
+        executable: &Path,
+    ) -> Result<SecretString, CommandError>;
+    async fn authorization_status(
+        &self,
+        client: &WokCoreClient,
+        token: &SecretString,
+    ) -> Result<ServiceStatus, ServiceError>;
     async fn authenticated_status(
         &self,
         client: &WokCoreClient,
@@ -123,12 +133,28 @@ impl StartService for SystemStartService {
         Ok(Box::new(SystemStartedCore(spawn_core(executable)?)))
     }
 
-    async fn ensure_authorized(
+    async fn authorize(
         &self,
-        client: &WokCoreClient,
+        _client: &WokCoreClient,
         executable: &Path,
     ) -> Result<SecretString, CommandError> {
-        ensure_authorized(client, executable.to_path_buf()).await
+        authorize(executable.to_path_buf()).await
+    }
+
+    async fn reauthorize(
+        &self,
+        _client: &WokCoreClient,
+        executable: &Path,
+    ) -> Result<SecretString, CommandError> {
+        reauthorize(executable.to_path_buf()).await
+    }
+
+    async fn authorization_status(
+        &self,
+        client: &WokCoreClient,
+        token: &SecretString,
+    ) -> Result<ServiceStatus, ServiceError> {
+        client.service_status(token).await
     }
 
     async fn authenticated_status(
@@ -299,11 +325,10 @@ async fn run_start_workflow(
     }
 
     reporter.authorizing();
-    let token = dependencies
-        .service
-        .ensure_authorized(runtime.client(), &executable)
-        .await
-        .map_err(|error| StartFailure::authorization(error, "authorizing"))?;
+    let token =
+        resolve_authorized_token(dependencies.service.as_ref(), runtime.client(), &executable)
+            .await
+            .map_err(|error| StartFailure::authorization(error, "authorizing"))?;
 
     reporter.verifying_runtime();
     match verify_authenticated_status(dependencies.service.as_ref(), runtime.client(), &token).await
@@ -331,11 +356,13 @@ async fn run_development_start(
                 )
             })?;
             reporter.authorizing();
-            let token = dependencies
-                .service
-                .ensure_authorized(runtime.client(), executable)
-                .await
-                .map_err(|error| StartFailure::authorization(error, "authorizing"))?;
+            let token = resolve_authorized_token(
+                dependencies.service.as_ref(),
+                runtime.client(),
+                executable,
+            )
+            .await
+            .map_err(|error| StartFailure::authorization(error, "authorizing"))?;
             reporter.verifying_runtime();
             match verify_authenticated_status(
                 dependencies.service.as_ref(),
@@ -521,19 +548,17 @@ fn install_error_code(error: WokCoreInstallError) -> &'static str {
     }
 }
 
-async fn ensure_authorized(
-    client: &wokrouter_wokcore_client::WokCoreClient,
-    executable: std::path::PathBuf,
+async fn resolve_authorized_token(
+    service: &dyn StartService,
+    client: &WokCoreClient,
+    executable: &Path,
 ) -> Result<SecretString, CommandError> {
-    let token = authorize(executable.clone()).await?;
-    match client.service_status(&token).await {
-        Ok(_) => Ok(token),
+    let token = service.authorize(client, executable).await?;
+    match service.authorization_status(client, &token).await {
         Err(ServiceError::Unauthorized | ServiceError::Forbidden) => {
-            let token = reauthorize(executable).await?;
-            client.service_status(&token).await?;
-            Ok(token)
+            service.reauthorize(client, executable).await
         }
-        Err(error) => Err(error.into()),
+        Ok(_) | Err(_) => Ok(token),
     }
 }
 
