@@ -90,6 +90,269 @@ function Test-ContainsExactLine {
     return [regex]::Matches($Source, $pattern).Count -eq 1
 }
 
+function Get-PowerShellAst {
+    param(
+        [Parameter(Mandatory)][string] $Source,
+        [Parameter(Mandatory)][string] $Description
+    )
+
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput(
+        $Source,
+        [ref] $tokens,
+        [ref] $parseErrors
+    )
+    if ($parseErrors.Count -ne 0) {
+        throw "$Description contains invalid PowerShell syntax."
+    }
+    return $ast
+}
+
+function Get-ExactGuardAst {
+    param(
+        [Parameter(Mandatory)] $Ast,
+        [Parameter(Mandatory)][string] $Condition,
+        [Parameter(Mandatory)][string] $ThrowStatement
+    )
+
+    return @(
+        $Ast.FindAll(
+            {
+                param($node)
+
+                if (
+                    $node -isnot [Management.Automation.Language.IfStatementAst] -or
+                    $node.Clauses.Count -ne 1 -or
+                    $null -ne $node.ElseClause
+                ) {
+                    return $false
+                }
+                $statements = @($node.Clauses[0].Item2.Statements)
+                return (
+                    $node.Clauses[0].Item1.Extent.Text.Trim() -ceq $Condition -and
+                    $statements.Count -eq 1 -and
+                    $statements[0] -is [Management.Automation.Language.ThrowStatementAst] -and
+                    $statements[0].Extent.Text.Trim() -ceq $ThrowStatement
+                )
+            },
+            $true
+        )
+    )
+}
+
+function Get-RustCodeView {
+    param([Parameter(Mandatory)][string] $Source)
+
+    $result = [Text.StringBuilder]::new($Source.Length)
+    $index = 0
+    $lineComment = $false
+    $blockDepth = 0
+    [char] $quote = [char] 0
+    $escaped = $false
+    $rawHashCount = -1
+    while ($index -lt $Source.Length) {
+        $current = $Source[$index]
+        $next = if ($index + 1 -lt $Source.Length) {
+            $Source[$index + 1]
+        } else {
+            [char] 0
+        }
+
+        if ($lineComment) {
+            if ($current -eq "`r" -or $current -eq "`n") {
+                $lineComment = $false
+                $null = $result.Append($current)
+            } else {
+                $null = $result.Append(" ")
+            }
+            $index += 1
+            continue
+        }
+
+        if ($blockDepth -gt 0) {
+            if ($current -eq "/" -and $next -eq "*") {
+                $blockDepth += 1
+                $null = $result.Append("  ")
+                $index += 2
+                continue
+            }
+            if ($current -eq "*" -and $next -eq "/") {
+                $blockDepth -= 1
+                $null = $result.Append("  ")
+                $index += 2
+                continue
+            }
+            if ($current -eq "`r" -or $current -eq "`n") {
+                $null = $result.Append($current)
+            } else {
+                $null = $result.Append(" ")
+            }
+            $index += 1
+            continue
+        }
+
+        if ($rawHashCount -ge 0) {
+            if ($current -eq '"') {
+                $closingMatches = (
+                    $index + $rawHashCount -lt $Source.Length
+                )
+                for (
+                    $hashIndex = 1;
+                    $closingMatches -and $hashIndex -le $rawHashCount;
+                    $hashIndex += 1
+                ) {
+                    if ($Source[$index + $hashIndex] -ne "#") {
+                        $closingMatches = $false
+                    }
+                }
+                if ($closingMatches) {
+                    $closingLength = 1 + $rawHashCount
+                    $null = $result.Append("".PadRight($closingLength))
+                    $index += $closingLength
+                    $rawHashCount = -1
+                    continue
+                }
+            }
+            if ($current -eq "`r" -or $current -eq "`n") {
+                $null = $result.Append($current)
+            } else {
+                $null = $result.Append(" ")
+            }
+            $index += 1
+            continue
+        }
+
+        if ($quote -ne [char] 0) {
+            if ($current -eq "`r" -or $current -eq "`n") {
+                $null = $result.Append($current)
+            } else {
+                $null = $result.Append(" ")
+            }
+            if ($escaped) {
+                $escaped = $false
+            } elseif ($current -eq "\") {
+                $escaped = $true
+            } elseif ($current -eq $quote) {
+                $quote = [char] 0
+            }
+            $index += 1
+            continue
+        }
+
+        $previous = if ($index -gt 0) {
+            $Source[$index - 1]
+        } else {
+            [char] 0
+        }
+        $atTokenStart = (
+            $index -eq 0 -or
+            [string] $previous -cnotmatch '[A-Za-z0-9_]'
+        )
+
+        $rawCursor = -1
+        if ($atTokenStart -and $current -eq "r") {
+            $rawCursor = $index + 1
+        } elseif (
+            $atTokenStart -and
+            $current -in @("b", "c") -and
+            $next -eq "r"
+        ) {
+            $rawCursor = $index + 2
+        }
+        if ($rawCursor -ge 0) {
+            $hashCount = 0
+            while (
+                $rawCursor -lt $Source.Length -and
+                $Source[$rawCursor] -eq "#"
+            ) {
+                $hashCount += 1
+                $rawCursor += 1
+            }
+            if (
+                $rawCursor -lt $Source.Length -and
+                $Source[$rawCursor] -eq '"'
+            ) {
+                $openingLength = $rawCursor - $index + 1
+                $null = $result.Append("".PadRight($openingLength))
+                $index += $openingLength
+                $rawHashCount = $hashCount
+                continue
+            }
+        }
+
+        if ($current -eq "/" -and $next -eq "/") {
+            $lineComment = $true
+            $null = $result.Append("  ")
+            $index += 2
+            continue
+        }
+        if ($current -eq "/" -and $next -eq "*") {
+            $blockDepth = 1
+            $null = $result.Append("  ")
+            $index += 2
+            continue
+        }
+
+        $quoteIndex = -1
+        if ($current -eq '"' -or $current -eq "'") {
+            $quoteIndex = $index
+        } elseif (
+            $atTokenStart -and
+            $current -in @("b", "c") -and
+            $next -in @('"', "'")
+        ) {
+            $quoteIndex = $index + 1
+        }
+        if ($quoteIndex -ge 0) {
+            $isCharacter = $Source[$quoteIndex] -eq "'"
+            $hasCharacterEnd = -not $isCharacter
+            if ($isCharacter) {
+                $characterCursor = $quoteIndex + 1
+                $characterEscaped = $false
+                while (
+                    $characterCursor -lt $Source.Length -and
+                    $Source[$characterCursor] -notin @("`r", "`n")
+                ) {
+                    $character = $Source[$characterCursor]
+                    if ($characterEscaped) {
+                        $characterEscaped = $false
+                    } elseif ($character -eq "\") {
+                        $characterEscaped = $true
+                    } elseif ($character -eq "'") {
+                        $hasCharacterEnd = $true
+                        break
+                    }
+                    $characterCursor += 1
+                }
+            }
+            if ($hasCharacterEnd) {
+                $openingLength = $quoteIndex - $index + 1
+                $null = $result.Append("".PadRight($openingLength))
+                $quote = $Source[$quoteIndex]
+                $escaped = $false
+                $index += $openingLength
+                continue
+            }
+        }
+        $null = $result.Append($current)
+        $index += 1
+    }
+    return $result.ToString()
+}
+
+function Get-ActiveWindowsSubsystemAttributes {
+    param([Parameter(Mandatory)][string] $Source)
+
+    $activeSource = Get-RustCodeView -Source $Source
+    return @(
+        [regex]::Matches(
+            $activeSource,
+            '(?ms)^[ \t]*#![ \t]*\[[^\]]*\bwindows_subsystem\b[^\]]*\]'
+        )
+    )
+}
+
 function Read-BoundedUtf8Text {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -230,18 +493,27 @@ if ($failures.Count -eq 0) {
         '#![cfg_attr(all(windows, not(debug_assertions)), ' +
         'windows_subsystem = "windows")]'
     )
-    if (
-        -not $desktopMain.StartsWith(
+    if (-not $desktopMain.StartsWith(
             "$desktopSubsystemAttribute`n",
             [StringComparison]::Ordinal
-        ) -or
-        @([regex]::Matches(
-                $desktopMain,
-                [regex]::Escape($desktopSubsystemAttribute)
-            )).Count -ne 1
-    ) {
+        )) {
         Add-Failure `
             -Message "Desktop main must begin with the exact release-only GUI subsystem attribute."
+    }
+
+    $desktopSubsystemAttributes = @(
+        Get-ActiveWindowsSubsystemAttributes -Source $desktopMain
+    )
+    if (
+        $desktopSubsystemAttributes.Count -ne 1 -or
+        $desktopMain.Substring(
+            $desktopSubsystemAttributes[0].Index,
+            $desktopSubsystemAttributes[0].Length
+        ).Trim() -cne
+        $desktopSubsystemAttribute
+    ) {
+        Add-Failure `
+            -Message "The release-only attribute must be the desktop's only active Windows subsystem declaration."
     }
 
     $otherSubsystemMains = @(
@@ -261,7 +533,9 @@ if ($failures.Count -eq 0) {
                 $source = Read-BoundedUtf8Text `
                     -Path $main.FullName `
                     -MaximumBytes 1048576
-                if ($source -cmatch '(?ms)^[ \t]*#!\[(?=[^\]]*windows_subsystem)[^\]]+\]') {
+                if (@(
+                        Get-ActiveWindowsSubsystemAttributes -Source $source
+                    ).Count -ne 0) {
                     $main.FullName
                 }
             }
@@ -275,6 +549,47 @@ if ($failures.Count -eq 0) {
     $releaseContractSource = Read-BoundedUtf8Text `
         -Path $releaseContractPath `
         -MaximumBytes 262144
+    $releaseContractAst = $null
+    try {
+        $releaseContractAst = Get-PowerShellAst `
+            -Source $releaseContractSource `
+            -Description "Release contract module"
+    }
+    catch {
+        Add-Failure `
+            -Message "Release contract must define the exact script-scope PE subsystem helper: $($_.Exception.Message)"
+    }
+    if ($null -ne $releaseContractAst) {
+        $peSubsystemFunctions = @(
+            $releaseContractAst.FindAll(
+                {
+                    param($node)
+
+                    return (
+                        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                        $node.Name -ceq "Get-PeSubsystem"
+                    )
+                },
+                $true
+            )
+        )
+        $scriptScopePeSubsystemFunctions = @(
+            $peSubsystemFunctions |
+                Where-Object {
+                    [object]::ReferenceEquals(
+                        $_.Parent,
+                        $releaseContractAst.EndBlock
+                    )
+                }
+        )
+        if (
+            $peSubsystemFunctions.Count -ne 1 -or
+            $scriptScopePeSubsystemFunctions.Count -ne 1
+        ) {
+            Add-Failure `
+                -Message "Release contract must define and export the exact script-scope PE subsystem helper."
+        }
+    }
     $peSubsystemRequirements = @(
         "function Get-PeSubsystem {",
         'if ($bytes.Length -lt 0x40 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {',
@@ -300,25 +615,92 @@ if ($failures.Count -eq 0) {
     $windowsPackagerSource = Read-BoundedUtf8Text `
         -Path $windowsPackagerPath `
         -MaximumBytes 1048576
-    if (-not (Test-ContainsExactLine `
+    $windowsPackagerAst = $null
+    try {
+        $windowsPackagerAst = Get-PowerShellAst `
             -Source $windowsPackagerSource `
-            -Line 'if ((Get-PeSubsystem -Path $desktop) -ne 2) {')) {
-        Add-Failure `
-            -Message "Windows packager must retain the source desktop GUI subsystem check."
+            -Description "Windows packager"
     }
-    if (-not (Test-ContainsExactLine `
-            -Source $windowsPackagerSource `
-            -Line 'if ((Get-PeSubsystem -Path $byName["wokrouter-desktop.exe"]) -ne 2) {')) {
+    catch {
         Add-Failure `
-            -Message "Windows packager must retain the MSI desktop GUI subsystem check."
+            -Message "Windows packager GUI subsystem checks are invalid: $($_.Exception.Message)"
+    }
+
+    $sourceDesktopGuards = @()
+    $msiDesktopGuards = @()
+    $portableDesktopGuards = @()
+    if ($null -ne $windowsPackagerAst) {
+        $sourceDesktopGuards = @(
+            Get-ExactGuardAst `
+                -Ast $windowsPackagerAst `
+                -Condition '(Get-PeSubsystem -Path $desktop) -ne 2' `
+                -ThrowStatement 'throw "Windows desktop executable must use the GUI subsystem."'
+        )
+        $msiDesktopGuards = @(
+            Get-ExactGuardAst `
+                -Ast $windowsPackagerAst `
+                -Condition '(Get-PeSubsystem -Path $byName["wokrouter-desktop.exe"]) -ne 2' `
+                -ThrowStatement 'throw "MSI desktop executable must use the GUI subsystem."'
+        )
+        $portableDesktopGuards = @(
+            Get-ExactGuardAst `
+                -Ast $windowsPackagerAst `
+                -Condition '(Get-PeSubsystem -Path $portableDesktop[0].FullName) -ne 2' `
+                -ThrowStatement 'throw "Portable desktop executable must use the GUI subsystem."'
+        )
+    }
+
+    $sourceDesktopGuardIsOwned = (
+        $sourceDesktopGuards.Count -eq 1 -and
+        [object]::ReferenceEquals(
+            $sourceDesktopGuards[0].Parent,
+            $windowsPackagerAst.EndBlock
+        )
+    )
+    if (-not $sourceDesktopGuardIsOwned) {
+        Add-Failure `
+            -Message "Windows packager must retain the active script-scope source desktop GUI subsystem check."
+    }
+
+    $packageTry = $null
+    if (
+        $msiDesktopGuards.Count -eq 1 -and
+        $portableDesktopGuards.Count -eq 1
+    ) {
+        $msiOwner = $msiDesktopGuards[0].Parent.Parent
+        $portableOwner = $portableDesktopGuards[0].Parent.Parent
+        if (
+            $msiOwner -is [Management.Automation.Language.TryStatementAst] -and
+            [object]::ReferenceEquals($msiOwner, $portableOwner) -and
+            [object]::ReferenceEquals(
+                $msiDesktopGuards[0].Parent,
+                $msiOwner.Body
+            ) -and
+            [object]::ReferenceEquals(
+                $portableDesktopGuards[0].Parent,
+                $msiOwner.Body
+            ) -and
+            [object]::ReferenceEquals(
+                $msiOwner.Parent,
+                $windowsPackagerAst.EndBlock
+            ) -and
+            $msiDesktopGuards[0].Extent.StartOffset -lt
+            $portableDesktopGuards[0].Extent.StartOffset
+        ) {
+            $packageTry = $msiOwner
+        }
+    }
+    if ($null -eq $packageTry) {
+        Add-Failure `
+            -Message "Windows packager must retain the active MSI desktop GUI subsystem check in the package try block."
+        Add-Failure `
+            -Message "Windows packager must retain the active Portable desktop GUI subsystem check in the package try block."
     }
     if (
         -not (Test-ContainsExactLine `
             -Source $windowsPackagerSource `
             -Line '[IO.Compression.ZipFile]::ExtractToDirectory(') -or
-        -not (Test-ContainsExactLine `
-            -Source $windowsPackagerSource `
-            -Line 'if ((Get-PeSubsystem -Path $portableDesktop[0].FullName) -ne 2) {')
+        $portableDesktopGuards.Count -ne 1
     ) {
         Add-Failure `
             -Message "Windows packager must retain the Portable desktop GUI subsystem check."

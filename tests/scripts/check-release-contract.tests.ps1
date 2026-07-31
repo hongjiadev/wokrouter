@@ -86,7 +86,42 @@ function Edit-FixtureFile {
     if (-not $content.Contains($old)) {
         throw "Fixture mutation source was not found in ${RelativePath}: $OldText"
     }
-    Set-Content -LiteralPath $path -Value $content.Replace($old, $new) -Encoding UTF8
+    [IO.File]::WriteAllText(
+        $path,
+        $content.Replace($old, $new),
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
+function Wrap-FixtureBlockInFalseCondition {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $RelativePath,
+        [Parameter(Mandatory)][string] $Block
+    )
+
+    $path = Join-Path $Root $RelativePath
+    $content = (Get-Content -LiteralPath $path -Raw -Encoding UTF8).Replace(
+        "`r`n",
+        "`n"
+    )
+    $wanted = $Block.Replace("`r`n", "`n").TrimEnd("`n")
+    if (
+        [regex]::Matches(
+            $content,
+            [regex]::Escape($wanted)
+        ).Count -ne 1
+    ) {
+        throw "Fixture block is not unique in ${RelativePath}: $Block"
+    }
+    $indent = [regex]::Match($wanted, '^[ \t]*').Value
+    $indented = [regex]::Replace($wanted, '(?m)^', '    ')
+    $wrapped = "$indent" + 'if ($false) {' + "`n$indented`n$indent}"
+    [IO.File]::WriteAllText(
+        $path,
+        $content.Replace($wanted, $wrapped),
+        [Text.UTF8Encoding]::new($false)
+    )
 }
 
 function Invoke-Check {
@@ -200,6 +235,26 @@ try {
             -Scenario "missing desktop subsystem attribute"
     }
 
+    Invoke-Scenario -Name "desktop source rejects a second active subsystem attribute" -Test {
+        $root = New-ReleaseFixture
+        $attribute = (
+            '#![cfg_attr(all(windows, not(debug_assertions)), ' +
+            'windows_subsystem = "windows")]'
+        )
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src-tauri/src/main.rs" `
+            -OldText $attribute `
+            -NewText (
+                $attribute + "`n" +
+                '#![windows_subsystem = "windows"]'
+            )
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "only active Windows subsystem declaration" `
+            -Scenario "second active desktop subsystem attribute"
+    }
+
     Invoke-Scenario -Name "only desktop main may declare a Windows subsystem" -Test {
         $root = New-ReleaseFixture
         $otherMain = Join-Path $root "crates/other/src/main.rs"
@@ -227,6 +282,158 @@ try {
         Assert-Passes `
             -Root $root `
             -Scenario "comment mentioning a Windows subsystem"
+
+        $root = New-ReleaseFixture
+        $otherMain = Join-Path $root "crates/other/src/main.rs"
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $otherMain)) |
+            Out-Null
+        [IO.File]::WriteAllText(
+            $otherMain,
+            (
+                "/*`n" +
+                "#![windows_subsystem = `"windows`"]`n" +
+                "*/`n" +
+                "fn main() {}`n"
+            ),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Assert-Passes `
+            -Root $root `
+            -Scenario "block comment containing a subsystem attribute"
+    }
+
+    $stringDecoys = @(
+        @{
+            Name = "ordinary multiline string"
+            Source = @'
+const SUBSYSTEM_TEXT: &str = "
+#![windows_subsystem = \u{22}windows\u{22}]
+";
+fn main() {}
+'@
+        },
+        @{
+            Name = "raw string"
+            Source = @'
+const SUBSYSTEM_TEXT: &str = r##"
+#![windows_subsystem = "windows"]
+"##;
+fn main() {}
+'@
+        },
+        @{
+            Name = "byte string"
+            Source = @'
+const SUBSYSTEM_TEXT: &[u8] = b"
+#![windows_subsystem = \x22windows\x22]
+";
+fn main() {}
+'@
+        },
+        @{
+            Name = "byte raw string"
+            Source = @'
+const SUBSYSTEM_TEXT: &[u8] = br##"
+#![windows_subsystem = "windows"]
+"##;
+fn main() {}
+'@
+        }
+    )
+    foreach ($decoy in $stringDecoys) {
+        Invoke-Scenario `
+            -Name "other main ignores subsystem text in $($decoy.Name)" `
+            -Test {
+                $root = New-ReleaseFixture
+                $otherMain = Join-Path $root "crates/other/src/main.rs"
+                [IO.Directory]::CreateDirectory(
+                    (Split-Path -Parent $otherMain)
+                ) | Out-Null
+                [IO.File]::WriteAllText(
+                    $otherMain,
+                    $decoy.Source,
+                    [Text.UTF8Encoding]::new($false)
+                )
+                Assert-Passes `
+                    -Root $root `
+                    -Scenario "subsystem text in $($decoy.Name)"
+            }
+    }
+
+    $deadCodeCases = @(
+        @{
+            Name = "PE subsystem helper cannot be wrapped in dead code"
+            Path = "tests/release/WokRouter.ReleaseContract.psm1"
+            Expected = "script-scope PE subsystem helper"
+            Block = @'
+function Get-PeSubsystem {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $Path)
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 0x40 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+        throw "Windows executable has no valid DOS header."
+    }
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+    if (
+        $peOffset -lt 0 -or
+        $peOffset + 24 + 70 -gt $bytes.Length -or
+        [Text.Encoding]::ASCII.GetString($bytes, $peOffset, 4) -cne "PE`0`0"
+    ) {
+        throw "Windows executable has no valid PE header."
+    }
+    $optionalHeader = $peOffset + 24
+    $magic = [BitConverter]::ToUInt16($bytes, $optionalHeader)
+    if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {
+        throw "Windows executable has an unsupported optional header."
+    }
+    return [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)
+}
+'@
+        },
+        @{
+            Name = "source desktop GUI guard cannot be wrapped in dead code"
+            Path = "tests/release/package-windows-assets.ps1"
+            Expected = "source desktop GUI subsystem check"
+            Block = @'
+if ((Get-PeSubsystem -Path $desktop) -ne 2) {
+    throw "Windows desktop executable must use the GUI subsystem."
+}
+'@
+        },
+        @{
+            Name = "MSI desktop GUI guard cannot be wrapped in dead code"
+            Path = "tests/release/package-windows-assets.ps1"
+            Expected = "MSI desktop GUI subsystem check"
+            Block = @'
+    if ((Get-PeSubsystem -Path $byName["wokrouter-desktop.exe"]) -ne 2) {
+        throw "MSI desktop executable must use the GUI subsystem."
+    }
+'@
+        },
+        @{
+            Name = "Portable desktop GUI guard cannot be wrapped in dead code"
+            Path = "tests/release/package-windows-assets.ps1"
+            Expected = "Portable desktop GUI subsystem check"
+            Block = @'
+    if ((Get-PeSubsystem -Path $portableDesktop[0].FullName) -ne 2) {
+        throw "Portable desktop executable must use the GUI subsystem."
+    }
+'@
+        }
+    )
+    foreach ($case in $deadCodeCases) {
+        Invoke-Scenario -Name $case.Name -Test {
+            $root = New-ReleaseFixture
+            Wrap-FixtureBlockInFalseCondition `
+                -Root $root `
+                -RelativePath $case.Path `
+                -Block $case.Block
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText $case.Expected `
+                -Scenario $case.Name
+        }
     }
 
     Invoke-Scenario -Name "PE subsystem helper and export must remain exact" -Test {
