@@ -872,6 +872,13 @@ use std::{fs, path::Path, sync::mpsc};
 use std::{fs, path::Path, sync::mpsc};
 "@
             Expected = "lifecycle acceptance fixture"
+        },
+        @{
+            Name = "lifecycle acceptance fixture requires the exact test-support feature"
+            Path = "crates/wokrouter-platform/tests/wokcore_install.rs"
+            Old = '#![cfg(feature = "test-support")]'
+            New = '#![cfg(feature = "test - support")]'
+            Expected = "lifecycle acceptance fixture"
         }
     )
     foreach ($mutation in $lifecycleMutations) {

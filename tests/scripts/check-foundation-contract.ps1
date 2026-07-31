@@ -1073,6 +1073,18 @@ function Test-RustExecutableTestFunction {
     return $true
 }
 
+function Test-RustTestSupportFeatureInnerCfg {
+    param(
+        [Parameter(Mandatory)]
+        [string]$CommentStrippedAttribute
+    )
+
+    return (
+        $CommentStrippedAttribute -match
+        '(?s)\A#!\[[ \t\r\n]*cfg[ \t\r\n]*\([ \t\r\n]*feature[ \t\r\n]*=[ \t\r\n]*"test-support"[ \t\r\n]*\)[ \t\r\n]*\]\z'
+    )
+}
+
 function Get-RustExecutableTestContainer {
     param(
         [Parameter(Mandatory)]
@@ -1086,8 +1098,7 @@ function Get-RustExecutableTestContainer {
         [Parameter(Mandatory)]
         [object]$CodeView,
 
-        [AllowNull()]
-        [string]$RequiredFileInnerCfg
+        [bool]$RequireTestSupportFeatureCfg = $false
     )
 
     $fileInnerCfgAttributes = @(
@@ -1096,23 +1107,20 @@ function Get-RustExecutableTestContainer {
             -CodeView $CodeView
     )
     if ($Kind -eq "TopLevel") {
-        $requiredNormalized = @()
-        if (-not [string]::IsNullOrWhiteSpace($RequiredFileInnerCfg)) {
-            $requiredNormalized += (
-                $RequiredFileInnerCfg -replace '\s', ''
-            )
+        if ($RequireTestSupportFeatureCfg) {
+            if (
+                $fileInnerCfgAttributes.Count -ne 1 -or
+                -not (
+                    Test-RustTestSupportFeatureInnerCfg `
+                        -CommentStrippedAttribute (
+                            $fileInnerCfgAttributes[0].CommentStripped
+                        )
+                )
+            ) {
+                return $null
+            }
         }
-        $actualNormalized = @(
-            $fileInnerCfgAttributes |
-                ForEach-Object { $_.CommentStripped -replace '\s', '' }
-        )
-        if (
-            $actualNormalized.Count -ne $requiredNormalized.Count -or
-            (
-                $requiredNormalized.Count -eq 1 -and
-                $actualNormalized[0] -cne $requiredNormalized[0]
-            )
-        ) {
+        elseif ($fileInnerCfgAttributes.Count -ne 0) {
             return $null
         }
         return [pscustomobject]@{
@@ -2225,7 +2233,7 @@ $lifecycleAcceptanceFixtures = @(
     @{
         Kind = "Rust"
         Container = "TopLevel"
-        RequiredFileInnerCfg = '#![cfg(feature = "test-support")]'
+        RequireTestSupportFeatureCfg = $true
         Source = $wokcoreInstallTests
         Names = @(
             "signed_release_reports_monotonic_download_and_authoritative_install_phases",
@@ -2271,7 +2279,9 @@ foreach ($fixtureGroup in $lifecycleAcceptanceFixtures) {
             -Source $fixtureGroup.Source `
             -Kind $fixtureGroup.Container `
             -CodeView $fixtureCodeView `
-            -RequiredFileInnerCfg $fixtureGroup.RequiredFileInnerCfg
+            -RequireTestSupportFeatureCfg (
+                [bool]$fixtureGroup.RequireTestSupportFeatureCfg
+            )
     }
     else {
         $null
