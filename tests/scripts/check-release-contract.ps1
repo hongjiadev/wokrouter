@@ -148,6 +148,28 @@ function Get-ExactDirectStatementAst {
     )
 }
 
+function Get-VariableAssignmentAst {
+    param(
+        [Parameter(Mandatory)] $Ast,
+        [Parameter(Mandatory)][string] $Name
+    )
+
+    return @(
+        $Ast.FindAll(
+            {
+                param($node)
+
+                return (
+                    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                    $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+                    $node.Left.VariablePath.UserPath -ceq $Name
+                )
+            },
+            $true
+        )
+    )
+}
+
 function Get-ExactGuardAst {
     param(
         [Parameter(Mandatory)] $Ast,
@@ -769,6 +791,31 @@ function Get-PeSubsystem {
     }
     $portableProvenanceIsOwned = $false
     if ($null -ne $packageTry) {
+        $zipOutputStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement '$zipOutput = Join-Path $output "$prefix-Portable.zip"'
+        )
+        $archiveOpenStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement @'
+$archive = [IO.Compression.ZipFile]::Open(
+        $zipOutput,
+        [IO.Compression.ZipArchiveMode]::Create
+    )
+'@
+        )
+        $portableRootStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement '$portableExtracted = Join-Path $temporary "portable"'
+        )
+        $portableDirectoryStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement '[IO.Directory]::CreateDirectory($portableExtracted) | Out-Null'
+        )
         $portableExtractionStatements = @(
             Get-ExactDirectStatementAst `
                 -Block $packageTry.Body `
@@ -777,6 +824,15 @@ function Get-PeSubsystem {
         $zipOutput,
         $portableExtracted
     )
+'@
+        )
+        $portableTreeSafetyStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement @'
+Assert-TreeSafe `
+        -Root $portableExtracted `
+        -Description "Extracted Portable archive"
 '@
         )
         $portableQueryStatements = @(
@@ -798,16 +854,65 @@ $portableDesktopFiles = @(
                 -Block $packageTry.Body `
                 -Statement '$portableDesktop = $portableDesktopFiles[0].FullName'
         )
+        $zipOutputAssignments = @(
+            Get-VariableAssignmentAst -Ast $packageTry.Body -Name "zipOutput"
+        )
+        $portableRootAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $packageTry.Body `
+                -Name "portableExtracted"
+        )
+        $portableFileAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $packageTry.Body `
+                -Name "portableDesktopFiles"
+        )
+        $portableDesktopAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $packageTry.Body `
+                -Name "portableDesktop"
+        )
+        $zipOutputIndex = -1
+        $archiveOpenIndex = -1
+        $portableRootIndex = -1
+        $portableDirectoryIndex = -1
+        $portableExtractionIndex = -1
+        $portableTreeSafetyIndex = -1
         $portableQueryIndex = -1
         $portableCountGuardIndex = -1
         $portableAssignmentIndex = -1
         $portableSubsystemGuardIndex = -1
+        $archiveTryIsOwned = $false
         if (
+            $zipOutputStatements.Count -eq 1 -and
+            $archiveOpenStatements.Count -eq 1 -and
+            $portableRootStatements.Count -eq 1 -and
+            $portableDirectoryStatements.Count -eq 1 -and
+            $portableExtractionStatements.Count -eq 1 -and
+            $portableTreeSafetyStatements.Count -eq 1 -and
             $portableQueryStatements.Count -eq 1 -and
             $portableDesktopCountGuards.Count -eq 1 -and
             $portableAssignmentStatements.Count -eq 1 -and
             $portableDesktopGuards.Count -eq 1
         ) {
+            $zipOutputIndex = $packageTry.Body.Statements.IndexOf(
+                $zipOutputStatements[0]
+            )
+            $archiveOpenIndex = $packageTry.Body.Statements.IndexOf(
+                $archiveOpenStatements[0]
+            )
+            $portableRootIndex = $packageTry.Body.Statements.IndexOf(
+                $portableRootStatements[0]
+            )
+            $portableDirectoryIndex = $packageTry.Body.Statements.IndexOf(
+                $portableDirectoryStatements[0]
+            )
+            $portableExtractionIndex = $packageTry.Body.Statements.IndexOf(
+                $portableExtractionStatements[0]
+            )
+            $portableTreeSafetyIndex = $packageTry.Body.Statements.IndexOf(
+                $portableTreeSafetyStatements[0]
+            )
             $portableQueryIndex = $packageTry.Body.Statements.IndexOf(
                 $portableQueryStatements[0]
             )
@@ -820,9 +925,35 @@ $portableDesktopFiles = @(
             $portableSubsystemGuardIndex = $packageTry.Body.Statements.IndexOf(
                 $portableDesktopGuards[0]
             )
+            if (
+                $archiveOpenIndex + 1 -lt $packageTry.Body.Statements.Count
+            ) {
+                $archiveTry = $packageTry.Body.Statements[$archiveOpenIndex + 1]
+                if (
+                    $archiveTry -is [Management.Automation.Language.TryStatementAst] -and
+                    $archiveTry.CatchClauses.Count -eq 0 -and
+                    $null -ne $archiveTry.Finally
+                ) {
+                    $archiveDisposeStatements = @(
+                        Get-ExactDirectStatementAst `
+                            -Block $archiveTry.Finally `
+                            -Statement '$archive.Dispose()'
+                    )
+                    $archiveTryIsOwned = (
+                        $archiveDisposeStatements.Count -eq 1 -and
+                        $archiveTry.Finally.Statements.Count -eq 1
+                    )
+                }
+            }
         }
         if (
+            $zipOutputStatements.Count -eq 1 -and
+            $archiveOpenStatements.Count -eq 1 -and
+            $archiveTryIsOwned -and
+            $portableRootStatements.Count -eq 1 -and
+            $portableDirectoryStatements.Count -eq 1 -and
             $portableExtractionStatements.Count -eq 1 -and
+            $portableTreeSafetyStatements.Count -eq 1 -and
             $portableQueryStatements.Count -eq 1 -and
             $portableDesktopCountGuards.Count -eq 1 -and
             [object]::ReferenceEquals(
@@ -831,11 +962,35 @@ $portableDesktopFiles = @(
             ) -and
             $portableAssignmentStatements.Count -eq 1 -and
             $portableDesktopGuards.Count -eq 1 -and
-            $portableExtractionStatements[0].Extent.StartOffset -lt
-            $portableQueryStatements[0].Extent.StartOffset -and
-            $portableCountGuardIndex -eq $portableQueryIndex + 1 -and
-            $portableAssignmentIndex -eq $portableQueryIndex + 2 -and
-            $portableSubsystemGuardIndex -eq $portableQueryIndex + 3
+            $zipOutputAssignments.Count -eq 1 -and
+            [object]::ReferenceEquals(
+                $zipOutputAssignments[0],
+                $zipOutputStatements[0]
+            ) -and
+            $portableRootAssignments.Count -eq 1 -and
+            [object]::ReferenceEquals(
+                $portableRootAssignments[0],
+                $portableRootStatements[0]
+            ) -and
+            $portableFileAssignments.Count -eq 1 -and
+            [object]::ReferenceEquals(
+                $portableFileAssignments[0],
+                $portableQueryStatements[0]
+            ) -and
+            $portableDesktopAssignments.Count -eq 1 -and
+            [object]::ReferenceEquals(
+                $portableDesktopAssignments[0],
+                $portableAssignmentStatements[0]
+            ) -and
+            $zipOutputIndex -lt $archiveOpenIndex -and
+            $portableRootIndex -eq $archiveOpenIndex + 2 -and
+            $portableDirectoryIndex -eq $archiveOpenIndex + 3 -and
+            $portableExtractionIndex -eq $archiveOpenIndex + 4 -and
+            $portableTreeSafetyIndex -eq $archiveOpenIndex + 5 -and
+            $portableQueryIndex -eq $archiveOpenIndex + 6 -and
+            $portableCountGuardIndex -eq $archiveOpenIndex + 7 -and
+            $portableAssignmentIndex -eq $archiveOpenIndex + 8 -and
+            $portableSubsystemGuardIndex -eq $archiveOpenIndex + 9
         ) {
             $portableProvenanceIsOwned = $true
         }

@@ -663,6 +663,91 @@ function Get-PeSubsystem {
             -Scenario "Portable candidate reassigned from the source executable"
     }
 
+    Invoke-Scenario -Name "Portable extracted root cannot be overwritten before validation" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+    Assert-TreeSafe `
+        -Root $portableExtracted `
+        -Description "Extracted Portable archive"
+    $portableDesktopFiles = @(
+'@ `
+            -NewText @'
+    Assert-TreeSafe `
+        -Root $portableExtracted `
+        -Description "Extracted Portable archive"
+    $portableExtracted = Join-Path $temporary "portable-source-decoy"
+    [IO.Directory]::CreateDirectory($portableExtracted) | Out-Null
+    [IO.File]::Copy(
+        $desktop,
+        (Join-Path $portableExtracted "wokrouter-desktop.exe")
+    )
+    $portableDesktopFiles = @(
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "Portable desktop extraction provenance" `
+            -Scenario "Portable extracted root reassigned to a source copy"
+    }
+
+    Invoke-Scenario -Name "Portable archive path cannot be overwritten before extraction" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+    finally {
+        $archive.Dispose()
+    }
+
+    $portableExtracted = Join-Path $temporary "portable"
+'@ `
+            -NewText @'
+    finally {
+        $archive.Dispose()
+    }
+
+    $publishedZipOutput = $zipOutput
+    $portableSourceDecoy = Join-Path $temporary "portable-source-decoy"
+    [IO.Directory]::CreateDirectory($portableSourceDecoy) | Out-Null
+    [IO.File]::Copy(
+        $desktop,
+        (Join-Path $portableSourceDecoy "wokrouter-desktop.exe")
+    )
+    $zipOutput = Join-Path $temporary "portable-source-decoy.zip"
+    [IO.Compression.ZipFile]::CreateFromDirectory(
+        $portableSourceDecoy,
+        $zipOutput
+    )
+
+    $portableExtracted = Join-Path $temporary "portable"
+'@
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+    if ((Get-PeSubsystem -Path $portableDesktop) -ne 2) {
+        throw "Portable desktop executable must use the GUI subsystem."
+    }
+
+    Write-Output $zipOutput
+'@ `
+            -NewText @'
+    if ((Get-PeSubsystem -Path $portableDesktop) -ne 2) {
+        throw "Portable desktop executable must use the GUI subsystem."
+    }
+    $zipOutput = $publishedZipOutput
+
+    Write-Output $zipOutput
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "Portable desktop extraction provenance" `
+            -Scenario "Portable archive path reassigned to a source-only archive"
+    }
+
     Invoke-Scenario -Name "source MSI and Portable GUI checks cannot be removed" -Test {
         foreach ($mutation in @(
                 @{
