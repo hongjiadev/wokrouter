@@ -1,0 +1,22 @@
+{
+  "app": {
+    "localDesktopControl": "Local desktop control",
+    "loopbackFooter": "Desktop controls communicate with WokCore over loopback HTTP."
+  },
+  "core": {},
+  "operation": {},
+  "management": {
+    "providers": {},
+    "sessions": {},
+    "usage": {},
+    "diagnostics": {}
+  },
+  "errors": {},
+  "common": {
+    "retry": "Try again",
+    "cancel": "Cancel",
+    "confirm": "Confirm",
+    "unavailable": "Unavailable",
+    "loading": "Loading…"
+  }
+}

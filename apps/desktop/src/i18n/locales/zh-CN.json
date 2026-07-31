@@ -1,0 +1,22 @@
+{
+  "app": {
+    "localDesktopControl": "本地桌面控制",
+    "loopbackFooter": "桌面控制通过环回 HTTP 与 WokCore 通信。"
+  },
+  "core": {},
+  "operation": {},
+  "management": {
+    "providers": {},
+    "sessions": {},
+    "usage": {},
+    "diagnostics": {}
+  },
+  "errors": {},
+  "common": {
+    "retry": "重试",
+    "cancel": "取消",
+    "confirm": "确认",
+    "unavailable": "不可用",
+    "loading": "正在加载…"
+  }
+}

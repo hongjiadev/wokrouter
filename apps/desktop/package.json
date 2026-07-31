@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "build:bundle": "pnpm build && pnpm stage:sidecars",
     "dev": "vite",
+    "i18n:check": "node scripts/check-i18n-catalogs.mjs",
     "stage:sidecars": "node scripts/stage-sidecars.mjs",
     "tauri": "tauri",
     "test:unit": "vitest run",
@@ -16,8 +17,10 @@
   "dependencies": {
     "@tanstack/react-query": "5.101.4",
     "@tauri-apps/api": "2.11.1",
+    "i18next": "26.3.6",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "react-i18next": "17.0.11",
     "zod": "4.4.3"
   },
   "devDependencies": {
