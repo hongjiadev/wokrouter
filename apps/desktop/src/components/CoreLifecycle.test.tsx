@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode, type ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -54,6 +60,43 @@ const runningStatus: CoreStatus = {
   capabilities: ["provider.catalog.v1"],
   phase: "running",
 };
+const ineligibleUpdateStatuses: readonly [
+  string,
+  CoreStatus,
+][] = [
+  [
+    "development",
+    {
+      ...runningStatus,
+      runtime_channel: "development",
+    },
+  ],
+  [
+    "starting",
+    {
+      ...runningStatus,
+      state: "starting",
+      phase: "starting",
+    },
+  ],
+  [
+    "draining",
+    {
+      ...runningStatus,
+      state: "draining",
+      phase: "draining",
+    },
+  ],
+  ["missing", missingStatus],
+  [
+    "invalid runtime",
+    {
+      ...runningStatus,
+      state: "invalid_runtime",
+      phase: undefined,
+    },
+  ],
+];
 const checkingOperation: CoreOperation = {
   schemaVersion: 1,
   operationId: "11111111-1111-4111-8111-111111111111",
@@ -250,6 +293,363 @@ it.each([
   },
 );
 
+it("waits for listener registration and initial operation arbitration before checking updates", async () => {
+  vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
+  vi.mocked(checkCoreUpdateOnce).mockResolvedValue({
+    code: "update_available",
+    currentVersion: "0.2.0",
+    targetVersion: "0.2.1",
+  });
+  const listenerReady = deferred<() => void>();
+  const initialOperation = deferred<CoreOperation | null>();
+  vi.mocked(listenForCoreOperation).mockImplementation((listener) => {
+    operationListener = listener;
+    return listenerReady.promise;
+  });
+  vi.mocked(getCoreOperation).mockReturnValue(initialOperation.promise);
+
+  renderLifecycle(undefined, false);
+
+  expect(await screen.findByText("WokCore running")).toBeInTheDocument();
+  expect(checkCoreUpdateOnce).not.toHaveBeenCalled();
+  expect(
+    screen.queryByRole("button", { name: "Upgrade WokCore" }),
+  ).not.toBeInTheDocument();
+
+  await act(async () => {
+    listenerReady.resolve(unlisten);
+    await listenerReady.promise;
+  });
+  expect(getCoreOperation).toHaveBeenCalledOnce();
+  expect(checkCoreUpdateOnce).not.toHaveBeenCalled();
+
+  await act(async () => {
+    initialOperation.resolve(null);
+    await initialOperation.promise;
+  });
+
+  expect(
+    await screen.findByRole("button", { name: "Upgrade WokCore" }),
+  ).toBeInTheDocument();
+  expect(checkCoreUpdateOnce).toHaveBeenCalledOnce();
+});
+
+it.each(["listen", "initial operation"] as const)(
+  "keeps an installed production runtime update-free when %s bridge arbitration fails",
+  async (failurePoint) => {
+    vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
+    vi.mocked(checkCoreUpdateOnce).mockResolvedValue({
+      code: "update_available",
+      currentVersion: "0.2.0",
+      targetVersion: "0.2.1",
+    });
+    if (failurePoint === "listen") {
+      vi.mocked(listenForCoreOperation).mockRejectedValue(
+        new Error("listener failed at C:\\private\\events.json"),
+      );
+    } else {
+      vi.mocked(getCoreOperation).mockRejectedValue(
+        new Error("snapshot failed at C:\\private\\operation.json"),
+      );
+    }
+
+    renderLifecycle(undefined, false);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "WokCore operation monitoring unavailable",
+      }),
+    ).toBeInTheDocument();
+    expect(checkCoreUpdateOnce).not.toHaveBeenCalled();
+    expect(retryCoreUpdateCheck).not.toHaveBeenCalled();
+    expect(installCoreUpdate).not.toHaveBeenCalled();
+    expect(
+      screen.queryByText(/private|events\.json|operation\.json/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Reconnect operation monitoring",
+      }),
+    ).toBeEnabled();
+  },
+);
+
+it("recovers an active snapshot before considering a startup update check", async () => {
+  vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
+  vi.mocked(checkCoreUpdateOnce).mockResolvedValue({
+    code: "update_available",
+    currentVersion: "0.2.0",
+    targetVersion: "0.2.1",
+  });
+  const initialOperation = deferred<CoreOperation | null>();
+  vi.mocked(getCoreOperation).mockReturnValue(initialOperation.promise);
+
+  renderLifecycle(undefined, false);
+
+  expect(await screen.findByText("WokCore running")).toBeInTheDocument();
+  expect(checkCoreUpdateOnce).not.toHaveBeenCalled();
+
+  await act(async () => {
+    initialOperation.resolve(checkingUpdateOperation);
+    await initialOperation.promise;
+  });
+
+  expect(
+    await screen.findByRole("heading", {
+      name: "Checking for a WokCore release",
+    }),
+  ).toBeInTheDocument();
+  expect(checkCoreUpdateOnce).not.toHaveBeenCalled();
+  expect(installCoreUpdate).not.toHaveBeenCalled();
+});
+
+it("prioritizes read-only bridge recovery over an event received before failed arbitration", async () => {
+  vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
+  const initialOperation = deferred<CoreOperation | null>();
+  vi.mocked(getCoreOperation).mockReturnValue(initialOperation.promise);
+
+  renderLifecycle(undefined, false);
+  await waitFor(() => {
+    expect(operationListener).toBeDefined();
+  });
+  operationListener?.(checkingUpdateOperation);
+  initialOperation.reject(
+    new Error("snapshot failed at C:\\private\\operation.json"),
+  );
+
+  expect(
+    await screen.findByRole("heading", {
+      name: "WokCore operation monitoring unavailable",
+    }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("heading", {
+      name: "Checking for a WokCore release",
+    }),
+  ).not.toBeInTheDocument();
+  expect(checkCoreUpdateOnce).not.toHaveBeenCalled();
+  expect(installCoreUpdate).not.toHaveBeenCalled();
+});
+
+it.each(ineligibleUpdateStatuses)(
+  "invalidates an open production update dialog when status becomes %s",
+  async (_scenario, nextStatus) => {
+    vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
+    vi.mocked(checkCoreUpdateOnce).mockResolvedValue({
+      code: "update_available",
+      currentVersion: "0.2.0",
+      targetVersion: "0.2.1",
+    });
+    vi.mocked(installAndStartCore).mockReturnValue(
+      new Promise<CoreOperation>(() => undefined),
+    );
+    const user = userEvent.setup();
+    const view = renderLifecycle(undefined, false);
+
+    const trigger = await screen.findByRole("button", {
+      name: "Upgrade WokCore",
+    });
+    await user.click(trigger);
+    const confirm = screen.getByRole("button", {
+      name: "Confirm upgrade",
+    });
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    act(() => {
+      view.queryClient.setQueryData(
+        ["core-status"],
+        nextStatus,
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("button", { name: "Upgrade WokCore" }),
+    ).not.toBeInTheDocument();
+    expect(document.activeElement?.tagName).toBe("H1");
+
+    fireEvent.click(confirm);
+    fireEvent.click(trigger);
+    expect(checkCoreUpdateOnce).toHaveBeenCalledTimes(1);
+    expect(retryCoreUpdateCheck).not.toHaveBeenCalled();
+    expect(installCoreUpdate).not.toHaveBeenCalled();
+  },
+);
+
+it.each(ineligibleUpdateStatuses)(
+  "discards a startup update result that settles after status becomes %s",
+  async (_scenario, nextStatus) => {
+    vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
+    const updateResult = deferred<
+      Awaited<ReturnType<typeof checkCoreUpdateOnce>>
+    >();
+    vi.mocked(checkCoreUpdateOnce).mockReturnValue(
+      updateResult.promise,
+    );
+    vi.mocked(installAndStartCore).mockReturnValue(
+      new Promise<CoreOperation>(() => undefined),
+    );
+    const view = renderLifecycle(undefined, false);
+
+    await waitFor(() => {
+      expect(checkCoreUpdateOnce).toHaveBeenCalledOnce();
+    });
+    act(() => {
+      view.queryClient.setQueryData(
+        ["core-status"],
+        nextStatus,
+      );
+    });
+    await act(async () => {
+      updateResult.resolve({
+        code: "update_available",
+        currentVersion: "0.2.0",
+        targetVersion: "0.2.1",
+      });
+      await updateResult.promise;
+    });
+
+    expect(
+      screen.queryByRole("button", { name: "Upgrade WokCore" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(checkCoreUpdateOnce).toHaveBeenCalledTimes(1);
+    expect(retryCoreUpdateCheck).not.toHaveBeenCalled();
+    expect(installCoreUpdate).not.toHaveBeenCalled();
+  },
+);
+
+it("discards a manual update result when production becomes development", async () => {
+  vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
+  vi.mocked(checkCoreUpdateOnce).mockRejectedValue(
+    new Error("update check unavailable"),
+  );
+  const updateResult = deferred<
+    Awaited<ReturnType<typeof retryCoreUpdateCheck>>
+  >();
+  vi.mocked(retryCoreUpdateCheck).mockReturnValue(
+    updateResult.promise,
+  );
+  const user = userEvent.setup();
+  const view = renderLifecycle(undefined, false);
+
+  await user.click(
+    await screen.findByRole("button", {
+      name: "Check for updates",
+    }),
+  );
+  act(() => {
+    view.queryClient.setQueryData(["core-status"], {
+      ...runningStatus,
+      runtime_channel: "development",
+    });
+  });
+  await act(async () => {
+    updateResult.resolve({
+      code: "update_available",
+      currentVersion: "0.2.0",
+      targetVersion: "0.2.1",
+    });
+    await updateResult.promise;
+  });
+
+  expect(
+    screen.queryByRole("button", { name: "Upgrade WokCore" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByText("WokCore update check unavailable"),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(retryCoreUpdateCheck).toHaveBeenCalledOnce();
+  expect(installCoreUpdate).not.toHaveBeenCalled();
+});
+
+it("invalidates an open confirmation when operation monitoring reports active update work", async () => {
+  vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
+  vi.mocked(checkCoreUpdateOnce).mockResolvedValue({
+    code: "update_available",
+    currentVersion: "0.2.0",
+    targetVersion: "0.2.1",
+  });
+  const user = userEvent.setup();
+
+  renderLifecycle(undefined, false);
+
+  const trigger = await screen.findByRole("button", {
+    name: "Upgrade WokCore",
+  });
+  await user.click(trigger);
+  const confirm = screen.getByRole("button", {
+    name: "Confirm upgrade",
+  });
+
+  act(() => {
+    operationListener?.(checkingUpdateOperation);
+  });
+
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+  expect(
+    screen.getByRole("heading", {
+      name: "Checking for a WokCore release",
+    }),
+  ).toHaveFocus();
+  fireEvent.click(confirm);
+  fireEvent.click(trigger);
+  expect(installCoreUpdate).not.toHaveBeenCalled();
+});
+
+it("discards a fresh retry result when operation monitoring reports active update work", async () => {
+  vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
+  vi.mocked(checkCoreUpdateOnce).mockResolvedValue({
+    code: "current",
+    currentVersion: "0.2.0",
+  });
+  vi.mocked(getCoreOperation).mockResolvedValue({
+    ...checkingUpdateOperation,
+    sequence: 8,
+    state: "failed",
+    phase: "completed",
+    errorCode: "recovery_required",
+  });
+  const retryResult = deferred<
+    Awaited<ReturnType<typeof retryCoreUpdateCheck>>
+  >();
+  vi.mocked(retryCoreUpdateCheck).mockReturnValue(retryResult.promise);
+  const user = userEvent.setup();
+
+  renderLifecycle(undefined, false);
+
+  await user.click(
+    await screen.findByRole("button", { name: "Try update again" }),
+  );
+  expect(retryCoreUpdateCheck).toHaveBeenCalledOnce();
+
+  act(() => {
+    operationListener?.({
+      ...checkingUpdateOperation,
+      operationId: "55555555-5555-4555-8555-555555555555",
+    });
+  });
+  await act(async () => {
+    retryResult.resolve({
+      code: "update_available",
+      currentVersion: "0.2.0",
+      targetVersion: "0.2.2",
+    });
+    await retryResult.promise;
+  });
+
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Upgrade WokCore" }),
+  ).not.toBeInTheDocument();
+  expect(installCoreUpdate).not.toHaveBeenCalled();
+});
+
 it.each([
   "running",
   "stopped",
@@ -431,7 +831,10 @@ it("requires an accessible confirmation and invokes the expected version once", 
     name: "Confirm upgrade",
   });
   await user.click(confirm);
-  await user.click(confirm);
+  await waitFor(() => {
+    expect(trigger).toHaveFocus();
+  });
+  fireEvent.click(confirm);
 
   expect(installCoreUpdate).toHaveBeenCalledTimes(1);
   expect(installCoreUpdate).toHaveBeenCalledWith("0.2.1");
@@ -700,6 +1103,39 @@ it("refreshes every lifecycle query and reauthorizes only after update status re
   ]) {
     expect(invalidateQueries).toHaveBeenCalledWith({ queryKey });
   }
+});
+
+it("does not authorize when update refresh selects a development runtime", async () => {
+  const developmentAuthorizationStatus: CoreStatus = {
+    ...runningStatus,
+    state: "authorization_required",
+    runtime_channel: "development",
+    phase: undefined,
+  };
+  vi.mocked(getCoreStatus)
+    .mockResolvedValueOnce(runningStatus)
+    .mockResolvedValue(developmentAuthorizationStatus);
+  vi.mocked(checkCoreUpdateOnce).mockResolvedValue({
+    code: "update_available",
+    currentVersion: "0.2.0",
+    targetVersion: "0.2.1",
+  });
+  const user = userEvent.setup();
+
+  renderLifecycle(undefined, false);
+  await user.click(
+    await screen.findByRole("button", { name: "Upgrade WokCore" }),
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Confirm upgrade" }),
+  );
+  operationListener?.(completedUpdateOperation);
+
+  expect(await screen.findByText("Development")).toBeInTheDocument();
+  expect(startCore).not.toHaveBeenCalled();
+  expect(installCoreUpdate).toHaveBeenCalledTimes(1);
+  expect(checkCoreUpdateOnce).toHaveBeenCalledTimes(1);
+  expect(retryCoreUpdateCheck).not.toHaveBeenCalled();
 });
 
 it("uses status-only recovery when an update refresh and fallback both fail", async () => {

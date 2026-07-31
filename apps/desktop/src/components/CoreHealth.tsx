@@ -9,8 +9,10 @@ import {
   type CoreStatus,
 } from "../control";
 import type { CoreUpdateCheck } from "../coreOperation";
+import { isCoreUpdateEligible } from "../coreUpdateEligibility";
 
 type CoreHealthProps = {
+  updatesEnabled?: boolean;
   updateCheck?: CoreUpdateCheck;
   updateCheckFailed?: boolean;
   updateCheckPending?: boolean;
@@ -85,7 +87,9 @@ function formatPhase(phase: NonNullable<CoreStatus["phase"]>): string {
 function LoadingHealth() {
   return (
     <>
-      <h1 id="core-health-heading">WokCore health</h1>
+      <h1 id="core-health-heading" tabIndex={-1}>
+        WokCore health
+      </h1>
       <div className="health-skeleton" aria-hidden="true">
         <span className="skeleton skeleton--status" />
         <span className="skeleton skeleton--title" />
@@ -97,6 +101,7 @@ function LoadingHealth() {
 }
 
 export function CoreHealth({
+  updatesEnabled = true,
   updateCheck,
   updateCheckFailed = false,
   updateCheckPending = false,
@@ -136,7 +141,9 @@ export function CoreHealth({
           <span className="status-mark" aria-hidden="true">
             !
           </span>
-          <h1 id="core-health-heading">WokCore status unavailable</h1>
+          <h1 id="core-health-heading" tabIndex={-1}>
+            WokCore status unavailable
+          </h1>
         </div>
         <p className="health-summary">
           WokRouter could not confirm whether WokCore is available. Your
@@ -156,6 +163,7 @@ export function CoreHealth({
     const copy = stateCopy[status.data.state];
     const isRunning = status.data.state === "running";
     const isDevelopment = status.data.runtime_channel === "development";
+    const updateEligible = isCoreUpdateEligible(status.data);
     const canStart =
       !isDevelopment &&
       (status.data.state === "stopped" ||
@@ -164,11 +172,15 @@ export function CoreHealth({
       status.data.state === "incompatible" ||
       status.data.state === "invalid_runtime";
     const updateAvailable =
-      !isDevelopment &&
+      updatesEnabled &&
+      updateEligible &&
       updateCheck?.code === "update_available" &&
       updateCheck.targetVersion !== undefined;
     const canRetryUpdateCheck =
-      !isDevelopment && updateCheckFailed && onCheckForUpdates !== undefined;
+      updatesEnabled &&
+      updateEligible &&
+      updateCheckFailed &&
+      onCheckForUpdates !== undefined;
     const actionError = start.isError
       ? "WokCore could not start"
       : stop.isError
@@ -196,7 +208,9 @@ export function CoreHealth({
                 ? "!"
                 : "–"}
           </span>
-          <h1 id="core-health-heading">{copy.title}</h1>
+          <h1 id="core-health-heading" tabIndex={-1}>
+            {copy.title}
+          </h1>
         </div>
         <p className="health-summary">{copy.summary}</p>
         <dl className="health-meta">

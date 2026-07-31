@@ -5,6 +5,8 @@ import type { CoreOperation } from "../coreOperation";
 type CoreOperationPanelProps = {
   operation: CoreOperation;
   onRetry: (trigger?: HTMLButtonElement) => void;
+  diagnosticsAvailable?: boolean;
+  onOpenDiagnostics?: () => void;
 };
 
 const phaseCopy: Record<CoreOperation["phase"], string> = {
@@ -135,6 +137,8 @@ function versionRows(operation: CoreOperation) {
 export function CoreOperationPanel({
   operation,
   onRetry,
+  diagnosticsAvailable = false,
+  onOpenDiagnostics,
 }: CoreOperationPanelProps) {
   const formatBytes = useByteFormatter();
   const determinate =
@@ -200,7 +204,9 @@ export function CoreOperationPanel({
           ? "WokCore setup"
           : "WokCore update"}
       </p>
-      <h1 id="core-operation-heading">{announcement}</h1>
+      <h1 id="core-operation-heading" tabIndex={-1}>
+        {announcement}
+      </h1>
       <p className="health-summary">
         {failed
           ? failureCopy
@@ -258,14 +264,21 @@ export function CoreOperationPanel({
                 ? "Try update again"
                 : "Try again"}
           </button>
-          {recoveryRequired && (
-            <a
-              className="button button--secondary"
-              href="#management-tab-diagnostics"
-            >
-              Open diagnostics
-            </a>
-          )}
+          {recoveryRequired &&
+            (diagnosticsAvailable && onOpenDiagnostics ? (
+              <button
+                className="button button--secondary"
+                type="button"
+                onClick={onOpenDiagnostics}
+              >
+                Open diagnostics
+              </button>
+            ) : (
+              <p className="action-note">
+                Diagnostics are unavailable because this WokCore runtime
+                does not provide diagnostic events.
+              </p>
+            ))}
           <p className="action-note">
             Closing this window never cancels a WokCore operation.
           </p>

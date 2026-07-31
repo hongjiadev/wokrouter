@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { getCoreStatus } from "../control";
+import type { CoreOperation } from "../coreOperation";
 import {
   commitProviderConfig,
   exportDiagnostics,
@@ -19,6 +20,7 @@ import {
   validateProviderConfig,
 } from "../management";
 import { ManagementPanel } from "./ManagementPanel";
+import { CoreOperationPanel } from "./CoreOperationPanel";
 
 vi.mock("../control", () => ({
   coreStatusQueryKey: ["core-status"],
@@ -64,6 +66,45 @@ function renderPanel() {
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
   return render(<ManagementPanel />, { wrapper: Wrapper });
+}
+
+const recoveryRequiredOperation: CoreOperation = {
+  schemaVersion: 1,
+  operationId: "44444444-4444-4444-8444-444444444444",
+  sequence: 4,
+  operation: "update",
+  state: "failed",
+  phase: "completed",
+  currentVersion: "0.2.0",
+  targetVersion: "0.2.1",
+  errorCode: "recovery_required",
+};
+
+function RecoveryDiagnosticsHarness({
+  diagnosticsAvailable,
+}: {
+  diagnosticsAvailable: boolean;
+}) {
+  const [requestedArea, setRequestedArea] =
+    useState<"diagnostics" | undefined>();
+  const [requestedAreaRequestId, setRequestedAreaRequestId] = useState(0);
+  return (
+    <>
+      <CoreOperationPanel
+        operation={recoveryRequiredOperation}
+        onRetry={() => undefined}
+        diagnosticsAvailable={diagnosticsAvailable}
+        onOpenDiagnostics={() => {
+          setRequestedArea("diagnostics");
+          setRequestedAreaRequestId((requestId) => requestId + 1);
+        }}
+      />
+      <ManagementPanel
+        requestedArea={requestedArea}
+        requestedAreaRequestId={requestedAreaRequestId}
+      />
+    </>
+  );
 }
 
 function mockProviderData() {
@@ -249,6 +290,91 @@ describe("ManagementPanel", () => {
     expect(await screen.findByText("10")).toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: "Diagnostics" }));
     expect(await screen.findByText(/synthetic log/)).toBeInTheDocument();
+  });
+
+  it("opens, selects, and focuses real Diagnostics content from update recovery", async () => {
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    });
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>
+        {children}
+      </QueryClientProvider>
+    );
+
+    render(
+      <RecoveryDiagnosticsHarness diagnosticsAvailable />,
+      { wrapper: Wrapper },
+    );
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Open diagnostics",
+      }),
+    );
+
+    const diagnosticsTab = screen.getByRole("tab", {
+      name: "Diagnostics",
+    });
+    expect(diagnosticsTab).toHaveAttribute("aria-selected", "true");
+    expect(diagnosticsTab).toHaveFocus();
+    expect(
+      await screen.findByRole("tabpanel", {
+        name: "Diagnostics",
+      }),
+    ).toHaveTextContent("synthetic log");
+
+    await user.click(screen.getByRole("tab", { name: "Providers" }));
+    expect(diagnosticsTab).toHaveAttribute("aria-selected", "false");
+
+    await user.click(
+      screen.getByRole("button", { name: "Open diagnostics" }),
+    );
+    expect(diagnosticsTab).toHaveAttribute("aria-selected", "true");
+    expect(diagnosticsTab).toHaveFocus();
+  });
+
+  it("renders an accurate recovery alternative when Diagnostics capability is absent", async () => {
+    vi.mocked(getCoreStatus).mockResolvedValue({
+      state: "running",
+      runtime_channel: "production",
+      version: "0.2.0",
+      management_api_major: 1,
+      capabilities: ["provider.catalog.v1"],
+      phase: "running",
+    });
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    });
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>
+        {children}
+      </QueryClientProvider>
+    );
+    render(
+      <RecoveryDiagnosticsHarness diagnosticsAvailable={false} />,
+      { wrapper: Wrapper },
+    );
+
+    expect(
+      await screen.findByText(
+        "Diagnostics are unavailable because this WokCore runtime does not provide diagnostic events.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Open diagnostics" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "Open diagnostics" }),
+    ).not.toBeInTheDocument();
   });
 
   it("validates before committing provider changes", async () => {

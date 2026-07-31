@@ -245,7 +245,7 @@ describe("CoreOperationPanel", () => {
     expect(screen.getByText(copy)).toBeInTheDocument();
   });
 
-  it("marks recovery_required as high priority and links diagnostics", () => {
+  it("marks recovery_required as high priority and offers diagnostics when available", () => {
     render(
       <CoreOperationPanel
         operation={operation({
@@ -255,6 +255,8 @@ describe("CoreOperationPanel", () => {
           errorCode: "recovery_required",
         })}
         onRetry={vi.fn()}
+        diagnosticsAvailable
+        onOpenDiagnostics={vi.fn()}
       />,
     );
 
@@ -266,7 +268,7 @@ describe("CoreOperationPanel", () => {
       "core-operation-panel--urgent",
     );
     expect(
-      screen.getByRole("link", { name: "Open diagnostics" }),
-    ).toHaveAttribute("href", "#management-tab-diagnostics");
+      screen.getByRole("button", { name: "Open diagnostics" }),
+    ).toBeEnabled();
   });
 });

@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
 } from "react";
@@ -34,7 +35,11 @@ import {
   type UsageQuery,
 } from "../management";
 
-type ManagementArea = "providers" | "sessions" | "usage" | "diagnostics";
+export type ManagementArea =
+  | "providers"
+  | "sessions"
+  | "usage"
+  | "diagnostics";
 
 const areaDefinitions: {
   id: ManagementArea;
@@ -59,7 +64,13 @@ const areaDefinitions: {
   },
 ];
 
-export function ManagementPanel() {
+export function ManagementPanel({
+  requestedArea,
+  requestedAreaRequestId,
+}: {
+  requestedArea?: ManagementArea;
+  requestedAreaRequestId?: number;
+}) {
   const status = useQuery({
     queryKey: coreStatusQueryKey,
     queryFn: getCoreStatus,
@@ -75,6 +86,9 @@ export function ManagementPanel() {
   }, [status.data]);
   const [activeArea, setActiveArea] =
     useState<ManagementArea>("providers");
+  const tabRefs = useRef<
+    Partial<Record<ManagementArea, HTMLButtonElement>>
+  >({});
 
   useEffect(() => {
     if (
@@ -84,6 +98,16 @@ export function ManagementPanel() {
       setActiveArea(areas[0]!.id);
     }
   }, [activeArea, areas]);
+
+  useEffect(() => {
+    if (
+      requestedArea !== undefined &&
+      areas.some((area) => area.id === requestedArea)
+    ) {
+      setActiveArea(requestedArea);
+      tabRefs.current[requestedArea]?.focus({ preventScroll: true });
+    }
+  }, [areas, requestedArea, requestedAreaRequestId]);
 
   if (status.data?.state !== "running" || areas.length === 0) {
     return null;
@@ -117,6 +141,9 @@ export function ManagementPanel() {
             aria-controls={`management-${area.id}`}
             id={`management-tab-${area.id}`}
             key={area.id}
+            ref={(element) => {
+              tabRefs.current[area.id] = element ?? undefined;
+            }}
             onClick={() => setActiveArea(area.id)}
           >
             {area.label}

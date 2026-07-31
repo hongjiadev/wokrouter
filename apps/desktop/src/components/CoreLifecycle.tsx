@@ -24,10 +24,14 @@ import {
   type CoreOperation,
   type CoreUpdateCheck,
 } from "../coreOperation";
+import { isCoreUpdateEligible } from "../coreUpdateEligibility";
 import { RecentSuccesses } from "../recentSuccesses";
 import { CoreHealth } from "./CoreHealth";
 import { CoreOperationPanel } from "./CoreOperationPanel";
-import { ManagementPanel } from "./ManagementPanel";
+import {
+  ManagementPanel,
+  type ManagementArea,
+} from "./ManagementPanel";
 
 type SetupFailure = "bridge" | "install" | "status";
 
@@ -40,13 +44,6 @@ const lifecycleQueryKeys = [
   ["usage"],
   ["diagnostic-logs"],
 ] as const;
-const updateEligibleStates = new Set<CoreStatus["state"]>([
-  "running",
-  "stopped",
-  "authorization_required",
-  "incompatible",
-]);
-
 function reconcileOperation(
   current: CoreOperation | undefined,
   incoming: CoreOperation,
@@ -58,6 +55,15 @@ function reconcileOperation(
     return current;
   }
   return incoming;
+}
+
+function blocksUpdateInteraction(
+  operation: CoreOperation | undefined,
+): boolean {
+  return (
+    operation?.state === "running" ||
+    operation?.state === "succeeded"
+  );
 }
 
 export function CoreLifecycle() {
@@ -78,6 +84,12 @@ export function CoreLifecycle() {
   const [updateStartFailed, setUpdateStartFailed] = useState(false);
   const [updateConfirmationOpen, setUpdateConfirmationOpen] =
     useState(false);
+  const [requestedManagementArea, setRequestedManagementArea] =
+    useState<ManagementArea>();
+  const [
+    requestedManagementAreaRequestId,
+    setRequestedManagementAreaRequestId,
+  ] = useState(0);
   const installRequested = useRef(false);
   const startupCheckRequested = useRef(false);
   const startupCheckRevision = useRef(0);
@@ -88,11 +100,24 @@ export function CoreLifecycle() {
   const mounted = useRef(false);
   const observedRuntimeChannel =
     useRef<CoreStatus["runtime_channel"] | undefined>(undefined);
+  const latestStatus = useRef<CoreStatus | undefined>(status.data);
+  const latestBridgeReady = useRef(bridgeReady);
+  const latestOperation = useRef<CoreOperation | undefined>(operation);
   const processedSuccesses = useRef(new RecentSuccesses());
   const retryPending = useRef(false);
   if (status.data?.runtime_channel !== undefined) {
     observedRuntimeChannel.current = status.data.runtime_channel;
   }
+  latestStatus.current = status.data;
+  latestBridgeReady.current = bridgeReady;
+  latestOperation.current = operation;
+  const updateInterfaceReady =
+    bridgeReady && isCoreUpdateEligible(status.data);
+  const updateInteractionReady =
+    updateInterfaceReady && !blocksUpdateInteraction(operation);
+  const diagnosticsAvailable =
+    status.data?.state === "running" &&
+    status.data.capabilities.includes("diagnostics.events.v1");
   const waitsForAnotherProcess =
     status.data?.runtime_channel === "production" &&
     operation?.state === "failed" &&
@@ -102,6 +127,14 @@ export function CoreLifecycle() {
     (incoming: CoreOperation) => {
       if (!mounted.current) {
         return;
+      }
+      const reconciled = reconcileOperation(
+        latestOperation.current,
+        incoming,
+      );
+      latestOperation.current = reconciled;
+      if (blocksUpdateInteraction(reconciled)) {
+        startupCheckRevision.current += 1;
       }
       if (
         incoming.operation === "update" &&
@@ -185,6 +218,7 @@ export function CoreLifecycle() {
       if (
         operation.operation === "update" &&
         statusConfirmed &&
+        refreshedStatus?.runtime_channel === "production" &&
         refreshedStatus?.state === "authorization_required"
       ) {
         try {
@@ -260,10 +294,10 @@ export function CoreLifecycle() {
 
   useEffect(() => {
     if (
+      !bridgeReady ||
       startupCheckRequested.current ||
       operation !== undefined ||
-      status.data?.runtime_channel !== "production" ||
-      !updateEligibleStates.has(status.data.state)
+      !isCoreUpdateEligible(status.data)
     ) {
       return;
     }
@@ -273,7 +307,10 @@ export function CoreLifecycle() {
       .then((result) => {
         if (
           !mounted.current ||
-          revision !== startupCheckRevision.current
+          revision !== startupCheckRevision.current ||
+          !latestBridgeReady.current ||
+          blocksUpdateInteraction(latestOperation.current) ||
+          !isCoreUpdateEligible(latestStatus.current)
         ) {
           return;
         }
@@ -283,13 +320,16 @@ export function CoreLifecycle() {
       .catch(() => {
         if (
           mounted.current &&
-          revision === startupCheckRevision.current
+          revision === startupCheckRevision.current &&
+          latestBridgeReady.current &&
+          !blocksUpdateInteraction(latestOperation.current) &&
+          isCoreUpdateEligible(latestStatus.current)
         ) {
           setUpdateCheck(undefined);
           setUpdateCheckFailed(true);
         }
       });
-  }, [operation, status.data]);
+  }, [bridgeReady, operation, status.data]);
 
   useEffect(() => {
     if (
@@ -397,7 +437,6 @@ export function CoreLifecycle() {
 
   const retrySetup = useCallback(() => {
     if (setupFailure === "bridge") {
-      setSetupFailure(undefined);
       setBridgeAttempt((attempt) => attempt + 1);
       return;
     }
@@ -412,16 +451,24 @@ export function CoreLifecycle() {
     (openConfirmation: boolean, trigger?: HTMLButtonElement) => {
       if (
         updateCheckRequested.current ||
-        status.data?.runtime_channel !== "production" ||
-        !updateEligibleStates.has(status.data.state)
+        !latestBridgeReady.current ||
+        blocksUpdateInteraction(latestOperation.current) ||
+        !isCoreUpdateEligible(latestStatus.current)
       ) {
         return;
       }
       updateCheckRequested.current = true;
       setUpdateCheckPending(true);
+      const revision = startupCheckRevision.current;
       void retryCoreUpdateCheck()
         .then((result) => {
-          if (!mounted.current) {
+          if (
+            !mounted.current ||
+            revision !== startupCheckRevision.current ||
+            !latestBridgeReady.current ||
+            blocksUpdateInteraction(latestOperation.current) ||
+            !isCoreUpdateEligible(latestStatus.current)
+          ) {
             return;
           }
           setUpdateCheck(result);
@@ -446,7 +493,13 @@ export function CoreLifecycle() {
           }
         })
         .catch(() => {
-          if (!mounted.current) {
+          if (
+            !mounted.current ||
+            revision !== startupCheckRevision.current ||
+            !latestBridgeReady.current ||
+            blocksUpdateInteraction(latestOperation.current) ||
+            !isCoreUpdateEligible(latestStatus.current)
+          ) {
             return;
           }
           setUpdateCheck(undefined);
@@ -459,7 +512,7 @@ export function CoreLifecycle() {
           }
         });
     },
-    [status.data],
+    [],
   );
 
   const checkForUpdates = useCallback(() => {
@@ -477,15 +530,39 @@ export function CoreLifecycle() {
     setUpdateConfirmationOpen(false);
     window.queueMicrotask(() => {
       if (mounted.current) {
-        updateTrigger.current?.focus();
+        const trigger = updateTrigger.current;
+        const target = trigger?.isConnected
+          ? trigger
+          : document.querySelector<HTMLElement>("h1");
+        target?.focus({ preventScroll: true });
       }
     });
   }, []);
 
+  useEffect(() => {
+    if (updateInteractionReady) {
+      return;
+    }
+    startupCheckRevision.current += 1;
+    setUpdateCheck(undefined);
+    setUpdateCheckFailed(false);
+    setUpdateCheckPending(false);
+    setUpdateStartFailed(false);
+    if (updateConfirmationOpen) {
+      closeUpdateConfirmation();
+    }
+  }, [
+    closeUpdateConfirmation,
+    updateConfirmationOpen,
+    updateInteractionReady,
+  ]);
+
   const requestUpdate = useCallback(
     (trigger?: HTMLButtonElement) => {
       if (
-        status.data?.runtime_channel !== "production" ||
+        !latestBridgeReady.current ||
+        blocksUpdateInteraction(latestOperation.current) ||
+        !isCoreUpdateEligible(latestStatus.current) ||
         updateCheck?.code !== "update_available" ||
         updateCheck.targetVersion === undefined ||
         updateRequested.current
@@ -497,7 +574,7 @@ export function CoreLifecycle() {
       }
       setUpdateConfirmationOpen(true);
     },
-    [status.data?.runtime_channel, updateCheck],
+    [updateCheck],
   );
 
   useEffect(() => {
@@ -541,7 +618,9 @@ export function CoreLifecycle() {
     const targetVersion = updateCheck?.targetVersion;
     if (
       updateRequested.current ||
-      status.data?.runtime_channel !== "production" ||
+      !latestBridgeReady.current ||
+      blocksUpdateInteraction(latestOperation.current) ||
+      !isCoreUpdateEligible(latestStatus.current) ||
       updateCheck?.code !== "update_available" ||
       targetVersion === undefined
     ) {
@@ -549,7 +628,7 @@ export function CoreLifecycle() {
     }
     updateRequested.current = true;
     setUpdateStartFailed(false);
-    setUpdateConfirmationOpen(false);
+    closeUpdateConfirmation();
     void installCoreUpdate(targetVersion)
       .then(acceptOperation)
       .catch(async () => {
@@ -573,11 +652,12 @@ export function CoreLifecycle() {
       });
   }, [
     acceptOperation,
-    status.data?.runtime_channel,
+    closeUpdateConfirmation,
     updateCheck,
   ]);
 
   const updateConfirmationDialog =
+    updateInteractionReady &&
     updateConfirmationOpen &&
     updateCheck?.code === "update_available" &&
     updateCheck.targetVersion !== undefined ? (
@@ -631,6 +711,48 @@ export function CoreLifecycle() {
       </div>
     ) : null;
 
+  if (
+    status.data?.runtime_channel === "production" &&
+    status.data.state !== "missing" &&
+    setupFailure === "bridge"
+  ) {
+    return (
+      <>
+        <section
+          className="health-panel"
+          aria-labelledby="core-bridge-recovery-heading"
+        >
+          <p className="section-label">Operation monitoring</p>
+          <div className="status-line status-line--error">
+            <span className="status-mark" aria-hidden="true">
+              !
+            </span>
+            <h1 id="core-bridge-recovery-heading" tabIndex={-1}>
+              WokCore operation monitoring unavailable
+            </h1>
+          </div>
+          <p className="health-summary">
+            WokRouter could not reconcile trusted operation progress.
+            Reconnect monitoring before checking for or starting an update.
+          </p>
+          <div className="recovery">
+            <button
+              className="button button--primary"
+              type="button"
+              onClick={retrySetup}
+            >
+              Reconnect operation monitoring
+            </button>
+            <p className="action-note">
+              This only reconnects read-only operation monitoring.
+            </p>
+          </div>
+        </section>
+        <ManagementPanel />
+      </>
+    );
+  }
+
   if (waitsForAnotherProcess) {
     return (
       <section
@@ -638,7 +760,7 @@ export function CoreLifecycle() {
         aria-labelledby="external-core-operation-heading"
       >
         <p className="section-label">WokCore setup</p>
-        <h1 id="external-core-operation-heading">
+        <h1 id="external-core-operation-heading" tabIndex={-1}>
           WokCore operation continues in another process
         </h1>
         <p className="health-summary">
@@ -669,9 +791,25 @@ export function CoreLifecycle() {
               ? retryUpdate
               : retryInstall
           }
+          diagnosticsAvailable={diagnosticsAvailable}
+          onOpenDiagnostics={
+            diagnosticsAvailable
+              ? () => {
+                  setRequestedManagementArea("diagnostics");
+                  setRequestedManagementAreaRequestId(
+                    (requestId) => requestId + 1,
+                  );
+                }
+              : undefined
+          }
         />
         {operation.operation === "update" &&
-          operation.state === "failed" && <ManagementPanel />}
+          operation.state === "failed" && (
+            <ManagementPanel
+              requestedArea={requestedManagementArea}
+              requestedAreaRequestId={requestedManagementAreaRequestId}
+            />
+          )}
         {updateConfirmationDialog}
       </>
     );
@@ -698,7 +836,7 @@ export function CoreLifecycle() {
             <span className="status-mark" aria-hidden="true">
               !
             </span>
-            <h1 id="core-status-recovery-heading">
+            <h1 id="core-status-recovery-heading" tabIndex={-1}>
               WokCore{" "}
               {updateStatusUnavailable ? "update" : "setup"} completed,
               but status is unavailable
@@ -742,7 +880,7 @@ export function CoreLifecycle() {
             <span className="status-mark" aria-hidden="true">
               !
             </span>
-            <h1 id="core-update-start-failure-heading">
+            <h1 id="core-update-start-failure-heading" tabIndex={-1}>
               WokCore update could not start
             </h1>
           </div>
@@ -788,7 +926,7 @@ export function CoreLifecycle() {
           <span className="status-mark" aria-hidden="true">
             !
           </span>
-          <h1 id="core-setup-failure-heading">
+          <h1 id="core-setup-failure-heading" tabIndex={-1}>
             WokCore setup unavailable
           </h1>
         </div>
@@ -823,7 +961,7 @@ export function CoreLifecycle() {
         aria-labelledby="core-setup-preflight-heading"
       >
         <p className="section-label">WokCore setup</p>
-        <h1 id="core-setup-preflight-heading">
+        <h1 id="core-setup-preflight-heading" tabIndex={-1}>
           Checking existing WokCore setup
         </h1>
         <p className="health-summary">
@@ -844,6 +982,7 @@ export function CoreLifecycle() {
   return (
     <>
       <CoreHealth
+        updatesEnabled={updateInteractionReady}
         updateCheck={updateCheck}
         updateCheckFailed={updateCheckFailed}
         updateCheckPending={updateCheckPending}
