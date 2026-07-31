@@ -94,6 +94,46 @@ describe("CoreHealth", () => {
     },
   );
 
+  it.each([
+    ["missing", "WokCore not installed"],
+    ["stopped", "WokCore stopped"],
+    ["running", "WokCore running"],
+    ["authorization_required", "WokRouter authorization required"],
+  ] as const)(
+    "keeps the development %s runtime read-only",
+    async (stateName, title) => {
+      vi.mocked(getCoreStatus).mockResolvedValue(
+        status(stateName, { runtime_channel: "development" }),
+      );
+
+      renderHealth();
+
+      expect(await screen.findByText(title)).toBeInTheDocument();
+      expect(screen.getByText("Development")).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", {
+          name: /start wokcore|authorize wokrouter|stop wokcore|check again/i,
+        }),
+      ).not.toBeInTheDocument();
+      expect(startCore).not.toHaveBeenCalled();
+      expect(stopCore).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps status refetch available for an incompatible development runtime", async () => {
+    vi.mocked(getCoreStatus).mockResolvedValue(
+      status("incompatible", { runtime_channel: "development" }),
+    );
+
+    renderHealth();
+
+    expect(
+      await screen.findByRole("button", { name: "Check again" }),
+    ).toBeEnabled();
+    expect(startCore).not.toHaveBeenCalled();
+    expect(stopCore).not.toHaveBeenCalled();
+  });
+
   it("starts a stopped WokCore and refreshes its status", async () => {
     vi.mocked(getCoreStatus)
       .mockResolvedValueOnce(status("stopped", { version: "0.1.0" }))

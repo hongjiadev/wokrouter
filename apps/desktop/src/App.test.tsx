@@ -8,6 +8,9 @@ import { App } from "./App";
 vi.mock("./components/ManagementPanel", () => ({
   ManagementPanel: () => <section>WokCore workspace</section>,
 }));
+vi.mock("./components/CoreLifecycle", () => ({
+  CoreLifecycle: () => <section>WokCore lifecycle owner</section>,
+}));
 vi.mock("./control", () => ({
   coreStatusQueryKey: ["core-status"],
   getCoreStatus: vi.fn(),
@@ -26,7 +29,7 @@ beforeEach(() => {
   });
 });
 
-it("keeps health first and mounts the WokCore management workspace", async () => {
+it("mounts one lifecycle owner for health, setup, and management", async () => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -38,6 +41,7 @@ it("keeps health first and mounts the WokCore management workspace", async () =>
   );
 
   expect(screen.getByText("WokRouter")).toBeInTheDocument();
-  expect(await screen.findByText("WokCore running")).toBeInTheDocument();
-  expect(screen.getByText("WokCore workspace")).toBeInTheDocument();
+  expect(screen.getByText("WokCore lifecycle owner")).toBeInTheDocument();
+  expect(screen.queryByText("WokCore workspace")).not.toBeInTheDocument();
+  expect(getCoreStatus).not.toHaveBeenCalled();
 });

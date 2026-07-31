@@ -1,5 +1,4 @@
-import { CoreHealth } from "./components/CoreHealth";
-import { ManagementPanel } from "./components/ManagementPanel";
+import { CoreLifecycle } from "./components/CoreLifecycle";
 
 export function App() {
   return (
@@ -14,8 +13,7 @@ export function App() {
         <p className="surface-name">Local desktop control</p>
       </header>
       <main className="app-main">
-        <CoreHealth />
-        <ManagementPanel />
+        <CoreLifecycle />
       </main>
       <footer className="app-footer">
         Desktop controls communicate with WokCore over loopback HTTP.

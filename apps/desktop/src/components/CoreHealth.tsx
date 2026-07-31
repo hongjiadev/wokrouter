@@ -140,11 +140,12 @@ export function CoreHealth() {
   } else {
     const copy = stateCopy[status.data.state];
     const isRunning = status.data.state === "running";
+    const isDevelopment = status.data.runtime_channel === "development";
     const canStart =
-      status.data.state === "stopped" ||
-      status.data.state === "authorization_required";
+      !isDevelopment &&
+      (status.data.state === "stopped" ||
+        status.data.state === "authorization_required");
     const canRetry =
-      status.data.state === "missing" ||
       status.data.state === "incompatible" ||
       status.data.state === "invalid_runtime";
     const actionError = start.isError
@@ -235,7 +236,7 @@ export function CoreHealth() {
                     : "Start WokCore"}
             </button>
           )}
-          {isRunning && (
+          {isRunning && !isDevelopment && (
             <button
               className="button button--secondary"
               type="button"
@@ -260,7 +261,9 @@ export function CoreHealth() {
             </button>
           )}
           <p className="action-note">
-            Closing this window never stops WokCore.
+            {isDevelopment
+              ? "This development WokCore is managed by the IDE."
+              : "Closing this window never stops WokCore."}
           </p>
         </div>
       </>
