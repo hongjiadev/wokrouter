@@ -304,6 +304,9 @@ foreach ($executable in @($desktop, $sidecar)) {
         throw "Windows executable architecture does not match '$architecture'."
     }
 }
+if ((Get-PeSubsystem -Path $desktop) -ne 2) {
+    throw "Windows desktop executable must use the GUI subsystem."
+}
 
 $repository = (Assert-RegularPath `
     -Path $RepositoryRoot `
@@ -413,6 +416,9 @@ try {
             throw "Extracted MSI executable architecture does not match."
         }
     }
+    if ((Get-PeSubsystem -Path $byName["wokrouter-desktop.exe"]) -ne 2) {
+        throw "MSI desktop executable must use the GUI subsystem."
+    }
 
     if ([IO.File]::Exists($OutputDirectory)) {
         throw "Output directory must not be a file."
@@ -459,6 +465,30 @@ try {
     }
     finally {
         $archive.Dispose()
+    }
+
+    $portableExtracted = Join-Path $temporary "portable"
+    [IO.Directory]::CreateDirectory($portableExtracted) | Out-Null
+    [IO.Compression.ZipFile]::ExtractToDirectory(
+        $zipOutput,
+        $portableExtracted
+    )
+    Assert-TreeSafe `
+        -Root $portableExtracted `
+        -Description "Extracted Portable archive"
+    $portableDesktop = @(
+        Get-ChildItem `
+            -LiteralPath $portableExtracted `
+            -Force `
+            -Recurse `
+            -File |
+            Where-Object Name -CEQ "wokrouter-desktop.exe"
+    )
+    if ($portableDesktop.Count -ne 1) {
+        throw "Portable archive must contain one desktop executable."
+    }
+    if ((Get-PeSubsystem -Path $portableDesktop[0].FullName) -ne 2) {
+        throw "Portable desktop executable must use the GUI subsystem."
     }
 
     Write-Output $zipOutput

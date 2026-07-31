@@ -21,6 +21,7 @@ function New-ReleaseFixture {
     )
     $null = New-Item -ItemType Directory -Path (Join-Path $root ".github/workflows") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri/src") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "docs/operations") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "tests/release") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "release") -Force
@@ -30,6 +31,7 @@ function New-ReleaseFixture {
             "Cargo.toml",
             "Cargo.lock",
             "apps/desktop/package.json",
+            "apps/desktop/src-tauri/src/main.rs",
             "apps/desktop/src-tauri/tauri.conf.json",
             "docs/operations/development.md",
             "tests/release/WokRouter.ReleaseContract.psm1",
@@ -46,6 +48,27 @@ function New-ReleaseFixture {
     }
     $fixtureRoots.Add($root)
     return $root
+}
+
+function Set-FixtureLineEndings {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][ValidateSet("crlf", "lf")][string] $Style
+    )
+
+    $path = Join-Path $Root ".github/workflows/release.yml"
+    $content = (Get-Content -LiteralPath $path -Raw -Encoding UTF8).Replace(
+        "`r`n",
+        "`n"
+    )
+    if ($Style -ceq "crlf") {
+        $content = $content.Replace("`n", "`r`n")
+    }
+    [IO.File]::WriteAllText(
+        $path,
+        $content,
+        [Text.UTF8Encoding]::new($false)
+    )
 }
 
 function Edit-FixtureFile {
@@ -134,6 +157,156 @@ try {
     Invoke-Scenario -Name "real release workflow satisfies the contract" -Test {
         $root = New-ReleaseFixture
         Assert-Passes -Root $root -Scenario "real release fixture"
+    }
+
+    Invoke-Scenario -Name "release workflow identity accepts CRLF and LF only" -Test {
+        foreach ($style in @("crlf", "lf")) {
+            $root = New-ReleaseFixture
+            Set-FixtureLineEndings -Root $root -Style $style
+            Assert-Passes `
+                -Root $root `
+                -Scenario "$style release fixture"
+        }
+
+        $root = New-ReleaseFixture
+        Set-FixtureLineEndings -Root $root -Style "lf"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText "  cancel-in-progress: false" `
+            -NewText "  cancel-in-progress: true"
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "without cancellation" `
+            -Scenario "changed LF release identity"
+    }
+
+    Invoke-Scenario -Name "desktop source must retain the release-only GUI attribute" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src-tauri/src/main.rs" `
+            -OldText (
+                '#![cfg_attr(all(windows, not(debug_assertions)), ' +
+                'windows_subsystem = "windows")]'
+            ) `
+            -NewText (
+                '#![cfg_attr(all(windows, debug_assertions), ' +
+                'windows_subsystem = "windows")]'
+            )
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "release-only GUI subsystem attribute" `
+            -Scenario "missing desktop subsystem attribute"
+    }
+
+    Invoke-Scenario -Name "only desktop main may declare a Windows subsystem" -Test {
+        $root = New-ReleaseFixture
+        $otherMain = Join-Path $root "crates/other/src/main.rs"
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $otherMain)) |
+            Out-Null
+        [IO.File]::WriteAllText(
+            $otherMain,
+            "#![windows_subsystem = `"windows`"]`nfn main() {}`n",
+            [Text.UTF8Encoding]::new($false)
+        )
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "only in desktop main.rs" `
+            -Scenario "CLI-like main declaring a Windows subsystem"
+
+        $root = New-ReleaseFixture
+        $otherMain = Join-Path $root "crates/other/src/main.rs"
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $otherMain)) |
+            Out-Null
+        [IO.File]::WriteAllText(
+            $otherMain,
+            "// windows_subsystem is intentionally absent here.`nfn main() {}`n",
+            [Text.UTF8Encoding]::new($false)
+        )
+        Assert-Passes `
+            -Root $root `
+            -Scenario "comment mentioning a Windows subsystem"
+    }
+
+    Invoke-Scenario -Name "PE subsystem helper and export must remain exact" -Test {
+        foreach ($mutation in @(
+                @{
+                    Old = (
+                        'if ($bytes.Length -lt 0x40 -or ' +
+                        '$bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {'
+                    )
+                    New = (
+                        'if ($bytes.Length -lt 0x20 -or ' +
+                        '$bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { # ' +
+                        'if ($bytes.Length -lt 0x40 -or ' +
+                        '$bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {'
+                    )
+                },
+                @{
+                    Old = ", Get-PeSubsystem"
+                    New = "`n    # , Get-PeSubsystem"
+                }
+            )) {
+            $root = New-ReleaseFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "tests/release/WokRouter.ReleaseContract.psm1" `
+                -OldText $mutation.Old `
+                -NewText $mutation.New
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText "PE subsystem helper" `
+                -Scenario "missing PE subsystem helper/export"
+        }
+    }
+
+    Invoke-Scenario -Name "source MSI and Portable GUI checks cannot be removed" -Test {
+        foreach ($mutation in @(
+                @{
+                    Old = 'if ((Get-PeSubsystem -Path $desktop) -ne 2) {'
+                    New = (
+                        'if ($false) { # ' +
+                        'if ((Get-PeSubsystem -Path $desktop) -ne 2) {'
+                    )
+                    Expected = "source desktop GUI subsystem check"
+                },
+                @{
+                    Old = (
+                        'if ((Get-PeSubsystem -Path ' +
+                        '$byName["wokrouter-desktop.exe"]) -ne 2) {'
+                    )
+                    New = (
+                        'if ($false) { # ' +
+                        'if ((Get-PeSubsystem -Path ' +
+                        '$byName["wokrouter-desktop.exe"]) -ne 2) {'
+                    )
+                    Expected = "MSI desktop GUI subsystem check"
+                },
+                @{
+                    Old = (
+                        'if ((Get-PeSubsystem -Path ' +
+                        '$portableDesktop[0].FullName) -ne 2) {'
+                    )
+                    New = (
+                        'if ($false) { # ' +
+                        'if ((Get-PeSubsystem -Path ' +
+                        '$portableDesktop[0].FullName) -ne 2) {'
+                    )
+                    Expected = "Portable desktop GUI subsystem check"
+                }
+            )) {
+            $root = New-ReleaseFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "tests/release/package-windows-assets.ps1" `
+                -OldText $mutation.Old `
+                -NewText $mutation.New
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText $mutation.Expected `
+                -Scenario "missing $($mutation.Expected)"
+        }
     }
 
     Invoke-Scenario -Name "release assembly imports the contract module by path" -Test {

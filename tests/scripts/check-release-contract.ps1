@@ -32,6 +32,7 @@ $publicKeyPath = Join-Path $rootPath "release/minisign.pub"
 $cargoManifestPath = Join-Path $rootPath "Cargo.toml"
 $cargoLockPath = Join-Path $rootPath "Cargo.lock"
 $packageManifestPath = Join-Path $rootPath "apps/desktop/package.json"
+$desktopMainPath = Join-Path $rootPath "apps/desktop/src-tauri/src/main.rs"
 $tauriConfigurationPath = Join-Path `
     $rootPath `
     "apps/desktop/src-tauri/tauri.conf.json"
@@ -68,6 +69,25 @@ function Get-SourceMatchIndex {
 
     $match = [regex]::Match($Source, $Pattern)
     return $(if ($match.Success) { $match.Index } else { -1 })
+}
+
+function Test-ContainsExactBlock {
+    param(
+        [Parameter(Mandatory)][string] $Source,
+        [Parameter(Mandatory)][string] $Block
+    )
+
+    return $Source.Contains($Block.Replace("`r`n", "`n"))
+}
+
+function Test-ContainsExactLine {
+    param(
+        [Parameter(Mandatory)][string] $Source,
+        [Parameter(Mandatory)][string] $Line
+    )
+
+    $pattern = '(?m)^[ \t]*' + [regex]::Escape($Line) + '[ \t]*$'
+    return [regex]::Matches($Source, $pattern).Count -eq 1
 }
 
 function Read-BoundedUtf8Text {
@@ -194,6 +214,7 @@ foreach ($path in @(
         $cargoManifestPath,
         $cargoLockPath,
         $packageManifestPath,
+        $desktopMainPath,
         $tauriConfigurationPath
     )) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -202,6 +223,107 @@ foreach ($path in @(
 }
 
 if ($failures.Count -eq 0) {
+    $desktopMain = Read-BoundedUtf8Text `
+        -Path $desktopMainPath `
+        -MaximumBytes 131072
+    $desktopSubsystemAttribute = (
+        '#![cfg_attr(all(windows, not(debug_assertions)), ' +
+        'windows_subsystem = "windows")]'
+    )
+    if (
+        -not $desktopMain.StartsWith(
+            "$desktopSubsystemAttribute`n",
+            [StringComparison]::Ordinal
+        ) -or
+        @([regex]::Matches(
+                $desktopMain,
+                [regex]::Escape($desktopSubsystemAttribute)
+            )).Count -ne 1
+    ) {
+        Add-Failure `
+            -Message "Desktop main must begin with the exact release-only GUI subsystem attribute."
+    }
+
+    $otherSubsystemMains = @(
+        foreach ($sourceRootName in @("apps", "crates")) {
+            $sourceRoot = Join-Path $rootPath $sourceRootName
+            if (-not (Test-Path -LiteralPath $sourceRoot -PathType Container)) {
+                continue
+            }
+            foreach ($main in Get-ChildItem `
+                    -LiteralPath $sourceRoot `
+                    -Filter "main.rs" `
+                    -File `
+                    -Recurse) {
+                if ($main.FullName -ceq $desktopMainPath) {
+                    continue
+                }
+                $source = Read-BoundedUtf8Text `
+                    -Path $main.FullName `
+                    -MaximumBytes 1048576
+                if ($source -cmatch '(?ms)^[ \t]*#!\[(?=[^\]]*windows_subsystem)[^\]]+\]') {
+                    $main.FullName
+                }
+            }
+        }
+    )
+    if ($otherSubsystemMains.Count -ne 0) {
+        Add-Failure `
+            -Message "A Windows subsystem declaration may appear only in desktop main.rs."
+    }
+
+    $releaseContractSource = Read-BoundedUtf8Text `
+        -Path $releaseContractPath `
+        -MaximumBytes 262144
+    $peSubsystemRequirements = @(
+        "function Get-PeSubsystem {",
+        'if ($bytes.Length -lt 0x40 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {',
+        '$peOffset + 24 + 70 -gt $bytes.Length -or',
+        'if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {',
+        'return [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)',
+        '-Function Get-WokRouterTargetContracts, Get-WokRouterPayloadNames, Get-PeSubsystem'
+    )
+    if (
+        @(
+            $peSubsystemRequirements |
+                Where-Object {
+                    -not (Test-ContainsExactLine `
+                        -Source $releaseContractSource `
+                        -Line $_)
+                }
+        ).Count -ne 0
+    ) {
+        Add-Failure `
+            -Message "Release contract must define and export the exact PE subsystem helper."
+    }
+
+    $windowsPackagerSource = Read-BoundedUtf8Text `
+        -Path $windowsPackagerPath `
+        -MaximumBytes 1048576
+    if (-not (Test-ContainsExactLine `
+            -Source $windowsPackagerSource `
+            -Line 'if ((Get-PeSubsystem -Path $desktop) -ne 2) {')) {
+        Add-Failure `
+            -Message "Windows packager must retain the source desktop GUI subsystem check."
+    }
+    if (-not (Test-ContainsExactLine `
+            -Source $windowsPackagerSource `
+            -Line 'if ((Get-PeSubsystem -Path $byName["wokrouter-desktop.exe"]) -ne 2) {')) {
+        Add-Failure `
+            -Message "Windows packager must retain the MSI desktop GUI subsystem check."
+    }
+    if (
+        -not (Test-ContainsExactLine `
+            -Source $windowsPackagerSource `
+            -Line '[IO.Compression.ZipFile]::ExtractToDirectory(') -or
+        -not (Test-ContainsExactLine `
+            -Source $windowsPackagerSource `
+            -Line 'if ((Get-PeSubsystem -Path $portableDesktop[0].FullName) -ne 2) {')
+    ) {
+        Add-Failure `
+            -Message "Windows packager must retain the Portable desktop GUI subsystem check."
+    }
+
     try {
         $workspaceVersion = Get-CargoWorkspaceVersion -Text (
             Read-BoundedUtf8Text -Path $cargoManifestPath -MaximumBytes 131072
@@ -332,7 +454,7 @@ concurrency:
   group: wokrouter-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 '@
-    if (-not $release.Contains($concurrencyBlock)) {
+    if (-not (Test-ContainsExactBlock -Source $release -Block $concurrencyBlock)) {
         Add-Failure `
             -Message "Release workflow must serialize the same release tag without cancellation."
     }
@@ -372,7 +494,7 @@ concurrency:
         $versionJob -notmatch [regex]::Escape('${{ github.ref_name }}') -or
         $versionJob -notmatch "canonical WokRouter semver tag" -or
         $versionJob -notmatch [regex]::Escape('$tag.Substring(1)') -or
-        -not $versionJob.Contains($tagCheckout) -or
+        -not (Test-ContainsExactBlock -Source $versionJob -Block $tagCheckout) -or
         $versionJob -notmatch '(?m)^          "source_sha=\$sourceSha" \|$' -or
         -not $versionJob.Contains("Read-ExactUtf8File") -or
         -not $versionJob.Contains("Get-CargoWorkspaceVersion") -or
@@ -396,7 +518,7 @@ concurrency:
           persist-credentials: false
           ref: ${{ needs.release-version.outputs.source_sha }}
 '@
-    if (-not $buildJob.Contains($sourceCheckout)) {
+    if (-not (Test-ContainsExactBlock -Source $buildJob -Block $sourceCheckout)) {
         Add-Failure `
             -Message "Release builds must checkout the commit resolved from the requested WokRouter tag."
     }
@@ -500,7 +622,7 @@ concurrency:
     }
 
     $compatibilityJob = Get-JobBlock -Workflow $release -Name "release-compatibility"
-    if (-not $compatibilityJob.Contains($sourceCheckout)) {
+    if (-not (Test-ContainsExactBlock -Source $compatibilityJob -Block $sourceCheckout)) {
         Add-Failure `
             -Message "Release compatibility tests must checkout the requested WokRouter tag commit."
     }
@@ -544,7 +666,7 @@ concurrency:
           ref: ${{ needs.release-version.outputs.source_sha }}
 '@
     if (
-        -not $verifyJob.Contains($assembleCheckout) -or
+        -not (Test-ContainsExactBlock -Source $verifyJob -Block $assembleCheckout) -or
         -not $verifyJob.Contains("sudo apt-get install --yes --no-install-recommends minisign") -or
         -not $verifyJob.Contains("pattern: wokrouter-payload-*") -or
         -not $verifyJob.Contains(
@@ -629,13 +751,13 @@ concurrency:
         $publishJob -notmatch 'verify-release-bundle\.ps1' -or
         $publishJob -notmatch 'gh release edit "\$RELEASE_TAG"' -or
         $publishJob -notmatch '--draft=false' -or
-        -not $publishJob.Contains($draftCreateBlock) -or
-        -not $publishJob.Contains($publishEditBlock) -or
-        -not $publishJob.Contains($preMutationIdentityBlock) -or
-        -not $publishJob.Contains($preCreateIdentityBlock) -or
-        -not $publishJob.Contains($preDeleteIdentityBlock) -or
-        -not $publishJob.Contains($preUploadIdentityBlock) -or
-        -not $publishJob.Contains($prePublicationIdentityBlock) -or
+        -not (Test-ContainsExactBlock -Source $publishJob -Block $draftCreateBlock) -or
+        -not (Test-ContainsExactBlock -Source $publishJob -Block $publishEditBlock) -or
+        -not (Test-ContainsExactBlock -Source $publishJob -Block $preMutationIdentityBlock) -or
+        -not (Test-ContainsExactBlock -Source $publishJob -Block $preCreateIdentityBlock) -or
+        -not (Test-ContainsExactBlock -Source $publishJob -Block $preDeleteIdentityBlock) -or
+        -not (Test-ContainsExactBlock -Source $publishJob -Block $preUploadIdentityBlock) -or
+        -not (Test-ContainsExactBlock -Source $publishJob -Block $prePublicationIdentityBlock) -or
         -not $publishJob.Contains("gh api") -or
         -not $publishJob.Contains("SOURCE_SHA") -or
         -not $publishJob.Contains("Remote WokRouter tag commit does not match source SHA.") -or
@@ -655,7 +777,7 @@ concurrency:
             "(?m)^    if: github\.event_name == 'push' && " +
             "startsWith\(github\.ref, 'refs/tags/'\)$"
         ) -or
-        -not $publishJob.Contains($assembleCheckout) -or
+        -not (Test-ContainsExactBlock -Source $publishJob -Block $assembleCheckout) -or
         -not $publishJob.Contains(
             'name: wokrouter-${{ needs.release-version.outputs.tag }}-signed'
         ) -or

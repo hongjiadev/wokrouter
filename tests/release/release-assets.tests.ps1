@@ -49,10 +49,11 @@ function Write-MinimalPe {
         [Parameter(Mandatory)][string] $Path,
         [Parameter(Mandatory)][ValidateSet("x86_64", "arm64")]
         [string] $Architecture,
-        [Parameter(Mandatory)][string] $Marker
+        [Parameter(Mandatory)][string] $Marker,
+        [ValidateSet("gui", "console")][string] $Subsystem = "gui"
     )
 
-    $bytes = [byte[]]::new(160)
+    $bytes = [byte[]]::new(256)
     $bytes[0] = [byte][char]"M"
     $bytes[1] = [byte][char]"Z"
     [BitConverter]::GetBytes([int] 128).CopyTo($bytes, 0x3c)
@@ -64,7 +65,11 @@ function Write-MinimalPe {
         [uint16] 0xaa64
     }
     [BitConverter]::GetBytes($machine).CopyTo($bytes, 132)
-    [Text.Encoding]::ASCII.GetBytes($Marker).CopyTo($bytes, 140)
+    $optionalHeader = 128 + 24
+    [BitConverter]::GetBytes([UInt16] 0x20B).CopyTo($bytes, $optionalHeader)
+    $subsystemValue = if ($Subsystem -ceq "gui") { [UInt16] 2 } else { [UInt16] 3 }
+    [BitConverter]::GetBytes($subsystemValue).CopyTo($bytes, $optionalHeader + 68)
+    [Text.Encoding]::ASCII.GetBytes($Marker).CopyTo($bytes, 224)
     $parent = Split-Path -Parent $Path
     [IO.Directory]::CreateDirectory($parent) | Out-Null
     [IO.File]::WriteAllBytes($Path, $bytes)
@@ -458,7 +463,11 @@ function New-WindowsFixture {
     $desktop = Join-Path $Root "wokrouter-desktop.exe"
     $sidecar = Join-Path $Root "wokrouter.exe"
     Write-MinimalPe -Path $desktop -Architecture $Architecture -Marker "desktop"
-    Write-MinimalPe -Path $sidecar -Architecture $Architecture -Marker "sidecar"
+    Write-MinimalPe `
+        -Path $sidecar `
+        -Architecture $Architecture `
+        -Marker "sidecar" `
+        -Subsystem "console"
     $payload = Join-Path $Root "msi-payload"
     Copy-ReleaseDocuments -Destination $payload
     [IO.File]::Copy($desktop, (Join-Path $payload "wokrouter-desktop.exe"))
@@ -511,6 +520,24 @@ function Assert-Rejects {
     throw "Expected packaging to reject '$ExpectedText'."
 }
 
+function Assert-PeSubsystemRejects {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][string] $ExpectedText
+    )
+
+    try {
+        $null = Get-PeSubsystem -Path $Path
+    }
+    catch {
+        if ($_.Exception.Message -notmatch [regex]::Escape($ExpectedText)) {
+            throw "Expected '$ExpectedText', got '$($_.Exception.Message)'."
+        }
+        return
+    }
+    throw "Expected PE subsystem inspection to reject '$ExpectedText'."
+}
+
 function Invoke-Scenario {
     param(
         [Parameter(Mandatory)][string] $Name,
@@ -530,6 +557,57 @@ function Invoke-Scenario {
 
 try {
     Import-Module $modulePath -Force
+
+    Invoke-Scenario -Name "PE subsystem reader returns exact GUI and console values" -Test {
+        $root = New-FixtureRoot
+        $gui = Join-Path $root "gui.exe"
+        $console = Join-Path $root "console.exe"
+        Write-MinimalPe `
+            -Path $gui `
+            -Architecture "x86_64" `
+            -Marker "gui" `
+            -Subsystem "gui"
+        Write-MinimalPe `
+            -Path $console `
+            -Architecture "x86_64" `
+            -Marker "console" `
+            -Subsystem "console"
+        if ([UInt16] (Get-PeSubsystem -Path $gui) -ne [UInt16] 2) {
+            throw "GUI executable did not report subsystem 2."
+        }
+        if ([UInt16] (Get-PeSubsystem -Path $console) -ne [UInt16] 3) {
+            throw "Console executable did not report subsystem 3."
+        }
+    }
+
+    Invoke-Scenario -Name "PE subsystem reader rejects truncated and unsupported headers" -Test {
+        $root = New-FixtureRoot
+        $truncated = Join-Path $root "truncated.exe"
+        $unsupported = Join-Path $root "unsupported.exe"
+        Write-MinimalPe `
+            -Path $truncated `
+            -Architecture "x86_64" `
+            -Marker "truncated"
+        $truncatedBytes = [IO.File]::ReadAllBytes($truncated)
+        [IO.File]::WriteAllBytes($truncated, $truncatedBytes[0..219])
+        Assert-PeSubsystemRejects `
+            -Path $truncated `
+            -ExpectedText "valid PE header"
+
+        Write-MinimalPe `
+            -Path $unsupported `
+            -Architecture "x86_64" `
+            -Marker "unsupported"
+        $unsupportedBytes = [IO.File]::ReadAllBytes($unsupported)
+        [BitConverter]::GetBytes([UInt16] 0x9999).CopyTo(
+            $unsupportedBytes,
+            128 + 24
+        )
+        [IO.File]::WriteAllBytes($unsupported, $unsupportedBytes)
+        Assert-PeSubsystemRejects `
+            -Path $unsupported `
+            -ExpectedText "unsupported optional header"
+    }
 
     Invoke-Scenario -Name "contract returns exact ordinal 6/16 sequences" -Test {
         $expectedTargets = @(
@@ -1918,6 +1996,100 @@ try {
         if ($actual.Count -ne 2) { throw "Windows packager returned the wrong output count." }
     }
 
+    foreach ($architecture in @("x86_64", "arm64")) {
+        Invoke-Scenario -Name "Windows accepts a GUI desktop and console sidecar for $architecture" -Test {
+            $root = New-FixtureRoot
+            $fixture = New-WindowsFixture `
+                -Root $root `
+                -Architecture $architecture
+            if ([UInt16] (Get-PeSubsystem -Path $fixture.Desktop) -ne 2) {
+                throw "Desktop fixture is not GUI subsystem 2."
+            }
+            if ([UInt16] (Get-PeSubsystem -Path $fixture.Sidecar) -ne 3) {
+                throw "Sidecar fixture is not console subsystem 3."
+            }
+            $adapter = New-ToolAdapter -Root $root
+            $target = if ($architecture -ceq "x86_64") {
+                "x86_64-pc-windows-msvc"
+            } else {
+                "aarch64-pc-windows-msvc"
+            }
+            $actual = Invoke-Packager `
+                -Path $windowsScript `
+                -FixtureRoot $root `
+                -Arguments @{
+                    BundleDirectory = $fixture.Bundle
+                    DesktopExecutable = $fixture.Desktop
+                    SidecarExecutable = $fixture.Sidecar
+                    RepositoryRoot = $repositoryRoot
+                    OutputDirectory = (Join-Path $root "output")
+                    Version = $version
+                    Target = $target
+                    ToolAdapterPath = $adapter
+                }
+            if ($actual.Count -ne 2) {
+                throw "Windows packager returned the wrong output count."
+            }
+        }
+
+        Invoke-Scenario -Name "Windows rejects a console desktop for $architecture" -Test {
+            $root = New-FixtureRoot
+            $fixture = New-WindowsFixture `
+                -Root $root `
+                -Architecture $architecture
+            Write-MinimalPe `
+                -Path $fixture.Desktop `
+                -Architecture $architecture `
+                -Marker "desktop" `
+                -Subsystem "console"
+            $adapter = New-ToolAdapter -Root $root
+            $target = if ($architecture -ceq "x86_64") {
+                "x86_64-pc-windows-msvc"
+            } else {
+                "aarch64-pc-windows-msvc"
+            }
+            Assert-Rejects `
+                -Path $windowsScript `
+                -FixtureRoot $root `
+                -Arguments @{
+                    BundleDirectory = $fixture.Bundle
+                    DesktopExecutable = $fixture.Desktop
+                    SidecarExecutable = $fixture.Sidecar
+                    RepositoryRoot = $repositoryRoot
+                    OutputDirectory = (Join-Path $root "output")
+                    Version = $version
+                    Target = $target
+                    ToolAdapterPath = $adapter
+                } `
+                -ExpectedText "GUI subsystem"
+        }
+    }
+
+    Invoke-Scenario -Name "Windows rejects a console desktop extracted from MSI" -Test {
+        $root = New-FixtureRoot
+        $fixture = New-WindowsFixture -Root $root
+        Write-MinimalPe `
+            -Path (Join-Path $root "msi-payload/wokrouter-desktop.exe") `
+            -Architecture "x86_64" `
+            -Marker "msi-desktop" `
+            -Subsystem "console"
+        $adapter = New-ToolAdapter -Root $root
+        Assert-Rejects `
+            -Path $windowsScript `
+            -FixtureRoot $root `
+            -Arguments @{
+                BundleDirectory = $fixture.Bundle
+                DesktopExecutable = $fixture.Desktop
+                SidecarExecutable = $fixture.Sidecar
+                RepositoryRoot = $repositoryRoot
+                OutputDirectory = (Join-Path $root "output")
+                Version = $version
+                Target = "x86_64-pc-windows-msvc"
+                ToolAdapterPath = $adapter
+            } `
+            -ExpectedText "GUI subsystem"
+    }
+
     Invoke-Scenario -Name "Linux RPM extraction captures a direct exit status" -Test {
         $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $linuxScript
         $block = [regex]::Match(
@@ -1982,7 +2154,11 @@ try {
 
         $metadata.Version = $version
         Write-Utf8File -Path $msi -Content ($metadata | ConvertTo-Json -Compress)
-        Write-MinimalPe -Path $fixture.Sidecar -Architecture "arm64" -Marker "sidecar"
+        Write-MinimalPe `
+            -Path $fixture.Sidecar `
+            -Architecture "arm64" `
+            -Marker "sidecar" `
+            -Subsystem "console"
         Assert-Rejects -Path $windowsScript -FixtureRoot $root -Arguments @{
             BundleDirectory = $fixture.Bundle
             DesktopExecutable = $fixture.Desktop
