@@ -5502,6 +5502,7 @@ name = "wokrouter-desktop"
 version = "0.1.22"
 dependencies = [
  "secrecy",
+ "semver",
  "serde",
  "serde_json",
  "tauri",

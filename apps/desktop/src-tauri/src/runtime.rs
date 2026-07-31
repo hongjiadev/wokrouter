@@ -33,7 +33,7 @@ impl DesktopRuntimeState {
         Self::new_with_selector(Arc::new(SystemDesktopRuntimeSelector))
     }
 
-    fn new_with_selector(selector: Arc<dyn DesktopRuntimeSelector>) -> Self {
+    pub(crate) fn new_with_selector(selector: Arc<dyn DesktopRuntimeSelector>) -> Self {
         Self {
             selected: OnceCell::new(),
             selector,
