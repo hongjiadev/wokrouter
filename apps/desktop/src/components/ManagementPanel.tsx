@@ -14,7 +14,12 @@ import { useTranslation } from "react-i18next";
 
 import { coreStatusQueryKey, getCoreStatus } from "../control";
 import type { SupportedLocale } from "../i18n";
-import { formatBytes, formatLocalTime, formatNumber } from "../i18n/format";
+import {
+  formatBytes,
+  formatLocalDate,
+  formatLocalTime,
+  formatNumber,
+} from "../i18n/format";
 import {
   commitProviderConfig,
   createProviderSecret,
@@ -72,6 +77,12 @@ const areaDefinitions: {
     capability: "diagnostics.events.v1",
   },
 ];
+
+const sessionIndexPhaseKeys = {
+  starting: "management.sessions.indexPhase.starting",
+  scanning: "management.sessions.indexPhase.scanning",
+  idle: "management.sessions.indexPhase.idle",
+} as const satisfies Record<SessionList["index_status"]["phase"], string>;
 
 export function ManagementPanel({
   requestedArea,
@@ -610,12 +621,13 @@ function AccountsEditor({
                       placeholder={t(
                         "management.providers.replacementSecretPlaceholder",
                       )}
-                      onChange={(event) =>
+                      onChange={(event) => {
+                        const next = event.currentTarget.value;
                         setReplacement((current) => ({
                           ...current,
-                          [account.id]: event.currentTarget.value,
-                        }))
-                      }
+                          [account.id]: next,
+                        }));
+                      }}
                     />
                   </label>
                 )}
@@ -759,7 +771,7 @@ function SessionsPanel({ canReadMessages }: { canReadMessages: boolean }) {
         <div className="subsection-heading">
           <div>
             <h3>{t("management.sessions.indexed")}</h3>
-            <p>{sessions.data.index_status.phase}</p>
+            <p>{t(sessionIndexPhaseKeys[sessions.data.index_status.phase])}</p>
           </div>
           <span>
             {t("management.sessions.onThisPage", {
@@ -979,7 +991,13 @@ function UsagePanel() {
             <tbody>
               {usage.data.buckets.map((bucket) => (
                 <tr key={bucket.key}>
-                  <th>{bucket.key}</th>
+                  <th>
+                    {usage.data.group_by === "day" &&
+                    bucket.start &&
+                    bucket.end
+                      ? formatLocalDate(bucket.start, locale)
+                      : bucket.key}
+                  </th>
                   <td>{formatNumber(bucket.input_tokens, locale)}</td>
                   <td>{formatNumber(bucket.output_tokens, locale)}</td>
                   <td>{formatNumber(bucket.cache_read_tokens, locale)}</td>

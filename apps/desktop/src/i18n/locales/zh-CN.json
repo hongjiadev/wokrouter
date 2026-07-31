@@ -242,6 +242,11 @@
       "secretFailure": "不会假定凭据已更改。请检查账户后重试。"
     },
     "sessions": {
+      "indexPhase": {
+        "starting": "正在启动会话索引",
+        "scanning": "正在扫描会话索引",
+        "idle": "会话索引已就绪"
+      },
       "tab": "会话",
       "loading": "正在加载已索引的会话",
       "unavailable": "会话不可用",

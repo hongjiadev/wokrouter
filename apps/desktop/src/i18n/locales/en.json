@@ -242,6 +242,11 @@
       "secretFailure": "The credential was not assumed to have changed. Check the account and try again."
     },
     "sessions": {
+      "indexPhase": {
+        "starting": "Starting session index",
+        "scanning": "Scanning session indexes",
+        "idle": "Session indexes are up to date"
+      },
       "tab": "Sessions",
       "loading": "Loading indexed sessions",
       "unavailable": "Sessions unavailable",
