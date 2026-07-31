@@ -825,6 +825,20 @@ OperationInProgress,
 it("renamed lifecycle behavior", async () => {
 '@
             Expected = "lifecycle acceptance fixture"
+        },
+        @{
+            Name = "lifecycle acceptance fixture cannot live in a disabled test module"
+            Path = "apps/desktop/src-tauri/src/core_operation.rs"
+            Old = @"
+#[cfg(test)]
+mod tests {
+"@
+            New = @"
+#[cfg(test)]
+#[cfg(any())]
+mod tests {
+"@
+            Expected = "lifecycle acceptance fixture"
         }
     )
     foreach ($mutation in $lifecycleMutations) {

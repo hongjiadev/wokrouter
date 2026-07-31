@@ -1004,7 +1004,10 @@ function Test-RustExecutableTestFunction {
         [string]$FunctionName,
 
         [Parameter(Mandatory)]
-        [object]$CodeView
+        [object]$CodeView,
+
+        [Parameter(Mandatory)]
+        [object]$Container
     )
 
     $functionPattern = (
@@ -1020,9 +1023,37 @@ function Test-RustExecutableTestFunction {
     if ($functionMatches.Count -ne 1) {
         return $false
     }
+    $functionMatch = $functionMatches[0]
+    $ownership = if ($Container.Kind -eq "TopLevel") {
+        Get-RustOwnershipAtIndex `
+            -Structure $CodeView.Code `
+            -Index $functionMatch.Index
+    }
+    elseif (
+        $Container.Kind -eq "CfgTestModule" -and
+        $functionMatch.Index -gt $Container.OpeningBraceIndex -and
+        $functionMatch.Index -lt $Container.ClosingBraceIndex
+    ) {
+        $modulePrefix = $CodeView.Code.Substring(
+            $Container.OpeningBraceIndex + 1,
+            $functionMatch.Index - $Container.OpeningBraceIndex - 1
+        )
+        Get-RustOwnershipAtIndex `
+            -Structure $modulePrefix `
+            -Index $modulePrefix.Length
+    }
+    else {
+        $null
+    }
+    if (
+        $null -eq $ownership -or
+        -not $ownership.AllDelimiterDepthsZero
+    ) {
+        return $false
+    }
     $attributes = Get-RustOuterAttributesBeforeItem `
         -Source $Source `
-        -ItemStart $functionMatches[0].Index `
+        -ItemStart $functionMatch.Index `
         -Description "Rust lifecycle acceptance test function" `
         -CodeView $CodeView
     if ($null -eq $attributes) {
@@ -1040,6 +1071,47 @@ function Test-RustExecutableTestFunction {
         return $false
     }
     return $true
+}
+
+function Get-RustExecutableTestContainer {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [ValidateSet("TopLevel", "CfgTestModule")]
+        [string]$Kind,
+
+        [Parameter(Mandatory)]
+        [object]$CodeView
+    )
+
+    if ($Kind -eq "TopLevel") {
+        return [pscustomobject]@{
+            Kind = "TopLevel"
+        }
+    }
+
+    $testModule = Get-UniqueBracedItem `
+        -Source $Source `
+        -SignaturePattern '(?ms)(?<attributes>(?:(?:^[ \t]*#\[[^\r\n]*\][ \t]*\r?\n)|(?:^[ \t]*\r?\n))*)^[ \t]*mod[ \t]+tests[ \t]*' `
+        -Description "Lifecycle acceptance test module" `
+        -TopLevel `
+        -CodeView $CodeView
+    if (
+        $null -eq $testModule -or
+        $testModule.CodeAttributes -notmatch
+        '(?s)^\s*#\[cfg\([ \t]*test[ \t]*\)\]\s*$'
+    ) {
+        return $null
+    }
+
+    return [pscustomobject]@{
+        Kind = "CfgTestModule"
+        OpeningBraceIndex = $testModule.OpeningBraceIndex
+        ClosingBraceIndex = $testModule.ClosingBraceIndex
+    }
 }
 
 function Get-TopLevelRustBody {
@@ -2012,6 +2084,7 @@ $lifecycleAcceptanceFixtures = @(
     },
     @{
         Kind = "Rust"
+        Container = "CfgTestModule"
         Source = $coreOperation
         Names = @(
             "system_runner_uses_only_the_three_fixed_child_commands",
@@ -2021,6 +2094,7 @@ $lifecycleAcceptanceFixtures = @(
     },
     @{
         Kind = "Rust"
+        Container = "CfgTestModule"
         Source = $coreOperationParser
         Names = @(
             "versions_bytes_and_active_requests_are_strictly_validated",
@@ -2029,6 +2103,7 @@ $lifecycleAcceptanceFixtures = @(
     },
     @{
         Kind = "Rust"
+        Container = "TopLevel"
         Source = $wokcoreInstallTests
         Names = @(
             "signed_release_reports_monotonic_download_and_authoritative_install_phases",
@@ -2038,6 +2113,7 @@ $lifecycleAcceptanceFixtures = @(
     },
     @{
         Kind = "Rust"
+        Container = "TopLevel"
         Source = $cliStartTests
         Names = @(
             "missing_production_runtime_installs_starts_authorizes_and_reports_structured_progress"
@@ -2045,6 +2121,7 @@ $lifecycleAcceptanceFixtures = @(
     },
     @{
         Kind = "Rust"
+        Container = "TopLevel"
         Source = $runtimeSelectorTests
         Names = @(
             "a_selected_development_session_never_switches_to_production"
@@ -2067,6 +2144,22 @@ foreach ($fixtureGroup in $lifecycleAcceptanceFixtures) {
         $lifecycleAcceptanceFixturesExist = $false
         break
     }
+    $fixtureContainer = if ($fixtureGroup.Kind -eq "Rust") {
+        Get-RustExecutableTestContainer `
+            -Source $fixtureGroup.Source `
+            -Kind $fixtureGroup.Container `
+            -CodeView $fixtureCodeView
+    }
+    else {
+        $null
+    }
+    if (
+        $fixtureGroup.Kind -eq "Rust" -and
+        $null -eq $fixtureContainer
+    ) {
+        $lifecycleAcceptanceFixturesExist = $false
+        break
+    }
     foreach ($fixtureName in $fixtureGroup.Names) {
         $fixtureExists = if ($fixtureGroup.Kind -eq "TypeScript") {
             Test-TypeScriptExecutableTestDescription `
@@ -2078,7 +2171,8 @@ foreach ($fixtureGroup in $lifecycleAcceptanceFixtures) {
             Test-RustExecutableTestFunction `
                 -Source $fixtureGroup.Source `
                 -FunctionName $fixtureName `
-                -CodeView $fixtureCodeView
+                -CodeView $fixtureCodeView `
+                -Container $fixtureContainer
         }
         if (-not $fixtureExists) {
             $lifecycleAcceptanceFixturesExist = $false
