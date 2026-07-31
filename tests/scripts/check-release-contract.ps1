@@ -124,37 +124,11 @@ function Test-ExactFunctionDefinitionAst {
     if (
         $Actual.Name -cne $Expected.Name -or
         $Actual.IsFilter -ne $Expected.IsFilter -or
-        $Actual.IsWorkflow -ne $Expected.IsWorkflow
+        $Actual.IsWorkflow -ne $Expected.IsWorkflow -or
+        (Get-NormalizedAstText -Ast $Actual) -cne
+        (Get-NormalizedAstText -Ast $Expected)
     ) {
         return $false
-    }
-
-    $actualAttributes = @($Actual.Body.ParamBlock.Attributes)
-    $expectedAttributes = @($Expected.Body.ParamBlock.Attributes)
-    $actualParameters = @($Actual.Body.ParamBlock.Parameters)
-    $expectedParameters = @($Expected.Body.ParamBlock.Parameters)
-    $actualStatements = @($Actual.Body.EndBlock.Statements)
-    $expectedStatements = @($Expected.Body.EndBlock.Statements)
-    foreach ($pair in @(
-            @($actualAttributes, $expectedAttributes),
-            @($actualParameters, $expectedParameters),
-            @($actualStatements, $expectedStatements)
-        )) {
-        $actualItems = @($pair[0])
-        $expectedItems = @($pair[1])
-        if ($actualItems.Count -ne $expectedItems.Count) {
-            return $false
-        }
-        for ($index = 0; $index -lt $actualItems.Count; $index += 1) {
-            if (
-                $actualItems[$index].GetType() -ne
-                $expectedItems[$index].GetType() -or
-                (Get-NormalizedAstText -Ast $actualItems[$index]) -cne
-                (Get-NormalizedAstText -Ast $expectedItems[$index])
-            ) {
-                return $false
-            }
-        }
     }
     return $true
 }
@@ -824,6 +798,29 @@ $portableDesktopFiles = @(
                 -Block $packageTry.Body `
                 -Statement '$portableDesktop = $portableDesktopFiles[0].FullName'
         )
+        $portableQueryIndex = -1
+        $portableCountGuardIndex = -1
+        $portableAssignmentIndex = -1
+        $portableSubsystemGuardIndex = -1
+        if (
+            $portableQueryStatements.Count -eq 1 -and
+            $portableDesktopCountGuards.Count -eq 1 -and
+            $portableAssignmentStatements.Count -eq 1 -and
+            $portableDesktopGuards.Count -eq 1
+        ) {
+            $portableQueryIndex = $packageTry.Body.Statements.IndexOf(
+                $portableQueryStatements[0]
+            )
+            $portableCountGuardIndex = $packageTry.Body.Statements.IndexOf(
+                $portableDesktopCountGuards[0]
+            )
+            $portableAssignmentIndex = $packageTry.Body.Statements.IndexOf(
+                $portableAssignmentStatements[0]
+            )
+            $portableSubsystemGuardIndex = $packageTry.Body.Statements.IndexOf(
+                $portableDesktopGuards[0]
+            )
+        }
         if (
             $portableExtractionStatements.Count -eq 1 -and
             $portableQueryStatements.Count -eq 1 -and
@@ -836,12 +833,9 @@ $portableDesktopFiles = @(
             $portableDesktopGuards.Count -eq 1 -and
             $portableExtractionStatements[0].Extent.StartOffset -lt
             $portableQueryStatements[0].Extent.StartOffset -and
-            $portableQueryStatements[0].Extent.StartOffset -lt
-            $portableDesktopCountGuards[0].Extent.StartOffset -and
-            $portableDesktopCountGuards[0].Extent.StartOffset -lt
-            $portableAssignmentStatements[0].Extent.StartOffset -and
-            $portableAssignmentStatements[0].Extent.StartOffset -lt
-            $portableDesktopGuards[0].Extent.StartOffset
+            $portableCountGuardIndex -eq $portableQueryIndex + 1 -and
+            $portableAssignmentIndex -eq $portableQueryIndex + 2 -and
+            $portableSubsystemGuardIndex -eq $portableQueryIndex + 3
         ) {
             $portableProvenanceIsOwned = $true
         }

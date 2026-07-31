@@ -524,6 +524,75 @@ Export-ModuleMember `
             -Scenario "PE32 support surviving only in dead code"
     }
 
+    Invoke-Scenario -Name "PE helper cannot add an active Begin block" -Test {
+        $root = New-ReleaseFixture
+        # Keep EndBlock statement extents identical to the canonical helper.
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/WokRouter.ReleaseContract.psm1" `
+            -OldText @'
+function Get-PeSubsystem {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $Path)
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 0x40 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+        throw "Windows executable has no valid DOS header."
+    }
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+    if (
+        $peOffset -lt 0 -or
+        $peOffset + 24 + 70 -gt $bytes.Length -or
+        [Text.Encoding]::ASCII.GetString($bytes, $peOffset, 4) -cne "PE`0`0"
+    ) {
+        throw "Windows executable has no valid PE header."
+    }
+    $optionalHeader = $peOffset + 24
+    $magic = [BitConverter]::ToUInt16($bytes, $optionalHeader)
+    if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {
+        throw "Windows executable has an unsupported optional header."
+    }
+    return [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)
+}
+'@ `
+            -NewText @'
+function Get-PeSubsystem {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $Path)
+
+    begin {
+        if ($Path -match "never-match-review") {
+            throw "unexpected path"
+        }
+    }
+    end {
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 0x40 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+        throw "Windows executable has no valid DOS header."
+    }
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+    if (
+        $peOffset -lt 0 -or
+        $peOffset + 24 + 70 -gt $bytes.Length -or
+        [Text.Encoding]::ASCII.GetString($bytes, $peOffset, 4) -cne "PE`0`0"
+    ) {
+        throw "Windows executable has no valid PE header."
+    }
+    $optionalHeader = $peOffset + 24
+    $magic = [BitConverter]::ToUInt16($bytes, $optionalHeader)
+    if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {
+        throw "Windows executable has an unsupported optional header."
+    }
+    return [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)
+    }
+}
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "exact script-scope PE subsystem helper" `
+            -Scenario "helper with an active Begin block"
+    }
+
     Invoke-Scenario -Name "Portable desktop query must come from the extracted archive" -Test {
         $root = New-ReleaseFixture
         Edit-FixtureFile `
@@ -558,6 +627,40 @@ Export-ModuleMember `
             -Root $root `
             -ExpectedText "Portable desktop extraction provenance" `
             -Scenario "Portable desktop selected from the source executable"
+    }
+
+    Invoke-Scenario -Name "Portable desktop query cannot be overwritten before validation" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+    $portableDesktopFiles = @(
+        Get-ChildItem `
+            -LiteralPath $portableExtracted `
+            -Force `
+            -Recurse `
+            -File |
+            Where-Object Name -CEQ "wokrouter-desktop.exe"
+    )
+'@ `
+            -NewText @'
+    $portableDesktopFiles = @(
+        Get-ChildItem `
+            -LiteralPath $portableExtracted `
+            -Force `
+            -Recurse `
+            -File |
+            Where-Object Name -CEQ "wokrouter-desktop.exe"
+    )
+    $portableDesktopFiles = @(
+        Get-Item -LiteralPath $desktop
+    )
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "Portable desktop extraction provenance" `
+            -Scenario "Portable candidate reassigned from the source executable"
     }
 
     Invoke-Scenario -Name "source MSI and Portable GUI checks cannot be removed" -Test {
