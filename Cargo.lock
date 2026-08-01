@@ -5483,12 +5483,15 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 name = "wokrouter-cli"
 version = "0.1.22"
 dependencies = [
+ "async-trait",
  "secrecy",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "wiremock",
  "wokrouter-platform",
  "wokrouter-storage",
  "wokrouter-wokcore-client",
@@ -5498,7 +5501,10 @@ dependencies = [
 name = "wokrouter-desktop"
 version = "0.1.22"
 dependencies = [
+ "fs4",
+ "libc",
  "secrecy",
+ "semver",
  "serde",
  "serde_json",
  "tauri",
@@ -5507,6 +5513,8 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "uuid",
+ "windows-sys 0.61.2",
+ "wiremock",
  "wokrouter-cli",
  "wokrouter-platform",
  "wokrouter-storage",
@@ -5519,6 +5527,7 @@ name = "wokrouter-platform"
 version = "0.1.22"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "flate2",
  "fs4",
  "jiff",

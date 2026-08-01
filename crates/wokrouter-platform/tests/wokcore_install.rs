@@ -1,6 +1,6 @@
 #![cfg(feature = "test-support")]
 
-use std::{fs, path::Path};
+use std::{fs, path::Path, sync::mpsc};
 
 use semver::Version;
 use sha2::{Digest, Sha256};
@@ -11,8 +11,9 @@ use wiremock::{
     matchers::{method, path},
 };
 use wokrouter_platform::{
-    AppPaths, WokCoreInstallError, WokCoreInstallOutcome, WokCoreInstallSource,
-    install_missing_wokcore,
+    AppPaths, WokCoreInstallError, WokCoreInstallOutcome, WokCoreInstallPhase,
+    WokCoreInstallProgress, WokCoreInstallProgressObserver, WokCoreInstallSource,
+    install_missing_wokcore, install_missing_wokcore_with_progress,
 };
 
 const PUBLIC_KEY: &str = include_str!("fixtures/wokcore-install/minisign.pub");
@@ -42,6 +43,23 @@ const UNIX_ARCHIVE: &[u8] = &[
 const ARCHIVE: &[u8] = WINDOWS_ARCHIVE;
 #[cfg(not(windows))]
 const ARCHIVE: &[u8] = UNIX_ARCHIVE;
+
+#[derive(Default)]
+struct RecordingProgress(Vec<WokCoreInstallProgress>);
+
+impl WokCoreInstallProgressObserver for RecordingProgress {
+    fn on_progress(&mut self, event: WokCoreInstallProgress) {
+        self.0.push(event);
+    }
+}
+
+struct DisconnectedProgress(mpsc::Sender<WokCoreInstallProgress>);
+
+impl WokCoreInstallProgressObserver for DisconnectedProgress {
+    fn on_progress(&mut self, event: WokCoreInstallProgress) {
+        let _ = self.0.send(event);
+    }
+}
 
 #[test]
 fn archive_fixtures_do_not_drift_from_signed_manifest() {
@@ -84,11 +102,12 @@ fn archive_fixtures_do_not_drift_from_signed_manifest() {
 
 #[test]
 fn production_source_is_pinned_and_test_sources_are_ipv4_loopback_only() {
-    let production = WokCoreInstallSource::production(PUBLIC_KEY).unwrap();
+    let production = WokCoreInstallSource::production().unwrap();
     assert_eq!(
         production.origin().as_str(),
         "https://github.com/hongjiadev/wokcore/releases/latest/download/"
     );
+    assert_eq!(production.public_key_id(), "7EF262CD8E9FE136");
 
     assert!(
         WokCoreInstallSource::loopback(
@@ -161,6 +180,108 @@ async fn signed_release_is_downloaded_and_atomically_registered() {
                 .into_owned(),
         ]
     );
+}
+
+#[tokio::test]
+async fn signed_release_reports_monotonic_download_and_authoritative_install_phases() {
+    let server = signed_release_server(ARCHIVE).await;
+    let fixture = tempdir().unwrap();
+    let paths = app_paths(fixture.path());
+    let source = WokCoreInstallSource::loopback(
+        Url::parse(&format!("{}/releases/", server.uri())).unwrap(),
+        PUBLIC_KEY,
+    )
+    .unwrap();
+    let mut progress = RecordingProgress::default();
+
+    let outcome = install_missing_wokcore_with_progress(&paths, &source, &mut progress)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        WokCoreInstallOutcome::Installed {
+            version,
+            ..
+        } if version == Version::new(1, 2, 3)
+    ));
+    assert_eq!(
+        progress.0.first(),
+        Some(&WokCoreInstallProgress {
+            phase: WokCoreInstallPhase::CheckingRelease,
+            target_version: None,
+            bytes_completed: None,
+            bytes_total: None,
+        })
+    );
+    let downloads = progress
+        .0
+        .iter()
+        .filter(|event| event.phase == WokCoreInstallPhase::Downloading)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        downloads.first().and_then(|event| event.bytes_completed),
+        Some(0)
+    );
+    assert_eq!(
+        downloads.last().and_then(|event| event.bytes_completed),
+        Some(ARCHIVE.len() as u64)
+    );
+    assert!(downloads.iter().all(|event| {
+        event.target_version == Some(Version::new(1, 2, 3))
+            && event.bytes_total == Some(ARCHIVE.len() as u64)
+            && event.bytes_completed <= event.bytes_total
+    }));
+    assert!(
+        downloads
+            .windows(2)
+            .all(|pair| pair[0].bytes_completed <= pair[1].bytes_completed)
+    );
+    let verifying = WokCoreInstallProgress {
+        phase: WokCoreInstallPhase::Verifying,
+        target_version: Some(Version::new(1, 2, 3)),
+        bytes_completed: None,
+        bytes_total: None,
+    };
+    let installing = WokCoreInstallProgress {
+        phase: WokCoreInstallPhase::Installing,
+        target_version: Some(Version::new(1, 2, 3)),
+        bytes_completed: None,
+        bytes_total: None,
+    };
+    let verifying_index = progress
+        .0
+        .iter()
+        .position(|event| event == &verifying)
+        .unwrap();
+    let installing_index = progress
+        .0
+        .iter()
+        .position(|event| event == &installing)
+        .unwrap();
+    assert!(verifying_index < installing_index);
+    assert_eq!(installing_index, progress.0.len() - 1);
+}
+
+#[tokio::test]
+async fn a_disconnected_progress_receiver_does_not_change_the_install_result() {
+    let server = signed_release_server(ARCHIVE).await;
+    let fixture = tempdir().unwrap();
+    let paths = app_paths(fixture.path());
+    let source = WokCoreInstallSource::loopback(
+        Url::parse(&format!("{}/releases/", server.uri())).unwrap(),
+        PUBLIC_KEY,
+    )
+    .unwrap();
+    let (sender, receiver) = mpsc::channel();
+    drop(receiver);
+    let mut observer = DisconnectedProgress(sender);
+
+    let outcome = install_missing_wokcore_with_progress(&paths, &source, &mut observer)
+        .await
+        .unwrap();
+
+    assert!(matches!(outcome, WokCoreInstallOutcome::Installed { .. }));
 }
 
 #[tokio::test]
@@ -328,7 +449,10 @@ async fn an_existing_compatible_install_is_never_overwritten() {
     )
     .unwrap();
 
-    let outcome = install_missing_wokcore(&paths, &unreachable).await.unwrap();
+    let mut progress = RecordingProgress::default();
+    let outcome = install_missing_wokcore_with_progress(&paths, &unreachable, &mut progress)
+        .await
+        .unwrap();
 
     assert_eq!(
         outcome,
@@ -340,6 +464,7 @@ async fn an_existing_compatible_install_is_never_overwritten() {
         fs::read(executable).unwrap(),
         b"newer compatible executable"
     );
+    assert!(progress.0.is_empty());
 }
 
 #[tokio::test]
@@ -385,9 +510,22 @@ async fn artifact_hash_mismatch_leaves_no_install_or_record() {
     )
     .unwrap();
 
-    let error = install_missing_wokcore(&paths, &source).await.unwrap_err();
+    let mut progress = RecordingProgress::default();
+    let error = install_missing_wokcore_with_progress(&paths, &source, &mut progress)
+        .await
+        .unwrap_err();
 
     assert_eq!(error, WokCoreInstallError::ArtifactHashMismatch);
+    assert_no_installing(&progress);
+    assert_eq!(
+        progress.0.last(),
+        Some(&WokCoreInstallProgress {
+            phase: WokCoreInstallPhase::Verifying,
+            target_version: Some(Version::new(1, 2, 3)),
+            bytes_completed: None,
+            bytes_total: None,
+        })
+    );
     assert!(!paths.wokcore_install_record.exists());
     assert!(
         !paths
@@ -395,6 +533,26 @@ async fn artifact_hash_mismatch_leaves_no_install_or_record() {
             .join(format!("wokcore{}", std::env::consts::EXE_SUFFIX))
             .exists()
     );
+}
+
+#[tokio::test]
+async fn artifact_size_mismatch_never_reports_installing() {
+    let server = signed_release_server(&ARCHIVE[..ARCHIVE.len() - 1]).await;
+    let fixture = tempdir().unwrap();
+    let paths = app_paths(fixture.path());
+    let source = WokCoreInstallSource::loopback(
+        Url::parse(&format!("{}/releases/", server.uri())).unwrap(),
+        PUBLIC_KEY,
+    )
+    .unwrap();
+    let mut progress = RecordingProgress::default();
+
+    let error = install_missing_wokcore_with_progress(&paths, &source, &mut progress)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, WokCoreInstallError::ArtifactSizeMismatch);
+    assert_no_installing(&progress);
 }
 
 #[tokio::test]
@@ -432,10 +590,22 @@ async fn invalid_manifest_signature_is_rejected_before_artifact_download() {
     )
     .unwrap();
 
-    let error = install_missing_wokcore(&paths, &source).await.unwrap_err();
+    let mut progress = RecordingProgress::default();
+    let error = install_missing_wokcore_with_progress(&paths, &source, &mut progress)
+        .await
+        .unwrap_err();
 
     assert_eq!(error, WokCoreInstallError::InvalidSignature);
     assert!(!paths.wokcore_install_record.exists());
+    assert_eq!(
+        progress.0,
+        [WokCoreInstallProgress {
+            phase: WokCoreInstallPhase::CheckingRelease,
+            target_version: None,
+            bytes_completed: None,
+            bytes_total: None,
+        }]
+    );
 }
 
 #[tokio::test]
@@ -453,6 +623,33 @@ async fn unsafe_install_directory_fails_before_network_access() {
     let error = install_missing_wokcore(&paths, &source).await.unwrap_err();
 
     assert_eq!(error, WokCoreInstallError::UnsafeInstallLocation);
+}
+
+#[tokio::test]
+async fn unreachable_release_reports_only_an_unversioned_checking_prefix() {
+    let fixture = tempdir().unwrap();
+    let paths = app_paths(fixture.path());
+    let source = WokCoreInstallSource::loopback(
+        Url::parse("http://127.0.0.1:9/releases/").unwrap(),
+        PUBLIC_KEY,
+    )
+    .unwrap();
+    let mut progress = RecordingProgress::default();
+
+    let error = install_missing_wokcore_with_progress(&paths, &source, &mut progress)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, WokCoreInstallError::DownloadFailed);
+    assert_eq!(
+        progress.0,
+        [WokCoreInstallProgress {
+            phase: WokCoreInstallPhase::CheckingRelease,
+            target_version: None,
+            bytes_completed: None,
+            bytes_total: None,
+        }]
+    );
 }
 
 #[tokio::test]
@@ -589,6 +786,15 @@ fn app_paths(root: &Path) -> AppPaths {
         log_dir: root.join("logs"),
         wokcore_discovery_file: root.join("WokCore").join("runtime").join("discovery.json"),
     }
+}
+
+fn assert_no_installing(progress: &RecordingProgress) {
+    assert!(
+        progress
+            .0
+            .iter()
+            .all(|event| event.phase != WokCoreInstallPhase::Installing)
+    );
 }
 
 #[cfg(unix)]

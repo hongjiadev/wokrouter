@@ -14,12 +14,19 @@ path = "src/lib.rs"
 name = "wokrouter-desktop"
 path = "src/main.rs"
 
+[features]
+default = []
+packaged-acceptance = ["wokrouter-cli/packaged-acceptance", "tauri/custom-protocol"]
+
 [dependencies]
+fs4.workspace = true
 secrecy.workspace = true
+semver.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tauri.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["process"] }
+tokio = { workspace = true, features = ["io-util", "process"] }
 uuid.workspace = true
 zeroize.workspace = true
 wokrouter-cli = { path = "../../cli" }
@@ -27,9 +34,17 @@ wokrouter-platform = { path = "../../../crates/wokrouter-platform" }
 wokrouter-storage = { path = "../../../crates/wokrouter-storage" }
 wokrouter-wokcore-client = { path = "../../../crates/wokrouter-wokcore-client" }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+
 [build-dependencies]
 tauri-build.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
 tempfile.workspace = true
+wiremock.workspace = true
+wokrouter-platform = { path = "../../../crates/wokrouter-platform", features = ["test-support"] }

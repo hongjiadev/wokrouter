@@ -13,6 +13,7 @@ $clean = @(
     "100644 0000000000000000000000000000000000000000 0`t.github/workflows/ci.yml",
     "100644 0000000000000000000000000000000000000000 0`tnotes/daily-progress.md",
     "100644 0000000000000000000000000000000000000000 0`trelease/minisign.pub",
+    "100644 0000000000000000000000000000000000000000 0`tcrates/wokrouter-platform/src/wokcore_install/wokcore-minisign.pub",
     "100644 0000000000000000000000000000000000000000 0`tcrates/wokrouter-platform/tests/fixtures/wokcore-install/minisign.pub",
     "100644 0000000000000000000000000000000000000000 0`tcrates/wokrouter-platform/tests/fixtures/wokcore-install/wokcore-update-v1.json.minisig",
     "100644 0000000000000000000000000000000000000000 0`tcrates/wokrouter-platform/tests/fixtures/wokcore-install/wokcore-update-v2.json.minisig"

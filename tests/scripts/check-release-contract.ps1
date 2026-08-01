@@ -31,10 +31,23 @@ $verifierPath = Join-Path $rootPath "tests/release/verify-release-bundle.ps1"
 $publicKeyPath = Join-Path $rootPath "release/minisign.pub"
 $cargoManifestPath = Join-Path $rootPath "Cargo.toml"
 $cargoLockPath = Join-Path $rootPath "Cargo.lock"
+$cliManifestPath = Join-Path $rootPath "apps/cli/Cargo.toml"
+$cliMainPath = Join-Path $rootPath "apps/cli/src/main.rs"
+$cliAcceptanceMainPath = Join-Path `
+    $rootPath `
+    "apps/cli/src/bin/wokrouter-packaged-acceptance.rs"
+$cliStartPath = Join-Path $rootPath "apps/cli/src/commands/start.rs"
+$cliStartTestsPath = Join-Path $rootPath "apps/cli/src/commands/start/tests.rs"
 $packageManifestPath = Join-Path $rootPath "apps/desktop/package.json"
+$sidecarStagingPath = Join-Path $rootPath "apps/desktop/scripts/stage-sidecars.mjs"
+$desktopManifestPath = Join-Path $rootPath "apps/desktop/src-tauri/Cargo.toml"
+$desktopMainPath = Join-Path $rootPath "apps/desktop/src-tauri/src/main.rs"
 $tauriConfigurationPath = Join-Path `
     $rootPath `
     "apps/desktop/src-tauri/tauri.conf.json"
+$eventCapabilityPath = Join-Path `
+    $rootPath `
+    "apps/desktop/src-tauri/capabilities/main.json"
 $failures = [System.Collections.Generic.List[string]]::new()
 
 function Add-Failure {
@@ -68,6 +81,349 @@ function Get-SourceMatchIndex {
 
     $match = [regex]::Match($Source, $Pattern)
     return $(if ($match.Success) { $match.Index } else { -1 })
+}
+
+function Test-ContainsExactBlock {
+    param(
+        [Parameter(Mandatory)][string] $Source,
+        [Parameter(Mandatory)][string] $Block
+    )
+
+    return $Source.Contains($Block.Replace("`r`n", "`n"))
+}
+
+function Test-ContainsExactLine {
+    param(
+        [Parameter(Mandatory)][string] $Source,
+        [Parameter(Mandatory)][string] $Line
+    )
+
+    $pattern = '(?m)^[ \t]*' + [regex]::Escape($Line) + '[ \t]*$'
+    return [regex]::Matches($Source, $pattern).Count -eq 1
+}
+
+function Get-PowerShellAst {
+    param(
+        [Parameter(Mandatory)][string] $Source,
+        [Parameter(Mandatory)][string] $Description
+    )
+
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput(
+        $Source,
+        [ref] $tokens,
+        [ref] $parseErrors
+    )
+    if ($parseErrors.Count -ne 0) {
+        throw "$Description contains invalid PowerShell syntax."
+    }
+    return $ast
+}
+
+function Get-NormalizedAstText {
+    param([Parameter(Mandatory)] $Ast)
+
+    return $Ast.Extent.Text.Replace("`r`n", "`n").Trim()
+}
+
+function Test-ExactFunctionDefinitionAst {
+    param(
+        [Parameter(Mandatory)] $Actual,
+        [Parameter(Mandatory)] $Expected
+    )
+
+    if (
+        $Actual.Name -cne $Expected.Name -or
+        $Actual.IsFilter -ne $Expected.IsFilter -or
+        $Actual.IsWorkflow -ne $Expected.IsWorkflow -or
+        (Get-NormalizedAstText -Ast $Actual) -cne
+        (Get-NormalizedAstText -Ast $Expected)
+    ) {
+        return $false
+    }
+    return $true
+}
+
+function Get-ExactDirectStatementAst {
+    param(
+        [Parameter(Mandatory)] $Block,
+        [Parameter(Mandatory)][string] $Statement
+    )
+
+    $expected = $Statement.Replace("`r`n", "`n").Trim()
+    return @(
+        $Block.Statements |
+            Where-Object {
+                (Get-NormalizedAstText -Ast $_) -ceq $expected
+            }
+    )
+}
+
+function Get-VariableAssignmentAst {
+    param(
+        [Parameter(Mandatory)] $Ast,
+        [Parameter(Mandatory)][string] $Name
+    )
+
+    return @(
+        $Ast.FindAll(
+            {
+                param($node)
+
+                return (
+                    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                    $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+                    $node.Left.VariablePath.UserPath -ceq $Name
+                )
+            },
+            $true
+        )
+    )
+}
+
+function Get-ExactGuardAst {
+    param(
+        [Parameter(Mandatory)] $Ast,
+        [Parameter(Mandatory)][string] $Condition,
+        [Parameter(Mandatory)][string] $ThrowStatement
+    )
+
+    return @(
+        $Ast.FindAll(
+            {
+                param($node)
+
+                if (
+                    $node -isnot [Management.Automation.Language.IfStatementAst] -or
+                    $node.Clauses.Count -ne 1 -or
+                    $null -ne $node.ElseClause
+                ) {
+                    return $false
+                }
+                $statements = @($node.Clauses[0].Item2.Statements)
+                return (
+                    $node.Clauses[0].Item1.Extent.Text.Trim() -ceq $Condition -and
+                    $statements.Count -eq 1 -and
+                    $statements[0] -is [Management.Automation.Language.ThrowStatementAst] -and
+                    $statements[0].Extent.Text.Trim() -ceq $ThrowStatement
+                )
+            },
+            $true
+        )
+    )
+}
+
+function Get-RustCodeView {
+    param([Parameter(Mandatory)][string] $Source)
+
+    $result = [Text.StringBuilder]::new($Source.Length)
+    $index = 0
+    $lineComment = $false
+    $blockDepth = 0
+    [char] $quote = [char] 0
+    $escaped = $false
+    $rawHashCount = -1
+    while ($index -lt $Source.Length) {
+        $current = $Source[$index]
+        $next = if ($index + 1 -lt $Source.Length) {
+            $Source[$index + 1]
+        } else {
+            [char] 0
+        }
+
+        if ($lineComment) {
+            if ($current -eq "`r" -or $current -eq "`n") {
+                $lineComment = $false
+                $null = $result.Append($current)
+            } else {
+                $null = $result.Append(" ")
+            }
+            $index += 1
+            continue
+        }
+
+        if ($blockDepth -gt 0) {
+            if ($current -eq "/" -and $next -eq "*") {
+                $blockDepth += 1
+                $null = $result.Append("  ")
+                $index += 2
+                continue
+            }
+            if ($current -eq "*" -and $next -eq "/") {
+                $blockDepth -= 1
+                $null = $result.Append("  ")
+                $index += 2
+                continue
+            }
+            if ($current -eq "`r" -or $current -eq "`n") {
+                $null = $result.Append($current)
+            } else {
+                $null = $result.Append(" ")
+            }
+            $index += 1
+            continue
+        }
+
+        if ($rawHashCount -ge 0) {
+            if ($current -eq '"') {
+                $closingMatches = (
+                    $index + $rawHashCount -lt $Source.Length
+                )
+                for (
+                    $hashIndex = 1;
+                    $closingMatches -and $hashIndex -le $rawHashCount;
+                    $hashIndex += 1
+                ) {
+                    if ($Source[$index + $hashIndex] -ne "#") {
+                        $closingMatches = $false
+                    }
+                }
+                if ($closingMatches) {
+                    $closingLength = 1 + $rawHashCount
+                    $null = $result.Append("".PadRight($closingLength))
+                    $index += $closingLength
+                    $rawHashCount = -1
+                    continue
+                }
+            }
+            if ($current -eq "`r" -or $current -eq "`n") {
+                $null = $result.Append($current)
+            } else {
+                $null = $result.Append(" ")
+            }
+            $index += 1
+            continue
+        }
+
+        if ($quote -ne [char] 0) {
+            if ($current -eq "`r" -or $current -eq "`n") {
+                $null = $result.Append($current)
+            } else {
+                $null = $result.Append(" ")
+            }
+            if ($escaped) {
+                $escaped = $false
+            } elseif ($current -eq "\") {
+                $escaped = $true
+            } elseif ($current -eq $quote) {
+                $quote = [char] 0
+            }
+            $index += 1
+            continue
+        }
+
+        $previous = if ($index -gt 0) {
+            $Source[$index - 1]
+        } else {
+            [char] 0
+        }
+        $atTokenStart = (
+            $index -eq 0 -or
+            [string] $previous -cnotmatch '[A-Za-z0-9_]'
+        )
+
+        $rawCursor = -1
+        if ($atTokenStart -and $current -eq "r") {
+            $rawCursor = $index + 1
+        } elseif (
+            $atTokenStart -and
+            $current -in @("b", "c") -and
+            $next -eq "r"
+        ) {
+            $rawCursor = $index + 2
+        }
+        if ($rawCursor -ge 0) {
+            $hashCount = 0
+            while (
+                $rawCursor -lt $Source.Length -and
+                $Source[$rawCursor] -eq "#"
+            ) {
+                $hashCount += 1
+                $rawCursor += 1
+            }
+            if (
+                $rawCursor -lt $Source.Length -and
+                $Source[$rawCursor] -eq '"'
+            ) {
+                $openingLength = $rawCursor - $index + 1
+                $null = $result.Append("".PadRight($openingLength))
+                $index += $openingLength
+                $rawHashCount = $hashCount
+                continue
+            }
+        }
+
+        if ($current -eq "/" -and $next -eq "/") {
+            $lineComment = $true
+            $null = $result.Append("  ")
+            $index += 2
+            continue
+        }
+        if ($current -eq "/" -and $next -eq "*") {
+            $blockDepth = 1
+            $null = $result.Append("  ")
+            $index += 2
+            continue
+        }
+
+        $quoteIndex = -1
+        if ($current -eq '"' -or $current -eq "'") {
+            $quoteIndex = $index
+        } elseif (
+            $atTokenStart -and
+            $current -in @("b", "c") -and
+            $next -in @('"', "'")
+        ) {
+            $quoteIndex = $index + 1
+        }
+        if ($quoteIndex -ge 0) {
+            $isCharacter = $Source[$quoteIndex] -eq "'"
+            $hasCharacterEnd = -not $isCharacter
+            if ($isCharacter) {
+                $characterCursor = $quoteIndex + 1
+                $characterEscaped = $false
+                while (
+                    $characterCursor -lt $Source.Length -and
+                    $Source[$characterCursor] -notin @("`r", "`n")
+                ) {
+                    $character = $Source[$characterCursor]
+                    if ($characterEscaped) {
+                        $characterEscaped = $false
+                    } elseif ($character -eq "\") {
+                        $characterEscaped = $true
+                    } elseif ($character -eq "'") {
+                        $hasCharacterEnd = $true
+                        break
+                    }
+                    $characterCursor += 1
+                }
+            }
+            if ($hasCharacterEnd) {
+                $openingLength = $quoteIndex - $index + 1
+                $null = $result.Append("".PadRight($openingLength))
+                $quote = $Source[$quoteIndex]
+                $escaped = $false
+                $index += $openingLength
+                continue
+            }
+        }
+        $null = $result.Append($current)
+        $index += 1
+    }
+    return $result.ToString()
+}
+
+function Get-ActiveWindowsSubsystemAttributes {
+    param([Parameter(Mandatory)][string] $Source)
+
+    $activeSource = Get-RustCodeView -Source $Source
+    return @(
+        [regex]::Matches(
+            $activeSource,
+            '(?ms)^[ \t]*#![ \t]*\[[^\]]*\bwindows_subsystem\b[^\]]*\]'
+        )
+    )
 }
 
 function Read-BoundedUtf8Text {
@@ -193,8 +549,16 @@ foreach ($path in @(
         $publicKeyPath,
         $cargoManifestPath,
         $cargoLockPath,
+        $cliManifestPath,
+        $cliMainPath,
+        $cliAcceptanceMainPath,
+        $cliStartPath,
+        $cliStartTestsPath,
         $packageManifestPath,
-        $tauriConfigurationPath
+        $sidecarStagingPath,
+        $desktopMainPath,
+        $tauriConfigurationPath,
+        $eventCapabilityPath
     )) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         Add-Failure -Message "Required release contract file is missing: $path"
@@ -202,6 +566,1158 @@ foreach ($path in @(
 }
 
 if ($failures.Count -eq 0) {
+    try {
+        $eventCapability = Read-BoundedUtf8Text `
+            -Path $eventCapabilityPath `
+            -MaximumBytes 16384 |
+            ConvertFrom-Json
+        $properties = @($eventCapability.PSObject.Properties.Name | Sort-Object)
+        $expectedProperties = @(
+            '$schema',
+            'description',
+            'identifier',
+            'permissions',
+            'windows'
+        )
+        $windows = @($eventCapability.windows)
+        $permissions = @($eventCapability.permissions)
+        if (
+            (Compare-Object $properties $expectedProperties) -or
+            $eventCapability.'$schema' -cne '../gen/schemas/desktop-schema.json' -or
+            $eventCapability.identifier -cne 'main-event-listener' -or
+            $windows.Count -ne 1 -or
+            $windows[0] -cne 'main' -or
+            $permissions.Count -ne 2 -or
+            $permissions[0] -cne 'core:event:allow-listen' -or
+            $permissions[1] -cne 'core:event:allow-unlisten'
+        ) {
+            throw "unexpected capability shape"
+        }
+    }
+    catch {
+        Add-Failure `
+            -Message "Release desktop must package the main window's exact event listen/unlisten capability."
+    }
+
+    $desktopMain = Read-BoundedUtf8Text `
+        -Path $desktopMainPath `
+        -MaximumBytes 131072
+    $desktopSubsystemAttribute = (
+        '#![cfg_attr(all(windows, not(debug_assertions)), ' +
+        'windows_subsystem = "windows")]'
+    )
+    if (-not $desktopMain.StartsWith(
+            "$desktopSubsystemAttribute`n",
+            [StringComparison]::Ordinal
+        )) {
+        Add-Failure `
+            -Message "Desktop main must begin with the exact release-only GUI subsystem attribute."
+    }
+
+    $cliManifest = Read-BoundedUtf8Text `
+        -Path $cliManifestPath `
+        -MaximumBytes 131072
+    $normalBinBlock = @'
+[[bin]]
+name = "wokrouter"
+path = "src/main.rs"
+
+[[bin]]
+'@
+    $acceptanceBinBlock = @'
+[[bin]]
+name = "wokrouter-packaged-acceptance"
+path = "src/bin/wokrouter-packaged-acceptance.rs"
+required-features = ["packaged-acceptance"]
+'@
+    if (
+        @([regex]::Matches($cliManifest, '(?m)^autobins = false$')).Count -ne 1 -or
+        @([regex]::Matches($cliManifest, '(?m)^default = \[\]$')).Count -ne 1 -or
+        @([regex]::Matches(
+                $cliManifest,
+                '(?m)^packaged-acceptance = \["wokrouter-platform/test-support"\]$'
+            )).Count -ne 1 -or
+        @([regex]::Matches($cliManifest, '(?m)^\[\[bin\]\]$')).Count -ne 2 -or
+        -not (Test-ContainsExactBlock -Source $cliManifest -Block $normalBinBlock) -or
+        -not (Test-ContainsExactBlock -Source $cliManifest -Block $acceptanceBinBlock)
+    ) {
+        Add-Failure `
+            -Message "The packaged acceptance CLI must be one explicit non-default, required-feature gated bin beside the normal CLI."
+    }
+
+    $cliMain = Read-BoundedUtf8Text -Path $cliMainPath -MaximumBytes 131072
+    $cliMainCode = Get-RustCodeView -Source $cliMain
+    if (
+        $cliMainCode -match '(?i)packaged[-_]?acceptance' -or
+        $cliMain.Contains('WOKROUTER_PACKAGED_ACCEPTANCE_')
+    ) {
+        Add-Failure `
+            -Message "The normal CLI must not reference packaged acceptance features, entrypoints, or environment."
+    }
+
+    $cliStart = Read-BoundedUtf8Text -Path $cliStartPath -MaximumBytes 262144
+    $cliStartCode = Get-RustCodeView -Source $cliStart
+    $productionSourceBlock = @'
+fn production_install_source() -> Result<WokCoreInstallSource, WokCoreInstallError> {
+    WokCoreInstallSource::production()
+}
+'@
+    $productionSourceCode = Get-RustCodeView -Source $productionSourceBlock
+    if (
+        -not (Test-ContainsExactBlock -Source $cliStartCode -Block $productionSourceCode) -or
+        @([regex]::Matches($cliStartCode, '\bproduction_install_source\(\)')).Count -ne 3 -or
+        $cliStartCode.Contains('configured_install_source') -or
+        $cliStartCode -match '#\s*\[\s*cfg\s*\(\s*any\s*\(\s*\)\s*\)\s*\]'
+    ) {
+        Add-Failure `
+            -Message "The normal CLI install source must remain production under every Cargo feature combination."
+    }
+
+    $cliStartTests = Read-BoundedUtf8Text `
+        -Path $cliStartTestsPath `
+        -MaximumBytes 1048576
+    $cliStartTestsCode = Get-RustCodeView -Source $cliStartTests
+    $normalCliBehaviorTestHeader = @'
+#[cfg(feature = "packaged-acceptance")]
+#[tokio::test]
+async fn normal_cli_entrypoint_ignores_acceptance_source_with_all_features() {
+'@
+    $normalCliBehaviorTestHeaderCode = Get-RustCodeView `
+        -Source $normalCliBehaviorTestHeader
+    $normalCliBehaviorRawHeaders = @([regex]::Matches(
+            $cliStartTests,
+            [regex]::Escape($normalCliBehaviorTestHeader)
+        ))
+    $normalCliBehaviorCodeHeaders = @([regex]::Matches(
+            $cliStartTestsCode,
+            [regex]::Escape($normalCliBehaviorTestHeaderCode)
+        ))
+    if (
+        $normalCliBehaviorRawHeaders.Count -ne 1 -or
+        $normalCliBehaviorCodeHeaders.Count -ne 1 -or
+        $normalCliBehaviorRawHeaders[0].Index -ne $normalCliBehaviorCodeHeaders[0].Index -or
+        $cliStartTestsCode -match '#\s*\[\s*ignore(?:\s*\([^\]]*\))?\s*\]' -or
+        @([regex]::Matches(
+                $cliStartTestsCode,
+                '\bnormal_cli_entrypoint_ignores_acceptance_source_with_all_features\b'
+            )).Count -ne 1 -or
+        @([regex]::Matches(
+                $cliStartTestsCode,
+                '\bexecute_with_options\('
+            )).Count -ne 1 -or
+        @([regex]::Matches(
+                $cliStartTestsCode,
+                '\bRuntimeSelectorHarness::new\('
+            )).Count -ne 1 -or
+        $cliStartTests -notmatch
+        [regex]::Escape('"{\"code\":\"start_failed\"}\n"') -or
+        $cliStartTests -notmatch
+        [regex]::Escape('contains("invalid_source")')
+    ) {
+        Add-Failure `
+            -Message "The all-features normal CLI behavior test must execute the real entrypoint and reject acceptance-source routing."
+    }
+
+    $cliAcceptanceMain = Read-BoundedUtf8Text `
+        -Path $cliAcceptanceMainPath `
+        -MaximumBytes 131072
+    $cliAcceptanceMainCode = Get-RustCodeView -Source $cliAcceptanceMain
+    if (
+        @([regex]::Matches(
+                $cliAcceptanceMainCode,
+                '\bexecute_packaged_acceptance_with_options\('
+            )).Count -ne 1 -or
+        -not $cliAcceptanceMain.Contains(
+            '["start", "--json", "--progress-jsonl"]'
+        )
+    ) {
+        Add-Failure `
+            -Message "The packaged acceptance CLI must expose only the exact structured start command."
+    }
+
+    $desktopManifest = Read-BoundedUtf8Text `
+        -Path $desktopManifestPath `
+        -MaximumBytes 131072
+    $desktopAcceptanceFeatures = @'
+[features]
+default = []
+packaged-acceptance = ["wokrouter-cli/packaged-acceptance", "tauri/custom-protocol"]
+'@
+    if (
+        -not (Test-ContainsExactBlock `
+            -Source $desktopManifest `
+            -Block $desktopAcceptanceFeatures) -or
+        @([regex]::Matches(
+                $desktopManifest,
+                '(?m)^packaged-acceptance = \["wokrouter-cli/packaged-acceptance", "tauri/custom-protocol"\]$'
+            )).Count -ne 1
+    ) {
+        Add-Failure `
+            -Message "The desktop acceptance seam must be one exact non-default feature gated through the acceptance CLI."
+    }
+
+    $sidecarStaging = Read-BoundedUtf8Text `
+        -Path $sidecarStagingPath `
+        -MaximumBytes 262144
+    $sidecarStagingCode = Get-RustCodeView -Source $sidecarStaging
+    $cargoBuildArgumentsBlock = @'
+export function cargoBuildArguments(targetTriple) {
+  return [
+    "build",
+    "--locked",
+    "--release",
+    "--target",
+    supportedTargetTriple(targetTriple),
+    "-p",
+    "wokrouter-cli",
+    "--bin",
+    "wokrouter",
+    "--no-default-features",
+  ];
+}
+'@
+    $cargoBuildArgumentsCode = Get-RustCodeView -Source $cargoBuildArgumentsBlock
+    $sidecarArgumentsValid = $false
+    try {
+        $nodeCommand = Get-Command "node" -CommandType Application -ErrorAction Stop
+        $moduleUri = [Uri]::new($sidecarStagingPath).AbsoluteUri
+        $probe = @"
+import { cargoBuildArguments } from '$moduleUri';
+process.stdout.write(JSON.stringify(cargoBuildArguments('x86_64-pc-windows-msvc')));
+"@
+        $sidecarArgumentsJson = & $nodeCommand.Source `
+            --input-type=module `
+            --eval $probe
+        if ($LASTEXITCODE -ne 0) {
+            throw "Node exited with code $LASTEXITCODE"
+        }
+        $sidecarArguments = [string[]]($sidecarArgumentsJson | ConvertFrom-Json)
+        $expectedSidecarArguments = @(
+            "build",
+            "--locked",
+            "--release",
+            "--target",
+            "x86_64-pc-windows-msvc",
+            "-p",
+            "wokrouter-cli",
+            "--bin",
+            "wokrouter",
+            "--no-default-features"
+        )
+        $sidecarArgumentsValid = (
+            $sidecarArguments.Count -eq $expectedSidecarArguments.Count -and
+            -not (Compare-Object `
+                -ReferenceObject $expectedSidecarArguments `
+                -DifferenceObject $sidecarArguments `
+                -SyncWindow 0)
+        )
+    }
+    catch {
+        $sidecarArgumentsValid = $false
+    }
+    if (
+        -not (Test-ContainsExactBlock `
+            -Source $sidecarStagingCode `
+            -Block $cargoBuildArgumentsCode) -or
+        $sidecarStaging -match '(?i)packaged[-_]?acceptance' -or
+        -not $sidecarArgumentsValid
+    ) {
+        Add-Failure `
+            -Message "Release sidecar staging must build only the normal CLI target with no default features."
+    }
+
+    try {
+        $tauriConfiguration = Read-BoundedUtf8Text `
+            -Path $tauriConfigurationPath `
+            -MaximumBytes 262144 |
+            ConvertFrom-Json
+        $externalBins = @($tauriConfiguration.bundle.externalBin)
+        if (
+            $externalBins.Count -ne 1 -or
+            $externalBins[0] -cne 'binaries/wokrouter'
+        ) {
+            throw "unexpected external binaries"
+        }
+    }
+    catch {
+        Add-Failure `
+            -Message "Release Tauri bundles must contain exactly one production sidecar."
+    }
+
+    $desktopSubsystemAttributes = @(
+        Get-ActiveWindowsSubsystemAttributes -Source $desktopMain
+    )
+    if (
+        $desktopSubsystemAttributes.Count -ne 1 -or
+        $desktopMain.Substring(
+            $desktopSubsystemAttributes[0].Index,
+            $desktopSubsystemAttributes[0].Length
+        ).Trim() -cne
+        $desktopSubsystemAttribute
+    ) {
+        Add-Failure `
+            -Message "The release-only attribute must be the desktop's only active Windows subsystem declaration."
+    }
+
+    $otherSubsystemMains = @(
+        foreach ($sourceRootName in @("apps", "crates")) {
+            $sourceRoot = Join-Path $rootPath $sourceRootName
+            if (-not (Test-Path -LiteralPath $sourceRoot -PathType Container)) {
+                continue
+            }
+            foreach ($main in Get-ChildItem `
+                    -LiteralPath $sourceRoot `
+                    -Filter "main.rs" `
+                    -File `
+                    -Recurse) {
+                if ($main.FullName -ceq $desktopMainPath) {
+                    continue
+                }
+                $source = Read-BoundedUtf8Text `
+                    -Path $main.FullName `
+                    -MaximumBytes 1048576
+                if (@(
+                        Get-ActiveWindowsSubsystemAttributes -Source $source
+                    ).Count -ne 0) {
+                    $main.FullName
+                }
+            }
+        }
+    )
+    if ($otherSubsystemMains.Count -ne 0) {
+        Add-Failure `
+            -Message "A Windows subsystem declaration may appear only in desktop main.rs."
+    }
+
+    $releaseContractSource = Read-BoundedUtf8Text `
+        -Path $releaseContractPath `
+        -MaximumBytes 262144
+    $releaseContractAst = $null
+    try {
+        $releaseContractAst = Get-PowerShellAst `
+            -Source $releaseContractSource `
+            -Description "Release contract module"
+    }
+    catch {
+        Add-Failure `
+            -Message "Release contract must define the exact script-scope PE subsystem helper: $($_.Exception.Message)"
+    }
+    if ($null -ne $releaseContractAst) {
+        $peSubsystemFunctions = @(
+            $releaseContractAst.FindAll(
+                {
+                    param($node)
+
+                    return (
+                        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                        $node.Name -ceq "Get-PeSubsystem"
+                    )
+                },
+                $true
+            )
+        )
+        $scriptScopePeSubsystemFunctions = @(
+            $peSubsystemFunctions |
+                Where-Object {
+                    [object]::ReferenceEquals(
+                        $_.Parent,
+                        $releaseContractAst.EndBlock
+                    )
+                }
+        )
+        if (
+            $peSubsystemFunctions.Count -ne 1 -or
+            $scriptScopePeSubsystemFunctions.Count -ne 1
+        ) {
+            Add-Failure `
+                -Message "Release contract must define and export the exact script-scope PE subsystem helper."
+        }
+    }
+    $expectedPeSubsystemSource = @'
+function Get-PeSubsystem {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $Path)
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 0x40 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+        throw "Windows executable has no valid DOS header."
+    }
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+    if (
+        $peOffset -lt 0 -or
+        $peOffset + 24 + 70 -gt $bytes.Length -or
+        [Text.Encoding]::ASCII.GetString($bytes, $peOffset, 4) -cne "PE`0`0"
+    ) {
+        throw "Windows executable has no valid PE header."
+    }
+    $optionalHeader = $peOffset + 24
+    $magic = [BitConverter]::ToUInt16($bytes, $optionalHeader)
+    if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {
+        throw "Windows executable has an unsupported optional header."
+    }
+    return [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)
+}
+'@
+    $expectedPeSubsystemAst = Get-PowerShellAst `
+        -Source $expectedPeSubsystemSource `
+        -Description "Expected PE subsystem helper"
+    $expectedPeSubsystemFunction = @(
+        $expectedPeSubsystemAst.EndBlock.Statements |
+            Where-Object {
+                $_ -is [Management.Automation.Language.FunctionDefinitionAst]
+            }
+    )[0]
+    if (
+        $scriptScopePeSubsystemFunctions.Count -ne 1 -or
+        -not (Test-ExactFunctionDefinitionAst `
+            -Actual $scriptScopePeSubsystemFunctions[0] `
+            -Expected $expectedPeSubsystemFunction) -or
+        -not (Test-ContainsExactLine `
+            -Source $releaseContractSource `
+            -Line '-Function Get-WokRouterTargetContracts, Get-WokRouterPayloadNames, Get-PeSubsystem')
+    ) {
+        Add-Failure `
+            -Message "Release contract must define and export the exact script-scope PE subsystem helper."
+    }
+
+    $windowsPackagerSource = Read-BoundedUtf8Text `
+        -Path $windowsPackagerPath `
+        -MaximumBytes 1048576
+    $windowsPackagerAst = $null
+    try {
+        $windowsPackagerAst = Get-PowerShellAst `
+            -Source $windowsPackagerSource `
+            -Description "Windows packager"
+    }
+    catch {
+        Add-Failure `
+            -Message "Windows packager GUI subsystem checks are invalid: $($_.Exception.Message)"
+    }
+
+    $sourceDesktopGuards = @()
+    $sourceSidecarGuards = @()
+    $msiDesktopGuards = @()
+    $msiSidecarGuards = @()
+    $portableDesktopCountGuards = @()
+    $portableDesktopGuards = @()
+    $portableSidecarCountGuards = @()
+    $portableSidecarGuards = @()
+    if ($null -ne $windowsPackagerAst) {
+        $sourceDesktopGuards = @(
+            Get-ExactGuardAst `
+                -Ast $windowsPackagerAst `
+                -Condition '(& $peSubsystemCommand -Path $desktop) -ne 2' `
+                -ThrowStatement 'throw "Windows desktop executable must use the GUI subsystem."'
+        )
+        $sourceSidecarGuards = @(
+            Get-ExactGuardAst `
+                -Ast $windowsPackagerAst `
+                -Condition '(& $peSubsystemCommand -Path $sidecar) -ne 3' `
+                -ThrowStatement 'throw "Windows sidecar executable must use the console subsystem."'
+        )
+        $msiDesktopGuards = @(
+            Get-ExactGuardAst `
+                -Ast $windowsPackagerAst `
+                -Condition '(& $peSubsystemCommand -Path $byName["wokrouter-desktop.exe"]) -ne 2' `
+                -ThrowStatement 'throw "MSI desktop executable must use the GUI subsystem."'
+        )
+        $msiSidecarGuards = @(
+            Get-ExactGuardAst `
+                -Ast $windowsPackagerAst `
+                -Condition '(& $peSubsystemCommand -Path $byName["wokrouter.exe"]) -ne 3' `
+                -ThrowStatement 'throw "MSI sidecar executable must use the console subsystem."'
+        )
+        $portableDesktopGuards = @(
+            Get-ExactGuardAst `
+                -Ast $windowsPackagerAst `
+                -Condition '(& $peSubsystemCommand -Path $portableDesktop) -ne 2' `
+                -ThrowStatement 'throw "Portable desktop executable must use the GUI subsystem."'
+        )
+        $portableSidecarGuards = @(
+            Get-ExactGuardAst `
+                -Ast $windowsPackagerAst `
+                -Condition '(& $peSubsystemCommand -Path $portableSidecar) -ne 3' `
+                -ThrowStatement 'throw "Portable sidecar executable must use the console subsystem."'
+        )
+        $portableDesktopCountGuards = @(
+            Get-ExactGuardAst `
+                -Ast $windowsPackagerAst `
+                -Condition '$portableDesktopFiles.Count -ne 1' `
+                -ThrowStatement 'throw "Portable archive must contain one desktop executable."'
+        )
+        $portableSidecarCountGuards = @(
+            Get-ExactGuardAst `
+                -Ast $windowsPackagerAst `
+                -Condition '$portableSidecarFiles.Count -ne 1' `
+                -ThrowStatement 'throw "Portable archive must contain one sidecar executable."'
+        )
+
+        $releaseContractModulePathStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $windowsPackagerAst.EndBlock `
+                -Statement '$releaseContractModulePath = Join-Path $PSScriptRoot "WokRouter.ReleaseContract.psm1"'
+        )
+        $releaseContractModuleStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $windowsPackagerAst.EndBlock `
+                -Statement '$releaseContractModule = Import-Module $releaseContractModulePath -Force -PassThru'
+        )
+        $peSubsystemFunctionStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $windowsPackagerAst.EndBlock `
+                -Statement @'
+$ExecutionContext.SessionState.PSVariable.Set(
+    [Management.Automation.PSVariable]::new(
+        "peSubsystemFunction",
+        $releaseContractModule.ExportedFunctions["Get-PeSubsystem"],
+        [Management.Automation.ScopedItemOptions]::Constant
+    )
+)
+'@
+        )
+        $releaseContractIdentityGuards = @(
+            Get-ExactDirectStatementAst `
+                -Block $windowsPackagerAst.EndBlock `
+                -Statement @'
+if (
+    $releaseContractModule.Name -cne "WokRouter.ReleaseContract" -or
+    -not [StringComparer]::OrdinalIgnoreCase.Equals(
+        [IO.Path]::GetFullPath($releaseContractModule.Path),
+        [IO.Path]::GetFullPath($releaseContractModulePath)
+    ) -or
+    $peSubsystemFunction -isnot [Management.Automation.FunctionInfo] -or
+    $peSubsystemFunction.Name -cne "Get-PeSubsystem" -or
+    $peSubsystemFunction.ModuleName -cne "WokRouter.ReleaseContract"
+) {
+    throw "Windows release contract PE subsystem helper is unavailable."
+}
+'@
+        )
+        $peSubsystemCommandStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $windowsPackagerAst.EndBlock `
+                -Statement @'
+$ExecutionContext.SessionState.PSVariable.Set(
+    [Management.Automation.PSVariable]::new(
+        "peSubsystemCommand",
+        $peSubsystemFunction.ScriptBlock,
+        [Management.Automation.ScopedItemOptions]::Constant
+    )
+)
+'@
+        )
+        $peSubsystemSnapshotGuards = @(
+            Get-ExactDirectStatementAst `
+                -Block $windowsPackagerAst.EndBlock `
+                -Statement @'
+if ($peSubsystemCommand -isnot [Management.Automation.ScriptBlock]) {
+    throw "Windows release contract PE subsystem helper is unavailable."
+}
+'@
+        )
+        $releaseContractModulePathAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $windowsPackagerAst `
+                -Name "releaseContractModulePath"
+        )
+        $releaseContractModuleAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $windowsPackagerAst `
+                -Name "releaseContractModule"
+        )
+        $peSubsystemCommandAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $windowsPackagerAst `
+                -Name "peSubsystemCommand"
+        )
+        $peSubsystemFunctionAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $windowsPackagerAst `
+                -Name "peSubsystemFunction"
+        )
+        $peSubsystemCommandNameLiterals = @(
+            $windowsPackagerAst.FindAll(
+                {
+                    param($node)
+
+                    return (
+                        $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+                        $node.Value -ieq "peSubsystemCommand"
+                    )
+                },
+                $true
+            )
+        )
+        $peSubsystemFunctionNameLiterals = @(
+            $windowsPackagerAst.FindAll(
+                {
+                    param($node)
+
+                    return (
+                        $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+                        $node.Value -ieq "peSubsystemFunction"
+                    )
+                },
+                $true
+            )
+        )
+        $peSubsystemVariableWriteCommands = @(
+            $windowsPackagerAst.FindAll(
+                {
+                    param($node)
+
+                    if ($node -isnot [Management.Automation.Language.CommandAst]) {
+                        return $false
+                    }
+                    $name = $node.GetCommandName()
+                    if ($null -eq $name) {
+                        return $false
+                    }
+                    $leaf = $name.Split("\")[-1]
+                    return (
+                        $leaf -iin @(
+                            "Set-Variable",
+                            "New-Variable",
+                            "Remove-Variable",
+                            "Clear-Variable",
+                            "Set-Item",
+                            "Remove-Item",
+                            "Clear-Item",
+                            "Rename-Item",
+                            "Move-Item"
+                        ) -and
+                        $node.Extent.Text -imatch (
+                            '(?:Variable:\s*)?peSubsystem(?:Command|Function)'
+                        )
+                    )
+                },
+                $true
+            )
+        )
+        $peSubsystemFunctionWriteCommands = @(
+            $windowsPackagerAst.FindAll(
+                {
+                    param($node)
+
+                    if ($node -isnot [Management.Automation.Language.CommandAst]) {
+                        return $false
+                    }
+                    $name = $node.GetCommandName()
+                    if ($null -eq $name) {
+                        return $false
+                    }
+                    $leaf = $name.Split("\")[-1]
+                    return (
+                        $leaf -iin @(
+                            "Set-Item",
+                            "Remove-Item",
+                            "Clear-Item",
+                            "Rename-Item",
+                            "Move-Item"
+                        ) -and
+                        $node.Extent.Text -imatch (
+                            'Function:\s*Get-PeSubsystem'
+                        )
+                    )
+                },
+                $true
+            )
+        )
+        $directPeSubsystemCommands = @(
+            $windowsPackagerAst.FindAll(
+                {
+                    param($node)
+
+                    if ($node -isnot [Management.Automation.Language.CommandAst]) {
+                        return $false
+                    }
+                    $name = $node.GetCommandName()
+                    return (
+                        $null -ne $name -and
+                        $name -cmatch '(^|\\)Get-PeSubsystem$'
+                    )
+                },
+                $true
+            )
+        )
+        $localPeSubsystemFunctions = @(
+            $windowsPackagerAst.FindAll(
+                {
+                    param($node)
+
+                    return (
+                        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                        $node.Name -cmatch '(^|\\)Get-PeSubsystem$'
+                    )
+                },
+                $true
+            )
+        )
+        $modulePathIndex = -1
+        $moduleIndex = -1
+        $functionIndex = -1
+        $identityIndex = -1
+        $commandIndex = -1
+        $snapshotGuardIndex = -1
+        if (
+            $releaseContractModulePathStatements.Count -eq 1 -and
+            $releaseContractModuleStatements.Count -eq 1 -and
+            $peSubsystemFunctionStatements.Count -eq 1 -and
+            $peSubsystemCommandStatements.Count -eq 1 -and
+            $releaseContractIdentityGuards.Count -eq 1 -and
+            $peSubsystemSnapshotGuards.Count -eq 1
+        ) {
+            $modulePathIndex = $windowsPackagerAst.EndBlock.Statements.IndexOf(
+                $releaseContractModulePathStatements[0]
+            )
+            $moduleIndex = $windowsPackagerAst.EndBlock.Statements.IndexOf(
+                $releaseContractModuleStatements[0]
+            )
+            $functionIndex = $windowsPackagerAst.EndBlock.Statements.IndexOf(
+                $peSubsystemFunctionStatements[0]
+            )
+            $identityIndex = $windowsPackagerAst.EndBlock.Statements.IndexOf(
+                $releaseContractIdentityGuards[0]
+            )
+            $commandIndex = $windowsPackagerAst.EndBlock.Statements.IndexOf(
+                $peSubsystemCommandStatements[0]
+            )
+            $snapshotGuardIndex = $windowsPackagerAst.EndBlock.Statements.IndexOf(
+                $peSubsystemSnapshotGuards[0]
+            )
+        }
+        $moduleImportIsOwned = (
+            $releaseContractModulePathAssignments.Count -eq 1 -and
+            $releaseContractModuleAssignments.Count -eq 1 -and
+            $peSubsystemCommandAssignments.Count -eq 0 -and
+            $peSubsystemFunctionAssignments.Count -eq 0 -and
+            $peSubsystemCommandNameLiterals.Count -eq 1 -and
+            $peSubsystemFunctionNameLiterals.Count -eq 1 -and
+            $peSubsystemVariableWriteCommands.Count -eq 0 -and
+            $peSubsystemFunctionWriteCommands.Count -eq 0 -and
+            $directPeSubsystemCommands.Count -eq 0 -and
+            $localPeSubsystemFunctions.Count -eq 0 -and
+            $modulePathIndex -ge 0 -and
+            $moduleIndex -eq ($modulePathIndex + 1) -and
+            $functionIndex -eq ($moduleIndex + 1) -and
+            $identityIndex -eq ($functionIndex + 1) -and
+            $commandIndex -eq ($identityIndex + 1) -and
+            $snapshotGuardIndex -eq ($commandIndex + 1) -and
+            $sourceDesktopGuards.Count -eq 1 -and
+            $snapshotGuardIndex -lt $windowsPackagerAst.EndBlock.Statements.IndexOf(
+                $sourceDesktopGuards[0]
+            )
+        )
+        if (-not $moduleImportIsOwned) {
+            Add-Failure `
+                -Message "Windows packager must retain the owned PE subsystem FunctionInfo snapshot binding."
+        }
+    }
+
+    $sourceDesktopGuardIsOwned = (
+        $sourceDesktopGuards.Count -eq 1 -and
+        [object]::ReferenceEquals(
+            $sourceDesktopGuards[0].Parent,
+            $windowsPackagerAst.EndBlock
+        )
+    )
+    if (-not $sourceDesktopGuardIsOwned) {
+        Add-Failure `
+            -Message "Windows packager must retain the active script-scope source desktop GUI subsystem check."
+    }
+    $sourceSidecarGuardIsOwned = (
+        $sourceSidecarGuards.Count -eq 1 -and
+        [object]::ReferenceEquals(
+            $sourceSidecarGuards[0].Parent,
+            $windowsPackagerAst.EndBlock
+        ) -and
+        $sourceDesktopGuards.Count -eq 1 -and
+        $sourceDesktopGuards[0].Extent.StartOffset -lt
+        $sourceSidecarGuards[0].Extent.StartOffset
+    )
+    if (-not $sourceSidecarGuardIsOwned) {
+        Add-Failure `
+            -Message "Windows packager must retain the active script-scope source sidecar console subsystem check."
+    }
+
+    $packageTry = $null
+    if (
+        $msiDesktopGuards.Count -eq 1 -and
+        $msiSidecarGuards.Count -eq 1 -and
+        $portableDesktopGuards.Count -eq 1 -and
+        $portableSidecarGuards.Count -eq 1
+    ) {
+        $msiOwner = $msiDesktopGuards[0].Parent.Parent
+        $msiSidecarOwner = $msiSidecarGuards[0].Parent.Parent
+        $portableOwner = $portableDesktopGuards[0].Parent.Parent
+        $portableSidecarOwner = $portableSidecarGuards[0].Parent.Parent
+        if (
+            $msiOwner -is [Management.Automation.Language.TryStatementAst] -and
+            [object]::ReferenceEquals($msiOwner, $msiSidecarOwner) -and
+            [object]::ReferenceEquals($msiOwner, $portableOwner) -and
+            [object]::ReferenceEquals($msiOwner, $portableSidecarOwner) -and
+            [object]::ReferenceEquals(
+                $msiDesktopGuards[0].Parent,
+                $msiOwner.Body
+            ) -and
+            [object]::ReferenceEquals(
+                $msiSidecarGuards[0].Parent,
+                $msiOwner.Body
+            ) -and
+            [object]::ReferenceEquals(
+                $portableDesktopGuards[0].Parent,
+                $msiOwner.Body
+            ) -and
+            [object]::ReferenceEquals(
+                $portableSidecarGuards[0].Parent,
+                $msiOwner.Body
+            ) -and
+            [object]::ReferenceEquals(
+                $msiOwner.Parent,
+                $windowsPackagerAst.EndBlock
+            ) -and
+            $msiDesktopGuards[0].Extent.StartOffset -lt
+            $portableDesktopGuards[0].Extent.StartOffset -and
+            $msiSidecarGuards[0].Extent.StartOffset -lt
+            $portableDesktopGuards[0].Extent.StartOffset -and
+            $portableDesktopGuards[0].Extent.StartOffset -lt
+            $portableSidecarGuards[0].Extent.StartOffset
+        ) {
+            $packageTry = $msiOwner
+        }
+    }
+    if ($null -eq $packageTry) {
+        Add-Failure `
+            -Message "Windows packager must retain the active MSI desktop GUI subsystem check in the package try block."
+        Add-Failure `
+            -Message "Windows packager must retain the active MSI sidecar console subsystem check in the package try block."
+        Add-Failure `
+            -Message "Windows packager must retain the active Portable desktop GUI subsystem check in the package try block."
+        Add-Failure `
+            -Message "Windows packager must retain the active Portable sidecar console subsystem check in the package try block."
+    }
+    $msiSidecarIdentityIsOwned = $false
+    if ($null -ne $packageTry) {
+        $msiSidecarIdentityStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement @'
+Assert-SameFile `
+        -Expected $sidecar `
+        -Actual $byName["wokrouter.exe"] `
+        -Description "MSI sidecar executable"
+'@
+        )
+        if ($msiSidecarIdentityStatements.Count -eq 1) {
+            $msiSidecarGuardIndex = $packageTry.Body.Statements.IndexOf(
+                $msiSidecarGuards[0]
+            )
+            $msiSidecarIdentityIndex = $packageTry.Body.Statements.IndexOf(
+                $msiSidecarIdentityStatements[0]
+            )
+            $msiSidecarIdentityIsOwned = (
+                $msiSidecarGuardIndex -ge 0 -and
+                $msiSidecarIdentityIndex -gt $msiSidecarGuardIndex
+            )
+        }
+    }
+    if (-not $msiSidecarIdentityIsOwned) {
+        Add-Failure `
+            -Message "Windows packager must validate the extracted MSI sidecar console subsystem before retaining exact byte identity."
+    }
+
+    $portableProvenanceIsOwned = $false
+    $portableSidecarProvenanceIsOwned = $false
+    if ($null -ne $packageTry) {
+        $zipOutputStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement '$zipOutput = Join-Path $output "$prefix-Portable.zip"'
+        )
+        $archiveOpenStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement @'
+$archive = [IO.Compression.ZipFile]::Open(
+        $zipOutput,
+        [IO.Compression.ZipArchiveMode]::Create
+    )
+'@
+        )
+        $portableRootStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement '$portableExtracted = Join-Path $temporary "portable"'
+        )
+        $portableDirectoryStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement '[IO.Directory]::CreateDirectory($portableExtracted) | Out-Null'
+        )
+        $portableExtractionStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement @'
+[IO.Compression.ZipFile]::ExtractToDirectory(
+        $zipOutput,
+        $portableExtracted
+    )
+'@
+        )
+        $portableTreeSafetyStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement @'
+Assert-TreeSafe `
+        -Root $portableExtracted `
+        -Description "Extracted Portable archive"
+'@
+        )
+        $portableQueryStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement @'
+$portableDesktopFiles = @(
+        Get-ChildItem `
+            -LiteralPath $portableExtracted `
+            -Force `
+            -Recurse `
+            -File |
+            Where-Object Name -CEQ "wokrouter-desktop.exe"
+    )
+'@
+        )
+        $portableAssignmentStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement '$portableDesktop = $portableDesktopFiles[0].FullName'
+        )
+        $portableSidecarQueryStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement @'
+$portableSidecarFiles = @(
+        Get-ChildItem `
+            -LiteralPath $portableExtracted `
+            -Force `
+            -Recurse `
+            -File |
+            Where-Object Name -CEQ "wokrouter.exe"
+    )
+'@
+        )
+        $portableSidecarAssignmentStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement '$portableSidecar = $portableSidecarFiles[0].FullName'
+        )
+        $zipOutputAssignments = @(
+            Get-VariableAssignmentAst -Ast $packageTry.Body -Name "zipOutput"
+        )
+        $portableRootAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $packageTry.Body `
+                -Name "portableExtracted"
+        )
+        $portableFileAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $packageTry.Body `
+                -Name "portableDesktopFiles"
+        )
+        $portableDesktopAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $packageTry.Body `
+                -Name "portableDesktop"
+        )
+        $portableSidecarFileAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $packageTry.Body `
+                -Name "portableSidecarFiles"
+        )
+        $portableSidecarAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $packageTry.Body `
+                -Name "portableSidecar"
+        )
+        $zipOutputIndex = -1
+        $archiveOpenIndex = -1
+        $portableRootIndex = -1
+        $portableDirectoryIndex = -1
+        $portableExtractionIndex = -1
+        $portableTreeSafetyIndex = -1
+        $portableQueryIndex = -1
+        $portableCountGuardIndex = -1
+        $portableAssignmentIndex = -1
+        $portableSubsystemGuardIndex = -1
+        $portableSidecarQueryIndex = -1
+        $portableSidecarCountGuardIndex = -1
+        $portableSidecarAssignmentIndex = -1
+        $portableSidecarSubsystemGuardIndex = -1
+        $archiveTryIsOwned = $false
+        if (
+            $zipOutputStatements.Count -eq 1 -and
+            $archiveOpenStatements.Count -eq 1 -and
+            $portableRootStatements.Count -eq 1 -and
+            $portableDirectoryStatements.Count -eq 1 -and
+            $portableExtractionStatements.Count -eq 1 -and
+            $portableTreeSafetyStatements.Count -eq 1 -and
+            $portableQueryStatements.Count -eq 1 -and
+            $portableDesktopCountGuards.Count -eq 1 -and
+            $portableAssignmentStatements.Count -eq 1 -and
+            $portableDesktopGuards.Count -eq 1 -and
+            $portableSidecarQueryStatements.Count -eq 1 -and
+            $portableSidecarCountGuards.Count -eq 1 -and
+            $portableSidecarAssignmentStatements.Count -eq 1 -and
+            $portableSidecarGuards.Count -eq 1
+        ) {
+            $zipOutputIndex = $packageTry.Body.Statements.IndexOf(
+                $zipOutputStatements[0]
+            )
+            $archiveOpenIndex = $packageTry.Body.Statements.IndexOf(
+                $archiveOpenStatements[0]
+            )
+            $portableRootIndex = $packageTry.Body.Statements.IndexOf(
+                $portableRootStatements[0]
+            )
+            $portableDirectoryIndex = $packageTry.Body.Statements.IndexOf(
+                $portableDirectoryStatements[0]
+            )
+            $portableExtractionIndex = $packageTry.Body.Statements.IndexOf(
+                $portableExtractionStatements[0]
+            )
+            $portableTreeSafetyIndex = $packageTry.Body.Statements.IndexOf(
+                $portableTreeSafetyStatements[0]
+            )
+            $portableQueryIndex = $packageTry.Body.Statements.IndexOf(
+                $portableQueryStatements[0]
+            )
+            $portableCountGuardIndex = $packageTry.Body.Statements.IndexOf(
+                $portableDesktopCountGuards[0]
+            )
+            $portableAssignmentIndex = $packageTry.Body.Statements.IndexOf(
+                $portableAssignmentStatements[0]
+            )
+            $portableSubsystemGuardIndex = $packageTry.Body.Statements.IndexOf(
+                $portableDesktopGuards[0]
+            )
+            $portableSidecarQueryIndex = $packageTry.Body.Statements.IndexOf(
+                $portableSidecarQueryStatements[0]
+            )
+            $portableSidecarCountGuardIndex = $packageTry.Body.Statements.IndexOf(
+                $portableSidecarCountGuards[0]
+            )
+            $portableSidecarAssignmentIndex = $packageTry.Body.Statements.IndexOf(
+                $portableSidecarAssignmentStatements[0]
+            )
+            $portableSidecarSubsystemGuardIndex = $packageTry.Body.Statements.IndexOf(
+                $portableSidecarGuards[0]
+            )
+            if (
+                $archiveOpenIndex + 1 -lt $packageTry.Body.Statements.Count
+            ) {
+                $archiveTry = $packageTry.Body.Statements[$archiveOpenIndex + 1]
+                if (
+                    $archiveTry -is [Management.Automation.Language.TryStatementAst] -and
+                    $archiveTry.CatchClauses.Count -eq 0 -and
+                    $null -ne $archiveTry.Finally
+                ) {
+                    $archiveDisposeStatements = @(
+                        Get-ExactDirectStatementAst `
+                            -Block $archiveTry.Finally `
+                            -Statement '$archive.Dispose()'
+                    )
+                    $archiveTryIsOwned = (
+                        $archiveDisposeStatements.Count -eq 1 -and
+                        $archiveTry.Finally.Statements.Count -eq 1
+                    )
+                }
+            }
+        }
+        if (
+            $zipOutputStatements.Count -eq 1 -and
+            $archiveOpenStatements.Count -eq 1 -and
+            $archiveTryIsOwned -and
+            $portableRootStatements.Count -eq 1 -and
+            $portableDirectoryStatements.Count -eq 1 -and
+            $portableExtractionStatements.Count -eq 1 -and
+            $portableTreeSafetyStatements.Count -eq 1 -and
+            $portableQueryStatements.Count -eq 1 -and
+            $portableDesktopCountGuards.Count -eq 1 -and
+            [object]::ReferenceEquals(
+                $portableDesktopCountGuards[0].Parent,
+                $packageTry.Body
+            ) -and
+            $portableAssignmentStatements.Count -eq 1 -and
+            $portableDesktopGuards.Count -eq 1 -and
+            $zipOutputAssignments.Count -eq 1 -and
+            [object]::ReferenceEquals(
+                $zipOutputAssignments[0],
+                $zipOutputStatements[0]
+            ) -and
+            $portableRootAssignments.Count -eq 1 -and
+            [object]::ReferenceEquals(
+                $portableRootAssignments[0],
+                $portableRootStatements[0]
+            ) -and
+            $portableFileAssignments.Count -eq 1 -and
+            [object]::ReferenceEquals(
+                $portableFileAssignments[0],
+                $portableQueryStatements[0]
+            ) -and
+            $portableDesktopAssignments.Count -eq 1 -and
+            [object]::ReferenceEquals(
+                $portableDesktopAssignments[0],
+                $portableAssignmentStatements[0]
+            ) -and
+            $zipOutputIndex -lt $archiveOpenIndex -and
+            $portableRootIndex -eq $archiveOpenIndex + 2 -and
+            $portableDirectoryIndex -eq $archiveOpenIndex + 3 -and
+            $portableExtractionIndex -eq $archiveOpenIndex + 4 -and
+            $portableTreeSafetyIndex -eq $archiveOpenIndex + 5 -and
+            $portableQueryIndex -eq $archiveOpenIndex + 6 -and
+            $portableCountGuardIndex -eq $archiveOpenIndex + 7 -and
+            $portableAssignmentIndex -eq $archiveOpenIndex + 8 -and
+            $portableSubsystemGuardIndex -eq $archiveOpenIndex + 9
+        ) {
+            $portableProvenanceIsOwned = $true
+        }
+        if (
+            $portableProvenanceIsOwned -and
+            $portableSidecarQueryStatements.Count -eq 1 -and
+            $portableSidecarCountGuards.Count -eq 1 -and
+            [object]::ReferenceEquals(
+                $portableSidecarCountGuards[0].Parent,
+                $packageTry.Body
+            ) -and
+            $portableSidecarAssignmentStatements.Count -eq 1 -and
+            $portableSidecarGuards.Count -eq 1 -and
+            $portableSidecarFileAssignments.Count -eq 1 -and
+            [object]::ReferenceEquals(
+                $portableSidecarFileAssignments[0],
+                $portableSidecarQueryStatements[0]
+            ) -and
+            $portableSidecarAssignments.Count -eq 1 -and
+            [object]::ReferenceEquals(
+                $portableSidecarAssignments[0],
+                $portableSidecarAssignmentStatements[0]
+            ) -and
+            $portableSidecarQueryIndex -eq $archiveOpenIndex + 10 -and
+            $portableSidecarCountGuardIndex -eq $archiveOpenIndex + 11 -and
+            $portableSidecarAssignmentIndex -eq $archiveOpenIndex + 12 -and
+            $portableSidecarSubsystemGuardIndex -eq $archiveOpenIndex + 13
+        ) {
+            $portableSidecarProvenanceIsOwned = $true
+        }
+    }
+    if (-not $portableProvenanceIsOwned) {
+        Add-Failure `
+            -Message "Windows packager must retain the active Portable desktop extraction provenance and GUI subsystem check."
+    }
+    if (-not $portableSidecarProvenanceIsOwned) {
+        Add-Failure `
+            -Message "Windows packager must retain the active Portable sidecar extraction provenance and console subsystem check."
+    }
+
     try {
         $workspaceVersion = Get-CargoWorkspaceVersion -Text (
             Read-BoundedUtf8Text -Path $cargoManifestPath -MaximumBytes 131072
@@ -308,11 +1824,31 @@ if ($failures.Count -eq 0) {
             Add-Failure `
                 -Message "Release packagers must not contain Skip or Bypass production paths."
         }
+        $expectedAcceptanceGuards = switch ([IO.Path]::GetFileName($packagerPath)) {
+            "package-windows-assets.ps1" { 1 }
+            "package-linux-assets.ps1" { 2 }
+            "package-macos-assets.ps1" { 3 }
+            default { 0 }
+        }
+        if (
+            @([regex]::Matches(
+                    $packagerSource,
+                    [regex]::Escape('packaged[-_]?acceptance')
+                )).Count -ne $expectedAcceptanceGuards
+        ) {
+            Add-Failure `
+                -Message "All release packagers must forbid packaged acceptance payload names at every extracted-content boundary."
+        }
     }
 
     $release = (Get-Content -LiteralPath $releasePath -Raw -Encoding UTF8).Replace("`r`n", "`n")
     $ci = (Get-Content -LiteralPath $ciPath -Raw -Encoding UTF8).Replace("`r`n", "`n")
     $development = Get-Content -LiteralPath $developmentPath -Raw -Encoding UTF8
+
+    if ($release -match '(?i)packaged[-_]?acceptance') {
+        Add-Failure `
+            -Message "Release workflows must not enable or package packaged acceptance artifacts."
+    }
 
     if ($release -notmatch '(?m)^      - "v\*"$') {
         Add-Failure -Message "Release workflow must verify WokRouter v* tag pushes."
@@ -332,7 +1868,7 @@ concurrency:
   group: wokrouter-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 '@
-    if (-not $release.Contains($concurrencyBlock)) {
+    if (-not (Test-ContainsExactBlock -Source $release -Block $concurrencyBlock)) {
         Add-Failure `
             -Message "Release workflow must serialize the same release tag without cancellation."
     }
@@ -372,7 +1908,7 @@ concurrency:
         $versionJob -notmatch [regex]::Escape('${{ github.ref_name }}') -or
         $versionJob -notmatch "canonical WokRouter semver tag" -or
         $versionJob -notmatch [regex]::Escape('$tag.Substring(1)') -or
-        -not $versionJob.Contains($tagCheckout) -or
+        -not (Test-ContainsExactBlock -Source $versionJob -Block $tagCheckout) -or
         $versionJob -notmatch '(?m)^          "source_sha=\$sourceSha" \|$' -or
         -not $versionJob.Contains("Read-ExactUtf8File") -or
         -not $versionJob.Contains("Get-CargoWorkspaceVersion") -or
@@ -396,7 +1932,7 @@ concurrency:
           persist-credentials: false
           ref: ${{ needs.release-version.outputs.source_sha }}
 '@
-    if (-not $buildJob.Contains($sourceCheckout)) {
+    if (-not (Test-ContainsExactBlock -Source $buildJob -Block $sourceCheckout)) {
         Add-Failure `
             -Message "Release builds must checkout the commit resolved from the requested WokRouter tag."
     }
@@ -433,6 +1969,23 @@ concurrency:
         if (-not $buildJob.Contains($requiredText)) {
             Add-Failure -Message "Release build is missing required boundary text '$requiredText'."
         }
+    }
+    $uploadPayloadBlock = @'
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wokrouter-payload-${{ matrix.target }}
+          path: target/wokrouter-public-${{ matrix.target }}/*
+          if-no-files-found: error
+'@
+    if (
+        @([regex]::Matches(
+                $buildJob,
+                '(?m)^      - uses: actions/upload-artifact@v6$'
+            )).Count -ne 1 -or
+        -not (Test-ContainsExactBlock -Source $buildJob -Block $uploadPayloadBlock)
+    ) {
+        Add-Failure `
+            -Message "Release build must upload one exact normalized payload allowlist."
     }
     $arm64ToolCondition = (
         "if: runner.os == 'Windows' && " +
@@ -500,7 +2053,7 @@ concurrency:
     }
 
     $compatibilityJob = Get-JobBlock -Workflow $release -Name "release-compatibility"
-    if (-not $compatibilityJob.Contains($sourceCheckout)) {
+    if (-not (Test-ContainsExactBlock -Source $compatibilityJob -Block $sourceCheckout)) {
         Add-Failure `
             -Message "Release compatibility tests must checkout the requested WokRouter tag commit."
     }
@@ -544,7 +2097,7 @@ concurrency:
           ref: ${{ needs.release-version.outputs.source_sha }}
 '@
     if (
-        -not $verifyJob.Contains($assembleCheckout) -or
+        -not (Test-ContainsExactBlock -Source $verifyJob -Block $assembleCheckout) -or
         -not $verifyJob.Contains("sudo apt-get install --yes --no-install-recommends minisign") -or
         -not $verifyJob.Contains("pattern: wokrouter-payload-*") -or
         -not $verifyJob.Contains(
@@ -629,13 +2182,13 @@ concurrency:
         $publishJob -notmatch 'verify-release-bundle\.ps1' -or
         $publishJob -notmatch 'gh release edit "\$RELEASE_TAG"' -or
         $publishJob -notmatch '--draft=false' -or
-        -not $publishJob.Contains($draftCreateBlock) -or
-        -not $publishJob.Contains($publishEditBlock) -or
-        -not $publishJob.Contains($preMutationIdentityBlock) -or
-        -not $publishJob.Contains($preCreateIdentityBlock) -or
-        -not $publishJob.Contains($preDeleteIdentityBlock) -or
-        -not $publishJob.Contains($preUploadIdentityBlock) -or
-        -not $publishJob.Contains($prePublicationIdentityBlock) -or
+        -not (Test-ContainsExactBlock -Source $publishJob -Block $draftCreateBlock) -or
+        -not (Test-ContainsExactBlock -Source $publishJob -Block $publishEditBlock) -or
+        -not (Test-ContainsExactBlock -Source $publishJob -Block $preMutationIdentityBlock) -or
+        -not (Test-ContainsExactBlock -Source $publishJob -Block $preCreateIdentityBlock) -or
+        -not (Test-ContainsExactBlock -Source $publishJob -Block $preDeleteIdentityBlock) -or
+        -not (Test-ContainsExactBlock -Source $publishJob -Block $preUploadIdentityBlock) -or
+        -not (Test-ContainsExactBlock -Source $publishJob -Block $prePublicationIdentityBlock) -or
         -not $publishJob.Contains("gh api") -or
         -not $publishJob.Contains("SOURCE_SHA") -or
         -not $publishJob.Contains("Remote WokRouter tag commit does not match source SHA.") -or
@@ -655,7 +2208,7 @@ concurrency:
             "(?m)^    if: github\.event_name == 'push' && " +
             "startsWith\(github\.ref, 'refs/tags/'\)$"
         ) -or
-        -not $publishJob.Contains($assembleCheckout) -or
+        -not (Test-ContainsExactBlock -Source $publishJob -Block $assembleCheckout) -or
         -not $publishJob.Contains(
             'name: wokrouter-${{ needs.release-version.outputs.tag }}-signed'
         ) -or

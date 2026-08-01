@@ -757,6 +757,9 @@ describe("sidecar staging paths", () => {
       "aarch64-apple-darwin",
       "-p",
       "wokrouter-cli",
+      "--bin",
+      "wokrouter",
+      "--no-default-features",
     ]);
   });
 

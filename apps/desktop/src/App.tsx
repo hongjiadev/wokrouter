@@ -1,7 +1,10 @@
-import { CoreHealth } from "./components/CoreHealth";
-import { ManagementPanel } from "./components/ManagementPanel";
+import { useTranslation } from "react-i18next";
+
+import { CoreLifecycle } from "./components/CoreLifecycle";
 
 export function App() {
+  const { t } = useTranslation();
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -11,15 +14,12 @@ export function App() {
           </span>
           <span className="brand-name">WokRouter</span>
         </div>
-        <p className="surface-name">Local desktop control</p>
+        <p className="surface-name">{t("app.localDesktopControl")}</p>
       </header>
       <main className="app-main">
-        <CoreHealth />
-        <ManagementPanel />
+        <CoreLifecycle />
       </main>
-      <footer className="app-footer">
-        Desktop controls communicate with WokCore over loopback HTTP.
-      </footer>
+      <footer className="app-footer">{t("app.loopbackFooter")}</footer>
     </div>
   );
 }

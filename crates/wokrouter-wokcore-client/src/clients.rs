@@ -176,6 +176,12 @@ impl WokCoreClient {
         if !valid_identifier(client_id) {
             return Err(ManagementError::InvalidInput);
         }
+        if self.has_runtime_policy() {
+            let current_runtime = self.integration_runtime().await?;
+            if current_runtime != *runtime {
+                return Err(ManagementError::InvalidRuntime);
+            }
+        }
         let issued = self
             .issue_proxy_token_with_discovery(
                 management_token,

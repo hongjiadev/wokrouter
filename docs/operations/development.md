@@ -50,6 +50,163 @@ Install the locked frontend dependency graph with:
 pnpm --dir apps/desktop install --frozen-lockfile
 ```
 
+## Development WokCore runtime acceptance
+
+The Cursor workspace compound `wok: debug` starts `wokcore: debug` with
+`serve` and starts `wokrouter: dev` with
+`WOKROUTER_DEV_WOKCORE_EXECUTABLE` pointing at the WokCore debug executable.
+Run these six paths before accepting changes to development runtime selection:
+
+1. **Development match.** Stop any system WokCore, start `wok: debug`, and
+   wait for both configurations to reach their running state. Confirm WokRouter
+   reports `runtime_channel: "development"` and a debugger breakpoint is hit
+   in the IDE-started WokCore.
+2. **Delayed development match.** Delay the WokCore debug launch by less than
+   five seconds while starting `wok: debug`. Confirm WokRouter waits and then
+   connects on the development channel, with no production download during
+   the wait.
+3. **System production fallback.** Disable `wokcore: debug`, keep a system
+   WokCore available, and start `wokrouter: dev` with its configured
+   development variable. Confirm WokRouter does not mistake the system process
+   for the configured debug executable and selects it on the production
+   channel after five seconds.
+4. **Signed-install production fallback.** Remove both the development and
+   system WokCore, start `wokrouter: dev`, and wait for the five-second
+   development deadline. Confirm the desktop enters the production signed
+   automatic-install flow, reports real downloaded and total byte counts, and
+   reaches running without an install click.
+5. **Release ignores the variable.** Set
+   `WOKROUTER_DEV_WOKCORE_EXECUTABLE` and start a release build. Confirm it
+   selects only through production discovery and never reports the development
+   channel. The variable name and its parsing must not be present in release
+   metadata.
+6. **Development runtime remains IDE-managed.** With the development channel
+   selected, close WokRouter and confirm the IDE-started WokCore keeps running.
+   An explicit stop, update check, or update-install backend request must
+   return `development_runtime_managed_by_ide`; no WokCore upgrade prompt or
+   update child may appear.
+
+Runtime status exposed through JSON or the Tauri bridge may include
+`runtime_channel`, but must never include a field named `pid`, `path`, or
+`executable`.
+
+## WokCore lifecycle acceptance evidence
+
+The repository does not currently provide a command that drives a live signed
+loopback WokCore through the packaged desktop GUI. In particular, there is no
+manual signed-loopback CLI for the update, rollback, close/reopen, or
+child-process observations described below. Do not invent one and do not use a
+production Minisign private key for acceptance. The reproducible evidence
+available today is the fixed-host Rust suite, the frontend unit suite, and the
+foundation source-contract suite listed in the quality gate below.
+
+Run frontend lifecycle evidence with:
+
+```powershell
+pnpm.cmd --dir apps/desktop exec vitest run src/components/CoreLifecycle.test.tsx
+```
+
+On Windows, run all referenced Rust tests through the
+`tests/scripts/run-fixed-test-host.ps1` command in the next section; never run
+Cargo's hashed test binaries directly. Each numbered path maps to these real
+test names and fixtures:
+
+1. **Missing to running without a click.** Frontend fixture `starts one
+   production install in StrictMode and restores normal content after success`;
+   Rust fixtures
+   `missing_production_runtime_installs_starts_authorizes_and_reports_structured_progress`
+   and
+   `signed_release_reports_monotonic_download_and_authoritative_install_phases`.
+2. **Signed update cancel and confirm.** Frontend fixture `requires an
+   accessible confirmation and invokes the expected version once` covers
+   cancel, confirmation, and exactly-once invocation. Rust fixture
+   `system_runner_uses_only_the_three_fixed_child_commands` fixes the real
+   update-install argv. A live signed update artifact request through the GUI
+   remains unautomated because the repository has no such harness.
+3. **Active requests remain.** Frontend fixture `returns management after
+   active requests defer the update and reconfirms retry` covers recovery and
+   fresh confirmation. Parser fixtures
+   `versions_bytes_and_active_requests_are_strictly_validated` and
+   `update_active_requests_are_valid_during_rolling_back` cover the bounded
+   count. A real draining WokCore process remains outside this repository's
+   executable acceptance surface.
+4. **Verification failure and rollback.** Signed-release fixtures
+   `artifact_hash_mismatch_leaves_no_install_or_record` and
+   `invalid_manifest_signature_is_rejected_before_artifact_download` prove
+   untrusted install bytes are rejected. Frontend error fixtures cover
+   `update_verification_failed` and `rolled_back`; a process-level rollback to
+   a previous runtime remains unautomated here.
+5. **Close and reopen during an operation.** Coordinator fixture
+   `duplicate_installs_coalesce_conflicts_fail_and_terminal_allows_retry` and
+   frontend fixtures `subscribes before recovering a running snapshot and
+   unmounts only the listener` and `treats install_in_progress as another
+   process and polls trusted status without retrying` cover reconciliation and
+   duplicate suppression. There is no packaged-GUI process harness that can
+   close the window and inspect the surviving child.
+6. **IDE Development performs zero update work.** Rust fixture
+   `development_suppresses_every_install_and_update_path_before_authority_or_runner`,
+   frontend fixtures `never checks or installs updates for a development
+   runtime` and `never starts production installation for a development
+   status`, and runtime fixture
+   `a_selected_development_session_never_switches_to_production` cover the
+   backend, frontend, and session-lifetime gates.
+7. **Chinese and English UI.** Run
+   `pnpm.cmd --dir apps/desktop exec vitest run src/locale.test.ts` for operating-system
+   locale detection, including `zh-CN`, then complete the Windows desktop
+   checklist below. The automated locale fixture does not claim the manual GUI
+   or screen-reader observations.
+
+## Windows desktop locale and release acceptance
+
+Run `pnpm --dir apps/desktop i18n:check` before this checklist. Record the
+Windows version, configured UI locale, build kind, and observed result for each
+manual run; automated catalog and PE gates do not substitute for these GUI
+observations.
+
+1. Start a debug desktop build and confirm its console remains available for
+   development diagnostics. Then build the packaged Windows release and
+   confirm it opens without a console window. The debug console is intentional;
+   a packaged release showing one is a failure. Independently inspect
+   `target/release/wokrouter-desktop.exe` with `Get-PeSubsystem` from
+   `tests/release/WokRouter.ReleaseContract.psm1`; the release value must be
+   `2`.
+2. Set the Windows UI locale to each supported Simplified Chinese form:
+   `zh-CN`, `zh`, and `zh-Hans`. Fully close and relaunch WokRouter after each
+   change, and verify Simplified Chinese is already present on the first paint,
+   without an English-to-Chinese flash.
+3. Repeat with `zh-TW`, `zh-HK`, and `zh-Hant`. These Traditional Chinese
+   locale forms are intentionally unsupported and must show the English
+   fallback from the first paint.
+4. In a test-only build, disconnect or disable the `system_locale` invoke and
+   relaunch. Verify locale selection falls back first to
+   `navigator.languages`/`navigator.language`; repeat with no supported
+   navigator locale and verify the final English fallback. Do not ship the
+   bridge-disabled test build. A missing or invalid operating-system locale is
+   returned as `null` and follows the same navigator fallback; a valid but
+   unsupported OS locale such as `fr-FR` still wins priority and selects
+   English.
+5. In both `en` and `zh-CN`, walk the shell, WokCore lifecycle states, Provider
+   and Session flows, usage, diagnostics, errors, confirmation dialogs, and
+   recovery paths. Inspect visible copy, placeholders, titles, and every
+   screen-reader label or live announcement. Brand names and reviewed technical
+   identifiers may remain unchanged; untranslated current UI copy is a failure.
+
+After producing a Windows packaged executable with
+`pnpm --dir apps/desktop tauri build --no-bundle`, exercise the real WebView
+event ACL and first-start coordination path:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File tests/scripts/smoke-packaged-event-bridge.ps1 `
+  -DesktopExecutable target/release/wokrouter-desktop.exe
+```
+
+The smoke test copies the packaged executable into isolated temporary app-data,
+builds a temporary protocol-valid sidecar, launches the real WebView, and
+requires both the sidecar-start marker and an observable operation progressbar.
+It does not use production WokCore data or claim the wider manual acceptance
+scenarios have passed.
+
 ## Foundation quality gate
 
 Run the same gates used by CI from the repository root:

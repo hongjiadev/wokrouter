@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 import {
   coreStatusQueryKey,
@@ -8,70 +9,98 @@ import {
   stopCore,
   type CoreStatus,
 } from "../control";
+import type { CoreUpdateCheck } from "../coreOperation";
+import { isCoreUpdateEligible } from "../coreUpdateEligibility";
+
+type CoreHealthProps = {
+  updatesEnabled?: boolean;
+  updateCheck?: CoreUpdateCheck;
+  updateCheckFailed?: boolean;
+  updateCheckPending?: boolean;
+  onCheckForUpdates?: () => void;
+  onUpgrade?: (trigger: HTMLButtonElement) => void;
+};
 
 const stateCopy: Record<
   CoreStatus["state"],
-  { title: string; summary: string; tone: "running" | "stopped" | "error" }
+  {
+    key:
+      | "core.state.missing"
+      | "core.state.stopped"
+      | "core.state.starting"
+      | "core.state.running"
+      | "core.state.draining"
+      | "core.state.authorizationRequired"
+      | "core.state.incompatible"
+      | "core.state.invalidRuntime";
+    tone: "running" | "stopped" | "error";
+  }
 > = {
   missing: {
-    title: "WokCore not installed",
-    summary:
-      "Install WokCore or register its trusted installation before starting local routing.",
+    key: "core.state.missing",
     tone: "error",
   },
   stopped: {
-    title: "WokCore stopped",
-    summary:
-      "The desktop app is available, but local routing stays offline until WokCore starts.",
+    key: "core.state.stopped",
     tone: "stopped",
   },
   starting: {
-    title: "WokCore starting",
-    summary: "WokCore is preparing its local management service.",
+    key: "core.state.starting",
     tone: "stopped",
   },
   running: {
-    title: "WokCore running",
-    summary: "WokCore is ready to accept local client traffic.",
+    key: "core.state.running",
     tone: "running",
   },
   draining: {
-    title: "WokCore draining",
-    summary:
-      "Existing requests are finishing. New work remains offline until draining completes.",
+    key: "core.state.draining",
     tone: "stopped",
   },
   authorization_required: {
-    title: "WokRouter authorization required",
-    summary:
-      "Authorize this desktop client before it can inspect or control the WokCore service.",
+    key: "core.state.authorizationRequired",
     tone: "error",
   },
   incompatible: {
-    title: "WokCore update required",
-    summary:
-      "The installed WokCore management API is not compatible with this WokRouter version.",
+    key: "core.state.incompatible",
     tone: "error",
   },
   invalid_runtime: {
-    title: "WokCore runtime invalid",
-    summary:
-      "WokRouter could not verify the configured WokCore installation or runtime response.",
+    key: "core.state.invalidRuntime",
     tone: "error",
   },
 };
 
-function formatPhase(phase: NonNullable<CoreStatus["phase"]>): string {
-  return phase
-    .split("_")
-    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
-    .join(" ");
-}
+const runtimeChannelKeys: Record<
+  CoreStatus["runtime_channel"],
+  "core.runtimeChannel.development" | "core.runtimeChannel.production"
+> = {
+  development: "core.runtimeChannel.development",
+  production: "core.runtimeChannel.production",
+};
+
+const phaseKeys: Record<
+  NonNullable<CoreStatus["phase"]>,
+  | "core.phase.starting"
+  | "core.phase.running"
+  | "core.phase.draining"
+  | "core.phase.awaitingCancellation"
+  | "core.phase.stopping"
+> = {
+  starting: "core.phase.starting",
+  running: "core.phase.running",
+  draining: "core.phase.draining",
+  awaiting_cancellation: "core.phase.awaitingCancellation",
+  stopping: "core.phase.stopping",
+};
 
 function LoadingHealth() {
+  const { t } = useTranslation();
+
   return (
     <>
-      <h1 id="core-health-heading">WokCore health</h1>
+      <h1 id="core-health-heading" tabIndex={-1}>
+        {t("core.heading")}
+      </h1>
       <div className="health-skeleton" aria-hidden="true">
         <span className="skeleton skeleton--status" />
         <span className="skeleton skeleton--title" />
@@ -82,7 +111,19 @@ function LoadingHealth() {
   );
 }
 
-export function CoreHealth() {
+export function CoreHealth({
+  updatesEnabled = true,
+  updateCheck,
+  updateCheckFailed = false,
+  updateCheckPending = false,
+  onCheckForUpdates,
+  onUpgrade,
+}: CoreHealthProps = {}) {
+  const { i18n, t } = useTranslation();
+  const numberFormatter = useMemo(
+    () => new Intl.NumberFormat(i18n.resolvedLanguage),
+    [i18n.resolvedLanguage],
+  );
   const queryClient = useQueryClient();
   const status = useQuery({
     queryKey: coreStatusQueryKey,
@@ -103,64 +144,86 @@ export function CoreHealth() {
   let announcement: string;
   let content: ReactNode;
   if (status.isPending) {
-    announcement = "Checking WokCore status";
+    announcement = t("core.announcement.checking");
     content = <LoadingHealth />;
   } else if (status.isError) {
     announcement = status.isFetching
-      ? "Checking WokCore status"
-      : "WokCore status unavailable. Check again.";
+      ? t("core.announcement.checking")
+      : t("core.statusUnavailable.announcement");
     content = (
       <>
-        <p className="section-label">Runtime status</p>
+        <p className="section-label">{t("core.runtimeStatus")}</p>
         <div className="status-line status-line--error">
           <span className="status-mark" aria-hidden="true">
             !
           </span>
-          <h1 id="core-health-heading">WokCore status unavailable</h1>
+          <h1 id="core-health-heading" tabIndex={-1}>
+            {t("core.statusUnavailable.title")}
+          </h1>
         </div>
-        <p className="health-summary">
-          WokRouter could not confirm whether WokCore is available. Your
-          configuration has not been changed.
-        </p>
+        <p className="health-summary">{t("core.statusUnavailable.summary")}</p>
         <button
           className="button button--primary"
           type="button"
           disabled={status.isFetching}
           onClick={() => void status.refetch()}
         >
-          {status.isFetching ? "Checking…" : "Check again"}
+          {status.isFetching
+            ? t("core.action.checking")
+            : t("core.action.checkAgain")}
         </button>
       </>
     );
   } else {
     const copy = stateCopy[status.data.state];
     const isRunning = status.data.state === "running";
+    const isDevelopment = status.data.runtime_channel === "development";
+    const updateEligible = isCoreUpdateEligible(status.data);
     const canStart =
-      status.data.state === "stopped" ||
-      status.data.state === "authorization_required";
+      !isDevelopment &&
+      (status.data.state === "stopped" ||
+        status.data.state === "authorization_required");
     const canRetry =
-      status.data.state === "missing" ||
       status.data.state === "incompatible" ||
       status.data.state === "invalid_runtime";
-    const actionError = start.isError
-      ? "WokCore could not start"
+    const updateAvailable =
+      updatesEnabled &&
+      updateEligible &&
+      updateCheck?.code === "update_available" &&
+      updateCheck.targetVersion !== undefined;
+    const canRetryUpdateCheck =
+      updatesEnabled &&
+      updateEligible &&
+      updateCheckFailed &&
+      onCheckForUpdates !== undefined;
+    const actionErrorKey = start.isError
+      ? "core.actionFailure.start"
       : stop.isError
-        ? "WokCore could not stop"
+        ? "core.actionFailure.stop"
         : undefined;
+    const actionError = actionErrorKey ? t(actionErrorKey) : undefined;
+    const title = t(`${copy.key}.title`);
 
     if (start.isPending) {
-      announcement = "Starting WokCore.";
+      announcement = t("core.announcement.starting");
     } else if (stop.isPending) {
-      announcement = "Stopping WokCore.";
+      announcement = t("core.announcement.stopping");
     } else if (actionError) {
-      announcement = `${actionError}. You can safely try again.`;
+      announcement = t("core.actionFailure.safeRetry", {
+        error: actionError,
+      });
     } else {
-      announcement = `${copy.title}.${status.data.version ? ` Version ${status.data.version}.` : ""}`;
+      announcement = status.data.version
+        ? t("core.announcement.version", {
+            title,
+            version: status.data.version,
+          })
+        : t("core.announcement.state", { title });
     }
 
     content = (
       <>
-        <p className="section-label">Runtime status</p>
+        <p className="section-label">{t("core.runtimeStatus")}</p>
         <div className={`status-line status-line--${copy.tone}`}>
           <span className="status-mark" aria-hidden="true">
             {copy.tone === "running"
@@ -169,34 +232,44 @@ export function CoreHealth() {
                 ? "!"
                 : "–"}
           </span>
-          <h1 id="core-health-heading">{copy.title}</h1>
+          <h1 id="core-health-heading" tabIndex={-1}>
+            {title}
+          </h1>
         </div>
-        <p className="health-summary">{copy.summary}</p>
+        <p className="health-summary">{t(`${copy.key}.summary`)}</p>
         <dl className="health-meta">
           <div>
-            <dt>Version</dt>
+            <dt>{t("core.field.runtimeChannel")}</dt>
+            <dd>{t(runtimeChannelKeys[status.data.runtime_channel])}</dd>
+          </div>
+          <div>
+            <dt>{t("core.field.version")}</dt>
             <dd dir="ltr">
               {status.data.version ? (
                 <code>{status.data.version}</code>
               ) : (
-                "Unavailable"
+                t("common.unavailable")
               )}
             </dd>
           </div>
           <div>
-            <dt>Connection</dt>
-            <dd>{isRunning ? "Loopback HTTP" : "Not connected"}</dd>
+            <dt>{t("core.field.connection")}</dt>
+            <dd>
+              {isRunning
+                ? t("core.connection.loopbackHttp")
+                : t("core.connection.notConnected")}
+            </dd>
           </div>
           {status.data.phase && (
             <div>
-              <dt>Phase</dt>
-              <dd>{formatPhase(status.data.phase)}</dd>
+              <dt>{t("core.field.phase")}</dt>
+              <dd>{t(phaseKeys[status.data.phase])}</dd>
             </div>
           )}
           {status.data.active_requests !== undefined && (
             <div>
-              <dt>Active requests</dt>
-              <dd>{status.data.active_requests}</dd>
+              <dt>{t("core.field.activeRequests")}</dt>
+              <dd>{numberFormatter.format(status.data.active_requests)}</dd>
             </div>
           )}
         </dl>
@@ -204,10 +277,7 @@ export function CoreHealth() {
           {actionError && (
             <p className="recovery-error">
               <strong>{actionError}</strong>
-              <span>
-                The service state was not assumed to have changed. Check its
-                status or safely try the action again.
-              </span>
+              <span>{t("core.actionFailure.summary")}</span>
             </p>
           )}
           {canStart && (
@@ -218,15 +288,15 @@ export function CoreHealth() {
               onClick={() => start.mutate()}
             >
               {start.isPending
-                ? "Starting WokCore…"
+                ? t("core.action.starting")
                 : status.data.state === "authorization_required"
-                  ? "Authorize WokRouter"
+                  ? t("core.action.authorize")
                   : start.isError
-                    ? "Try starting again"
-                    : "Start WokCore"}
+                    ? t("core.action.retryStart")
+                    : t("core.action.start")}
             </button>
           )}
-          {isRunning && (
+          {isRunning && !isDevelopment && (
             <button
               className="button button--secondary"
               type="button"
@@ -234,10 +304,10 @@ export function CoreHealth() {
               onClick={() => stop.mutate()}
             >
               {stop.isPending
-                ? "Stopping WokCore…"
+                ? t("core.action.stopping")
                 : stop.isError
-                  ? "Try stopping again"
-                  : "Stop WokCore"}
+                  ? t("core.action.retryStop")
+                  : t("core.action.stop")}
             </button>
           )}
           {canRetry && (
@@ -247,11 +317,40 @@ export function CoreHealth() {
               disabled={status.isFetching}
               onClick={() => void status.refetch()}
             >
-              {status.isFetching ? "Checking…" : "Check again"}
+              {status.isFetching
+                ? t("core.action.checking")
+                : t("core.action.checkAgain")}
             </button>
           )}
+          {updateAvailable && onUpgrade && (
+            <button
+              className="button button--primary"
+              type="button"
+              onClick={(event) => onUpgrade(event.currentTarget)}
+            >
+              {t("operation.update.trigger")}
+            </button>
+          )}
+          {canRetryUpdateCheck && (
+            <div className="recovery-error">
+              <strong>{t("operation.update.checkUnavailable")}</strong>
+              <span>{t("operation.update.checkUnavailableSummary")}</span>
+              <button
+                className="button button--secondary"
+                type="button"
+                disabled={updateCheckPending}
+                onClick={onCheckForUpdates}
+              >
+                {updateCheckPending
+                  ? t("operation.update.checking")
+                  : t("operation.update.check")}
+              </button>
+            </div>
+          )}
           <p className="action-note">
-            Closing this window never stops WokCore.
+            {isDevelopment
+              ? t("core.developmentActionNote")
+              : t("core.actionNote")}
           </p>
         </div>
       </>

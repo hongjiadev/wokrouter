@@ -79,7 +79,7 @@ impl WokCoreClient {
     }
 
     fn service_discovery(&self) -> Result<ValidatedDiscovery, ServiceError> {
-        match crate::discovery::read(&self.discovery_file) {
+        match self.read_discovery() {
             DiscoveryRead::Missing => Err(ServiceError::Missing),
             DiscoveryRead::Invalid => Err(ServiceError::InvalidRuntime),
             DiscoveryRead::Record(discovery) if discovery.api_major == SUPPORTED_API_MAJOR => {
@@ -96,6 +96,9 @@ impl WokCoreClient {
         path: &str,
         timeout: Duration,
     ) -> Result<ServiceStatus, ServiceError> {
+        if !self.runtime_authorized(discovery) {
+            return Err(ServiceError::Missing);
+        }
         let response = self
             .http
             .protected_json::<LifecycleWire>(discovery, Method::POST, path, token, timeout)
@@ -105,6 +108,9 @@ impl WokCoreClient {
     }
 
     async fn cancel_drain(&self, discovery: &ValidatedDiscovery, token: &SecretString) {
+        if !self.runtime_authorized(discovery) {
+            return;
+        }
         let _ = self
             .http
             .protected_json::<LifecycleWire>(

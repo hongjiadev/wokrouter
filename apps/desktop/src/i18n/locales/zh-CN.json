@@ -1,0 +1,358 @@
+{
+  "app": {
+    "localDesktopControl": "本地桌面控制",
+    "loopbackFooter": "桌面控制通过环回 HTTP 与 WokCore 通信。"
+  },
+  "core": {
+    "heading": "WokCore 健康状态",
+    "runtimeStatus": "运行状态",
+    "state": {
+      "missing": {
+        "title": "WokCore 未安装",
+        "summary": "请先安装 WokCore 或登记其可信安装，再启动本地路由。"
+      },
+      "stopped": {
+        "title": "WokCore 已停止",
+        "summary": "桌面应用可用，但在 WokCore 启动前，本地路由将保持离线。"
+      },
+      "starting": {
+        "title": "WokCore 正在启动",
+        "summary": "WokCore 正在准备本地管理服务。"
+      },
+      "running": {
+        "title": "WokCore 正在运行",
+        "summary": "WokCore 已可接收本地客户端流量。"
+      },
+      "draining": {
+        "title": "WokCore 正在排空请求",
+        "summary": "现有请求正在完成；排空结束前不会接收新的工作。"
+      },
+      "authorizationRequired": {
+        "title": "需要授权 WokRouter",
+        "summary": "请授权此桌面客户端，以便检查或控制 WokCore 服务。"
+      },
+      "incompatible": {
+        "title": "需要更新 WokCore",
+        "summary": "已安装 WokCore 的管理 API 与当前 WokRouter 版本不兼容。"
+      },
+      "invalidRuntime": {
+        "title": "WokCore 运行时无效",
+        "summary": "WokRouter 无法验证配置的 WokCore 安装或运行时响应。"
+      }
+    },
+    "statusUnavailable": {
+      "title": "WokCore 状态不可用",
+      "summary": "WokRouter 无法确认 WokCore 是否可用。你的配置未被更改。",
+      "announcement": "WokCore 状态不可用。请重新检查。"
+    },
+    "field": {
+      "runtimeChannel": "运行通道",
+      "version": "版本",
+      "connection": "连接",
+      "phase": "阶段",
+      "activeRequests": "活动请求"
+    },
+    "runtimeChannel": {
+      "development": "开发环境",
+      "production": "生产环境"
+    },
+    "connection": {
+      "loopbackHttp": "环回 HTTP",
+      "notConnected": "未连接"
+    },
+    "action": {
+      "checking": "正在检查…",
+      "checkAgain": "重新检查",
+      "start": "启动 WokCore",
+      "starting": "正在启动 WokCore…",
+      "stop": "停止 WokCore",
+      "stopping": "正在停止 WokCore…",
+      "authorize": "授权 WokRouter",
+      "retryStart": "再次尝试启动",
+      "retryStop": "再次尝试停止"
+    },
+    "actionNote": "关闭此窗口不会停止 WokCore。",
+    "developmentActionNote": "此开发版 WokCore 由 IDE 管理。",
+    "actionFailure": {
+      "start": "WokCore 无法启动",
+      "stop": "WokCore 无法停止",
+      "safeRetry": "{{error}}。你可以安全地重试。",
+      "summary": "服务状态不会被假定为已更改。请检查状态或安全地重试此操作。"
+    },
+    "announcement": {
+      "checking": "正在检查 WokCore 状态",
+      "starting": "正在启动 WokCore。",
+      "stopping": "正在停止 WokCore。",
+      "state": "{{title}}。",
+      "version": "{{title}}。版本 {{version}}。"
+    },
+    "phase": {
+      "starting": "正在启动",
+      "running": "正在运行",
+      "draining": "正在排空请求",
+      "awaitingCancellation": "正在等待取消",
+      "stopping": "正在停止"
+    }
+  },
+  "operation": {
+    "install": {
+      "title": "WokCore 设置",
+      "otherProcess": "WokCore 操作正在另一个进程中继续",
+      "otherProcessSummary": "可信安装仍在进行中。完成后，WokRouter 将重新连接。",
+      "waitAria": "正在等待 WokCore 安装",
+      "unavailableTitle": "WokCore 设置不可用",
+      "unavailableSummary": "WokRouter 无法开始或恢复经过验证的设置操作。本地配置不会被假定为已更改。",
+      "preflightTitle": "正在检查现有 WokCore 设置",
+      "preflightSummary": "WokRouter 正在检查是否有可安全恢复的操作，然后再开始安装。",
+      "preflightAria": "检查 WokCore 设置进度",
+      "retry": "重试"
+    },
+    "update": {
+      "title": "WokCore 更新",
+      "available": "将 WokCore 从 {{currentVersion}} 升级到 {{targetVersion}}",
+      "trigger": "升级 WokCore",
+      "confirmTitle": "升级 WokCore？",
+      "confirmBody": "安装经过验证的更新时，WokCore 可能会短暂停止。活动请求可以安全地延后更新。",
+      "confirmAction": "确认升级",
+      "cancel": "取消",
+      "checkUnavailable": "无法检查 WokCore 更新",
+      "checkUnavailableSummary": "WokRouter 无法验证是否有可用更新。当前 WokCore 保持不变。",
+      "check": "检查更新",
+      "checking": "正在检查…",
+      "checkingLong": "正在检查更新…",
+      "startFailedTitle": "无法启动 WokCore 更新",
+      "startFailedSummary": "WokRouter 无法开始或恢复经过验证的更新操作。当前 WokCore 不会被假定为已更改。",
+      "retrySafely": "安全重试更新",
+      "retryRequirement": "重试前必须重新执行签名检查并再次确认。"
+    },
+    "phase": {
+      "checkingRelease": "正在检查 WokCore 发布版本",
+      "downloading": "正在下载 WokCore",
+      "verifying": "正在验证 WokCore",
+      "installing": "正在安装 WokCore",
+      "preparingService": "正在准备 WokCore 服务",
+      "draining": "正在等待活动请求完成",
+      "stopping": "正在停止 WokCore",
+      "starting": "正在启动 WokCore",
+      "authorizing": "正在授权 WokRouter",
+      "verifyingRuntime": "正在验证 WokCore 运行时",
+      "rollingBack": "正在恢复上一版本的 WokCore",
+      "completed": "WokCore 操作已完成"
+    },
+    "progress": {
+      "downloadAria": "正在下载 WokCore",
+      "indeterminateAria": "{{phase}} 进度",
+      "bytes": "{{completed}} / {{total}}",
+      "ariaPhase": {
+        "checkingRelease": "正在检查 WokCore 发布版本",
+        "verifying": "正在验证 WokCore",
+        "installing": "正在安装 WokCore",
+        "preparingService": "正在准备 WokCore 服务",
+        "draining": "正在排空 WokCore 请求",
+        "stopping": "正在停止 WokCore",
+        "starting": "正在启动 WokCore",
+        "authorizing": "正在授权 WokRouter",
+        "verifyingRuntime": "正在验证 WokCore 运行时",
+        "rollingBack": "正在恢复 WokCore",
+        "completed": "WokCore 操作已完成"
+      }
+    },
+    "version": {
+      "current": "当前版本",
+      "target": "目标版本"
+    },
+    "result": {
+      "setupDidNotFinish": "WokCore 设置未完成",
+      "updateDidNotFinish": "WokCore 更新未完成",
+      "alreadyCurrent": "WokCore 已是最新版本",
+      "updatedHeading": "WokCore 已更新",
+      "ready": "WokCore 已就绪",
+      "installed": "经过验证的 WokCore 操作已成功完成。",
+      "updated": "经过验证的 WokCore {{targetVersion}} 已安装并就绪。",
+      "current": "最新签名检查表明 WokCore {{currentVersion}} 已是最新版本。",
+      "activeRequests_one": "仍有 {{formattedCount}} 个活动请求正在处理中。请稍后重试更新。",
+      "activeRequests_other": "仍有 {{formattedCount}} 个活动请求正在处理中。请稍后重试更新。",
+      "rolledBack": "WokCore 更新失败，已恢复旧版本。",
+      "recoveryRequired": "WokCore 需要恢复"
+    },
+    "recovery": {
+      "retryUpdateLater": "稍后重试更新",
+      "retryUpdate": "再次尝试更新",
+      "openDiagnostics": "打开诊断",
+      "diagnosticsUnavailable": "诊断不可用，因为此 WokCore 运行时不提供诊断事件。",
+      "viewOfflineRecovery": "查看离线恢复步骤",
+      "hideOfflineRecovery": "收起离线恢复步骤",
+      "offlineTitle": "离线恢复",
+      "offlineDescription": "本指南仅使用 WokRouter 已验证的本地操作记录，不调用 WokCore 诊断。",
+      "recoveryCode": "恢复代码",
+      "operationState": "操作状态",
+      "failedState": "失败",
+      "coreStatus": "WokCore 状态",
+      "stepsTitle": "恢复步骤",
+      "stepCheck": "使用本地桌面控制检查 WokCore 状态。",
+      "stepRestart": "如果 WokCore 缺失、已停止或无效，请重新启动 WokRouter，并按照状态界面显示的已验证设置操作继续。",
+      "stepRetry": "仅在 WokCore 正在运行后重试更新。",
+      "checkStatus": "检查 WokCore 状态",
+      "checkingStatus": "正在检查 WokCore 状态…",
+      "checkCompleted": "WokCore 状态已刷新：{{status}}。",
+      "checkFailed": "无法刷新本地状态。请重新启动 WokRouter，再继续恢复。",
+      "actionNote": "关闭此窗口不会取消 WokCore 操作。"
+    },
+    "monitoring": {
+      "title": "操作监控",
+      "unavailableTitle": "WokCore 操作监控不可用",
+      "unavailableSummary": "WokRouter 无法协调可信操作进度。请先重新连接监控，再启动或监控 WokCore 设置与更新。",
+      "reconnect": "重新连接操作监控",
+      "reconnectNote": "此操作只会重新连接只读操作监控。"
+    },
+    "statusRecovery": {
+      "setupTitle": "WokCore 设置已完成，但状态不可用",
+      "setupSummary": "WokRouter 无法确认新的 WokCore 状态。请重新检查可信状态，不要重复安装。",
+      "updateTitle": "WokCore 更新已完成，但状态不可用",
+      "updateSummary": "WokRouter 无法确认新的 WokCore 状态。请重新检查可信状态，不要重复更新。",
+      "checkAgain": "重新检查状态"
+    }
+  },
+  "management": {
+    "providers": {
+      "tab": "供应商",
+      "panelLabel": "管理",
+      "panelHeading": "WokCore 工作区",
+      "connection": "实时 · 仅限环回",
+      "areasLabel": "管理区域",
+      "loading": "正在加载供应商配置",
+      "unavailable": "供应商数据不可用",
+      "configured": "已配置",
+      "models": "模型",
+      "revision": "修订版本",
+      "revisionLabel": "修订版本 {{revision}}",
+      "textOnly": "仅文本",
+      "notConfigured": "未配置",
+      "enableInstance": "启用 {{id}}",
+      "enabled": "已启用",
+      "disabled": "已禁用",
+      "saving": "正在保存…",
+      "saveChanges": "保存更改",
+      "reloading": "正在重新加载…",
+      "reload": "重新加载 WokCore",
+      "changesNotApplied": "不会假定供应商更改已生效。请刷新后重试。",
+      "addTitle": "添加供应商实例",
+      "addDescription": "选择内置适配器，然后指定本地路由名称。",
+      "provider": "供应商",
+      "instanceId": "实例 ID",
+      "instanceIdPlaceholder": "primary",
+      "addInstance": "添加实例",
+      "accountsTitle": "供应商账户",
+      "accountsDescription": "密钥值会直接发送至 WokCore，且绝不会返回到此界面。",
+      "replacementSecretAria": "{{id}} 的替换密钥",
+      "replacementSecretPlaceholder": "输入替换密钥",
+      "replace": "替换",
+      "remove": "移除",
+      "instance": "实例",
+      "accountId": "账户 ID",
+      "accountIdPlaceholder": "work",
+      "secretValue": "密钥值",
+      "secretPlaceholder": "输入密钥",
+      "storing": "正在存储…",
+      "storeAccount": "存储账户",
+      "secretFailure": "不会假定凭据已更改。请检查账户后重试。"
+    },
+    "sessions": {
+      "indexPhase": {
+        "starting": "正在启动会话索引",
+        "scanning": "正在扫描会话索引",
+        "idle": "会话索引已就绪"
+      },
+      "tab": "会话",
+      "loading": "正在加载已索引的会话",
+      "unavailable": "会话不可用",
+      "indexed": "已索引的会话",
+      "onThisPage_one": "本页共 {{formattedCount}} 个",
+      "onThisPage_other": "本页共 {{formattedCount}} 个",
+      "emptyTitle": "未找到会话",
+      "emptyDetail": "当索引可用时，WokCore 会显示本地 Codex、Claude 和 Gemini 会话。",
+      "untitled": "未命名会话",
+      "messageCount_one": "{{formattedCount}} 条消息",
+      "messageCount_other": "{{formattedCount}} 条消息",
+      "nextPage": "下一页",
+      "selectTitle": "选择一个会话",
+      "selectDetail": "选择会话后才会加载消息正文。",
+      "messageAccessTitle": "消息访问不可用",
+      "messageAccessDetail": "此 WokCore 版本未声明会话消息访问能力。",
+      "loadingMessages": "正在加载会话消息",
+      "messagesUnavailable": "消息不可用",
+      "loadNextMessages": "加载更多消息"
+    },
+    "usage": {
+      "tab": "用量",
+      "loading": "正在加载用量汇总",
+      "unavailable": "用量不可用",
+      "heading": "本地用量",
+      "description": "从已索引的本地会话聚合",
+      "groupBy": "分组方式",
+      "groupDay": "按天",
+      "groupSource": "按来源",
+      "groupModel": "按模型",
+      "inputTokens": "输入 Token",
+      "outputTokens": "输出 Token",
+      "cacheRead": "读取缓存",
+      "reasoning": "推理",
+      "sessions": "会话",
+      "emptyTitle": "没有用量分组",
+      "emptyDetail": "在 WokCore 索引本地用量记录后，汇总会显示在这里。",
+      "bucket": "分组",
+      "input": "输入",
+      "output": "输出",
+      "cache": "缓存"
+    },
+    "diagnostics": {
+      "tab": "诊断",
+      "loading": "正在加载诊断信息",
+      "unavailable": "诊断不可用",
+      "events": "诊断事件",
+      "noDroppedEvents": "没有报告丢失的事件",
+      "droppedEvents_one": "已丢失 {{formattedCount}} 个事件",
+      "droppedEvents_other": "已丢失 {{formattedCount}} 个事件",
+      "exporting": "正在导出…",
+      "export": "导出诊断信息",
+      "exported": "已保存 {{fileName}}（{{size}}）。",
+      "exportFailed": "无法保存诊断归档。未将任何目标报告为保存成功。",
+      "emptyTitle": "没有诊断事件",
+      "emptyDetail": "可用时，最近的有界诊断事件会显示在这里。",
+      "nextPage": "下一页"
+    }
+  },
+  "errors": {
+    "downloadFailed": "无法下载 WokCore。请检查网络后重试。",
+    "invalidInstallState": "无法信任配置的 WokCore 安装。请检查安装后重试。",
+    "invalidManifest": "WokCore 发布信息无效。未安装任何内容。",
+    "invalidSignature": "无法验证 WokCore 签名。未安装任何不可信内容。",
+    "incompatibleManifest": "此 WokCore 版本与当前系统不兼容。",
+    "artifactSizeMismatch": "下载的 WokCore 软件包不完整。未安装任何内容。",
+    "artifactHashMismatch": "下载的 WokCore 软件包未通过验证。未安装任何内容。",
+    "invalidArchive": "无法安全打开 WokCore 软件包。未安装任何内容。",
+    "unsafeInstallLocation": "无法将 WokCore 安全地安装到配置的位置。",
+    "installInProgress": "另一个 WokCore 安装仍在进行中。请等待其完成后重试。",
+    "installFailed": "无法安装 WokCore。当前配置保持不变。",
+    "installRecordFailed": "WokCore 已安装，但无法保存其可信安装记录。",
+    "startFailed": "WokCore 已安装但无法启动。你可以安全地重试。",
+    "authorizationFailed": "无法授权 WokRouter 管理 WokCore。你可以安全地重试。",
+    "updateUnavailable": "当前没有经过验证的 WokCore 更新。",
+    "updateVerificationFailed": "无法验证 WokCore 更新。未安装任何不可信更新。",
+    "activeRequestsRemain": "WokCore 仍在处理活动请求。请稍后重试更新。",
+    "rolledBack": "WokCore 更新失败，已恢复旧版本。",
+    "updateInstallFailed": "无法安全完成 WokCore 更新。请检查诊断信息后重试。",
+    "recoveryRequired": "WokCore 无法自动恢复。请在可用时打开诊断，或在重试前使用离线恢复步骤。",
+    "operationInProgress": "另一个 WokCore 操作仍在进行中。请等待其完成。",
+    "invalidProgress": "WokRouter 无法验证操作进度。请检查 WokCore 状态后重试。",
+    "unknown": "WokRouter 无法安全完成此操作。请检查 WokCore 状态后重试。"
+  },
+  "common": {
+    "retry": "重试",
+    "cancel": "取消",
+    "confirm": "确认",
+    "unavailable": "不可用",
+    "loading": "正在加载…",
+    "localStateRecovery": "WokRouter 未假定任何本地状态发生变化。请检查 WokCore 后重试。"
+  }
+}

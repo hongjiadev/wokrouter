@@ -12,6 +12,7 @@ test-support = []
 
 [dependencies]
 base64.workspace = true
+bytes.workspace = true
 fs4.workspace = true
 jiff = { workspace = true, features = ["tzdb-concatenated"] }
 minisign-verify.workspace = true
@@ -48,5 +49,6 @@ windows-sys = { version = "0.61.2", features = [
 zip.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 wiremock.workspace = true
 wokrouter-storage = { path = "../wokrouter-storage" }

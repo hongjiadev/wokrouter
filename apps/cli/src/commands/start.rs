@@ -1,73 +1,706 @@
 use std::{
+    io::{self, Write},
     path::Path,
     process::{Child, Command, Stdio},
     time::Duration,
 };
 
-use tokio::time::Instant;
-use wokrouter_platform::AppPaths;
-use wokrouter_wokcore_client::{CoreConnection, ServiceError};
+#[cfg(feature = "packaged-acceptance")]
+use std::{env, fs};
 
-use super::{CommandError, authorize, client, executable, reauthorize};
+use async_trait::async_trait;
+use secrecy::SecretString;
+use tokio::time::Instant;
+use wokrouter_platform::{
+    AppPaths, PlatformError, SelectedWokCoreRuntime, WokCoreInstallError, WokCoreInstallOutcome,
+    WokCoreInstallSource, WokCoreRuntimeChannel, install_missing_wokcore_with_progress,
+};
+#[cfg(feature = "packaged-acceptance")]
+use wokrouter_wokcore_client::WokCoreAuthorizer;
+use wokrouter_wokcore_client::{
+    CoreConnection, ServiceError, ServicePhase, ServiceStatus, WokCoreClient,
+};
+
+use super::{CommandError, CommandRuntime, authorize, reauthorize};
+
+mod progress;
+
+use progress::StartProgressReporter;
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_DELAY: Duration = Duration::from_millis(50);
+#[cfg(feature = "packaged-acceptance")]
+const ACCEPTANCE_ORIGIN_ENV: &str = "WOKROUTER_PACKAGED_ACCEPTANCE_ORIGIN";
+#[cfg(feature = "packaged-acceptance")]
+const ACCEPTANCE_PUBLIC_KEY_ENV: &str = "WOKROUTER_PACKAGED_ACCEPTANCE_PUBLIC_KEY";
+#[cfg(feature = "packaged-acceptance")]
+const MAX_ACCEPTANCE_PUBLIC_KEY_BYTES: u64 = 4 * 1024;
 
-pub async fn execute(paths: &AppPaths) -> Result<u8, CommandError> {
-    let executable = executable(paths)?;
-    let client = client(paths)?;
-    if let CoreConnection::Running(_) = client.connection().await {
-        ensure_authorized(&client, executable).await?;
-        println!("WokCore is already running.");
-        return Ok(0);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StartOptions {
+    pub json: bool,
+    pub progress_jsonl: bool,
+}
+
+pub async fn execute(runtime: &SelectedWokCoreRuntime) -> Result<u8, CommandError> {
+    let install_source = production_install_source().map_err(|_| CommandError::CoreControl)?;
+    let mut output = StandardStartCommandOutput;
+    execute_with_runtime_paths(
+        None,
+        runtime,
+        StartOptions {
+            json: false,
+            progress_jsonl: false,
+        },
+        &mut output,
+        &StartDependencies {
+            install_source,
+            service: Box::new(SystemStartService),
+        },
+    )
+    .await
+}
+
+pub trait StartCommandOutput: Send {
+    fn stdout(&mut self, value: &str) -> io::Result<()>;
+    fn stderr(&mut self, value: &str) -> io::Result<()>;
+}
+
+pub struct StandardStartCommandOutput;
+
+impl StartCommandOutput for StandardStartCommandOutput {
+    fn stdout(&mut self, value: &str) -> io::Result<()> {
+        io::stdout().write_all(value.as_bytes())
     }
 
-    let mut child = spawn_core(&executable)?;
-    let deadline = Instant::now() + START_TIMEOUT;
-    loop {
-        match client.connection().await {
-            CoreConnection::Running(_) => {
-                ensure_authorized(&client, executable).await?;
-                println!("WokCore is running.");
-                return Ok(0);
+    fn stderr(&mut self, value: &str) -> io::Result<()> {
+        io::stderr().write_all(value.as_bytes())
+    }
+}
+
+pub fn render_structured_platform_error(
+    error: PlatformError,
+    output: &mut dyn StartCommandOutput,
+) -> u8 {
+    let code = match error {
+        PlatformError::InvalidWokCoreInstallRecord => "invalid_install_state",
+        PlatformError::MissingPlatformData { .. } | PlatformError::WokCoreClientInitialization => {
+            "start_failed"
+        }
+    };
+    let mut reporter = StartProgressReporter::new(output, true);
+    reporter.failed("checking_release", code);
+    reporter.stdout_code(code);
+    1
+}
+
+#[async_trait]
+trait StartService: Send + Sync {
+    async fn connection(&self, client: &WokCoreClient) -> Result<CoreConnection, CommandError>;
+    fn spawn(&self, executable: &Path) -> Result<Box<dyn StartedCore>, CommandError>;
+    async fn authorize(
+        &self,
+        client: &WokCoreClient,
+        executable: &Path,
+    ) -> Result<SecretString, CommandError>;
+    async fn reauthorize(
+        &self,
+        client: &WokCoreClient,
+        executable: &Path,
+    ) -> Result<SecretString, CommandError>;
+    async fn authorization_status(
+        &self,
+        client: &WokCoreClient,
+        token: &SecretString,
+    ) -> Result<ServiceStatus, ServiceError>;
+    async fn authenticated_status(
+        &self,
+        client: &WokCoreClient,
+        token: &SecretString,
+    ) -> Result<ServiceStatus, ServiceError>;
+}
+
+trait StartedCore: Send {
+    fn try_wait(&mut self) -> Result<bool, CommandError>;
+    fn kill(&mut self) -> Result<(), CommandError>;
+    fn wait(&mut self) -> Result<(), CommandError>;
+}
+
+struct StartDependencies {
+    install_source: WokCoreInstallSource,
+    service: Box<dyn StartService>,
+}
+
+struct SystemStartService;
+
+#[async_trait]
+impl StartService for SystemStartService {
+    async fn connection(&self, client: &WokCoreClient) -> Result<CoreConnection, CommandError> {
+        Ok(client.connection().await)
+    }
+
+    fn spawn(&self, executable: &Path) -> Result<Box<dyn StartedCore>, CommandError> {
+        Ok(Box::new(SystemStartedCore(spawn_core(executable)?)))
+    }
+
+    async fn authorize(
+        &self,
+        _client: &WokCoreClient,
+        executable: &Path,
+    ) -> Result<SecretString, CommandError> {
+        authorize(executable.to_path_buf()).await
+    }
+
+    async fn reauthorize(
+        &self,
+        _client: &WokCoreClient,
+        executable: &Path,
+    ) -> Result<SecretString, CommandError> {
+        reauthorize(executable.to_path_buf()).await
+    }
+
+    async fn authorization_status(
+        &self,
+        client: &WokCoreClient,
+        token: &SecretString,
+    ) -> Result<ServiceStatus, ServiceError> {
+        client.service_status(token).await
+    }
+
+    async fn authenticated_status(
+        &self,
+        client: &WokCoreClient,
+        token: &SecretString,
+    ) -> Result<ServiceStatus, ServiceError> {
+        client.service_status(token).await
+    }
+}
+
+struct SystemStartedCore(Child);
+
+impl StartedCore for SystemStartedCore {
+    fn try_wait(&mut self) -> Result<bool, CommandError> {
+        self.0
+            .try_wait()
+            .map(|status| status.is_some())
+            .map_err(|_| CommandError::StartFailed)
+    }
+
+    fn kill(&mut self) -> Result<(), CommandError> {
+        self.0.kill().map_err(|_| CommandError::StartFailed)
+    }
+
+    fn wait(&mut self) -> Result<(), CommandError> {
+        self.0
+            .wait()
+            .map(|_| ())
+            .map_err(|_| CommandError::StartFailed)
+    }
+}
+
+pub async fn execute_with_options(
+    paths: &AppPaths,
+    runtime: &SelectedWokCoreRuntime,
+    options: StartOptions,
+    output: &mut dyn StartCommandOutput,
+) -> Result<u8, CommandError> {
+    let structured = validate_options(options)?;
+    let install_source = match production_install_source() {
+        Ok(source) => source,
+        Err(error) if structured => {
+            let code = install_error_code(error);
+            let mut reporter = StartProgressReporter::new(output, true);
+            reporter.failed("checking_release", code);
+            reporter.stdout_code(code);
+            return Ok(1);
+        }
+        Err(_) => return Err(CommandError::CoreControl),
+    };
+    execute_with_dependencies(
+        paths,
+        runtime,
+        options,
+        output,
+        &StartDependencies {
+            install_source,
+            service: Box::new(SystemStartService),
+        },
+    )
+    .await
+}
+
+fn production_install_source() -> Result<WokCoreInstallSource, WokCoreInstallError> {
+    WokCoreInstallSource::production()
+}
+
+#[cfg(feature = "packaged-acceptance")]
+pub async fn execute_packaged_acceptance_with_options(
+    paths: &AppPaths,
+    runtime: &SelectedWokCoreRuntime,
+    options: StartOptions,
+    output: &mut dyn StartCommandOutput,
+) -> Result<u8, CommandError> {
+    let structured = validate_options(options)?;
+    let install_source = match packaged_acceptance_install_source() {
+        Ok(source) => source,
+        Err(error) if structured => {
+            let code = install_error_code(error);
+            let mut reporter = StartProgressReporter::new(output, true);
+            reporter.failed("checking_release", code);
+            reporter.stdout_code(code);
+            return Ok(1);
+        }
+        Err(_) => return Err(CommandError::CoreControl),
+    };
+    execute_with_dependencies(
+        paths,
+        runtime,
+        options,
+        output,
+        &StartDependencies {
+            install_source,
+            service: Box::new(PackagedAcceptanceStartService),
+        },
+    )
+    .await
+}
+
+#[cfg(feature = "packaged-acceptance")]
+fn packaged_acceptance_install_source() -> Result<WokCoreInstallSource, WokCoreInstallError> {
+    let origin = env::var(ACCEPTANCE_ORIGIN_ENV).map_err(|_| WokCoreInstallError::InvalidSource)?;
+    let public_key_path =
+        env::var_os(ACCEPTANCE_PUBLIC_KEY_ENV).ok_or(WokCoreInstallError::InvalidSource)?;
+    let metadata =
+        fs::symlink_metadata(&public_key_path).map_err(|_| WokCoreInstallError::InvalidSource)?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > MAX_ACCEPTANCE_PUBLIC_KEY_BYTES
+    {
+        return Err(WokCoreInstallError::InvalidSource);
+    }
+    let public_key = fs::read(public_key_path).map_err(|_| WokCoreInstallError::InvalidSource)?;
+    build_packaged_acceptance_install_source(&origin, &public_key)
+}
+
+#[cfg(any(test, feature = "packaged-acceptance"))]
+fn build_packaged_acceptance_install_source(
+    origin: &str,
+    public_key: &[u8],
+) -> Result<WokCoreInstallSource, WokCoreInstallError> {
+    let origin = origin
+        .parse()
+        .map_err(|_| WokCoreInstallError::InvalidSource)?;
+    let public_key = std::str::from_utf8(public_key)
+        .map_err(|_| WokCoreInstallError::InvalidSource)?
+        .to_owned();
+    WokCoreInstallSource::loopback(origin, public_key)
+}
+
+#[cfg(feature = "packaged-acceptance")]
+struct PackagedAcceptanceStartService;
+
+#[cfg(feature = "packaged-acceptance")]
+#[async_trait]
+impl StartService for PackagedAcceptanceStartService {
+    async fn connection(&self, client: &WokCoreClient) -> Result<CoreConnection, CommandError> {
+        Ok(client.connection().await)
+    }
+
+    fn spawn(&self, executable: &Path) -> Result<Box<dyn StartedCore>, CommandError> {
+        Ok(Box::new(SystemStartedCore(spawn_core(executable)?)))
+    }
+
+    async fn authorize(
+        &self,
+        _client: &WokCoreClient,
+        executable: &Path,
+    ) -> Result<SecretString, CommandError> {
+        WokCoreAuthorizer::new(executable.to_path_buf())
+            .authorize()
+            .await
+            .map_err(CommandError::from)
+    }
+
+    async fn reauthorize(
+        &self,
+        _client: &WokCoreClient,
+        executable: &Path,
+    ) -> Result<SecretString, CommandError> {
+        WokCoreAuthorizer::new(executable.to_path_buf())
+            .authorize()
+            .await
+            .map_err(CommandError::from)
+    }
+
+    async fn authorization_status(
+        &self,
+        client: &WokCoreClient,
+        token: &SecretString,
+    ) -> Result<ServiceStatus, ServiceError> {
+        client.service_status(token).await
+    }
+
+    async fn authenticated_status(
+        &self,
+        client: &WokCoreClient,
+        token: &SecretString,
+    ) -> Result<ServiceStatus, ServiceError> {
+        client.service_status(token).await
+    }
+}
+
+async fn execute_with_dependencies(
+    paths: &AppPaths,
+    runtime: &(impl CommandRuntime + Sync),
+    options: StartOptions,
+    output: &mut dyn StartCommandOutput,
+    dependencies: &StartDependencies,
+) -> Result<u8, CommandError> {
+    execute_with_runtime_paths(Some(paths), runtime, options, output, dependencies).await
+}
+
+async fn execute_with_runtime_paths(
+    paths: Option<&AppPaths>,
+    runtime: &(impl CommandRuntime + Sync),
+    options: StartOptions,
+    output: &mut dyn StartCommandOutput,
+    dependencies: &StartDependencies,
+) -> Result<u8, CommandError> {
+    let structured = validate_options(options)?;
+    let mut reporter = StartProgressReporter::new(output, structured);
+    match run_start_workflow(paths, runtime, dependencies, &mut reporter).await {
+        Ok(outcome) => {
+            if structured {
+                reporter.completed();
+                reporter.stdout_code(if outcome.already_running {
+                    "already_running"
+                } else {
+                    "running"
+                });
+            } else {
+                reporter
+                    .human_message(start_message(outcome.already_running))
+                    .map_err(|_| CommandError::CoreControl)?;
             }
+            Ok(0)
+        }
+        Err(failure) if structured => {
+            reporter.failed(failure.phase, failure.code);
+            reporter.stdout_code(failure.code);
+            Ok(1)
+        }
+        Err(failure) => Err(failure.command),
+    }
+}
+
+async fn run_start_workflow(
+    paths: Option<&AppPaths>,
+    runtime: &(impl CommandRuntime + Sync),
+    dependencies: &StartDependencies,
+    reporter: &mut StartProgressReporter<'_>,
+) -> Result<StartOutcome, StartFailure> {
+    let initial_connection = dependencies
+        .service
+        .connection(runtime.client())
+        .await
+        .map_err(|error| StartFailure::start(error, "verifying_runtime"))?;
+
+    if runtime.channel() == WokCoreRuntimeChannel::Development {
+        return run_development_start(runtime, dependencies, reporter, initial_connection).await;
+    }
+
+    let executable = match runtime.executable() {
+        Some(executable) => executable.to_path_buf(),
+        None => {
+            let paths = paths.ok_or_else(|| {
+                StartFailure::start(CommandError::WokCoreMissing, "checking_release")
+            })?;
+            let outcome = install_missing_wokcore_with_progress(
+                paths,
+                &dependencies.install_source,
+                reporter,
+            )
+            .await
+            .map_err(|error| StartFailure::install(error, reporter.phase()))?;
+            match outcome {
+                WokCoreInstallOutcome::Installed { executable, .. }
+                | WokCoreInstallOutcome::AlreadyInstalled { executable } => executable,
+            }
+        }
+    };
+
+    let already_running = matches!(initial_connection, CoreConnection::Running(_));
+    let mut started = None;
+    if !already_running {
+        match initial_connection {
             CoreConnection::Incompatible(_) => {
-                kill_created_child(&mut child);
-                return Err(CommandError::Incompatible);
+                return Err(StartFailure::incompatible("verifying_runtime"));
             }
             CoreConnection::InvalidRuntime => {
-                kill_created_child(&mut child);
-                return Err(CommandError::InvalidRuntime);
+                return Err(StartFailure::invalid_runtime("verifying_runtime"));
             }
-            CoreConnection::Missing | CoreConnection::Stopped => {}
+            CoreConnection::Missing | CoreConnection::Stopped => {
+                reporter.starting();
+                started = Some(
+                    dependencies
+                        .service
+                        .spawn(&executable)
+                        .map_err(|error| StartFailure::start(error, "starting"))?,
+                );
+                wait_until_running(
+                    runtime,
+                    &executable,
+                    dependencies,
+                    started.as_mut().unwrap(),
+                )
+                .await?;
+            }
+            CoreConnection::Running(_) => unreachable!(),
+        }
+    }
+
+    reporter.authorizing();
+    let token =
+        resolve_authorized_token(dependencies.service.as_ref(), runtime.client(), &executable)
+            .await
+            .map_err(|error| StartFailure::authorization(error, "authorizing"))?;
+
+    reporter.verifying_runtime();
+    match verify_authenticated_status(dependencies.service.as_ref(), runtime.client(), &token).await
+    {
+        Ok(()) => Ok(StartOutcome { already_running }),
+        Err(failure) => {
+            stop_started_core(started.as_deref_mut());
+            Err(failure)
+        }
+    }
+}
+
+async fn run_development_start(
+    runtime: &(impl CommandRuntime + Sync),
+    dependencies: &StartDependencies,
+    reporter: &mut StartProgressReporter<'_>,
+    connection: CoreConnection,
+) -> Result<StartOutcome, StartFailure> {
+    match connection {
+        CoreConnection::Running(_) => {
+            let executable = runtime.executable().ok_or_else(|| {
+                StartFailure::start(
+                    CommandError::DevelopmentRuntimeManagedByIde,
+                    "verifying_runtime",
+                )
+            })?;
+            reporter.authorizing();
+            let token = resolve_authorized_token(
+                dependencies.service.as_ref(),
+                runtime.client(),
+                executable,
+            )
+            .await
+            .map_err(|error| StartFailure::authorization(error, "authorizing"))?;
+            reporter.verifying_runtime();
+            match verify_authenticated_status(
+                dependencies.service.as_ref(),
+                runtime.client(),
+                &token,
+            )
+            .await
+            {
+                Ok(()) => Ok(StartOutcome {
+                    already_running: true,
+                }),
+                Err(failure) => Err(failure),
+            }
+        }
+        CoreConnection::Incompatible(_) => Err(StartFailure::incompatible("verifying_runtime")),
+        CoreConnection::InvalidRuntime => Err(StartFailure::invalid_runtime("verifying_runtime")),
+        CoreConnection::Missing | CoreConnection::Stopped => Err(StartFailure::start(
+            CommandError::DevelopmentRuntimeManagedByIde,
+            "verifying_runtime",
+        )),
+    }
+}
+
+async fn verify_authenticated_status(
+    service: &dyn StartService,
+    client: &WokCoreClient,
+    token: &SecretString,
+) -> Result<(), StartFailure> {
+    match service.authenticated_status(client, token).await {
+        Ok(ServiceStatus {
+            phase: ServicePhase::Running,
+            ..
+        }) => Ok(()),
+        Ok(_) => Err(StartFailure::start(
+            CommandError::StartFailed,
+            "verifying_runtime",
+        )),
+        Err(ServiceError::Incompatible) => Err(StartFailure::incompatible("verifying_runtime")),
+        Err(ServiceError::InvalidRuntime | ServiceError::InvalidResponse) => {
+            Err(StartFailure::invalid_runtime("verifying_runtime"))
+        }
+        Err(ServiceError::Unauthorized | ServiceError::Forbidden) => Err(
+            StartFailure::authorization(CommandError::AuthorizationRequired, "verifying_runtime"),
+        ),
+        Err(ServiceError::Missing | ServiceError::Stopped) => Err(StartFailure::start(
+            CommandError::StartFailed,
+            "verifying_runtime",
+        )),
+    }
+}
+
+async fn wait_until_running(
+    runtime: &(impl CommandRuntime + Sync),
+    executable: &Path,
+    dependencies: &StartDependencies,
+    child: &mut Box<dyn StartedCore>,
+) -> Result<(), StartFailure> {
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        let connection = if runtime.establish_production_binding(executable) {
+            dependencies.service.connection(runtime.client()).await
+        } else {
+            Ok(CoreConnection::Missing)
+        };
+        match connection {
+            Ok(CoreConnection::Running(_)) => return Ok(()),
+            Ok(CoreConnection::Incompatible(_)) => {
+                stop_started_core(Some(child.as_mut()));
+                return Err(StartFailure::incompatible("starting"));
+            }
+            Ok(CoreConnection::InvalidRuntime) => {
+                stop_started_core(Some(child.as_mut()));
+                return Err(StartFailure::invalid_runtime("starting"));
+            }
+            Ok(CoreConnection::Missing | CoreConnection::Stopped) => {}
+            Err(error) => {
+                stop_started_core(Some(child.as_mut()));
+                return Err(StartFailure::start(error, "starting"));
+            }
         }
 
+        let child_exited = match child.try_wait() {
+            Ok(exited) => exited,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(StartFailure::start(error, "starting"));
+            }
+        };
+        if child_exited {
+            return Err(StartFailure::start(CommandError::StartFailed, "starting"));
+        }
         if Instant::now() >= deadline {
-            let child_exited = child.try_wait().is_ok_and(|status| status.is_some());
-            kill_created_child(&mut child);
-            return Err(if child_exited {
-                CommandError::StartFailed
-            } else {
-                CommandError::StartTimedOut
-            });
+            stop_started_core(Some(child.as_mut()));
+            return Err(StartFailure::start(CommandError::StartTimedOut, "starting"));
         }
         tokio::time::sleep_until(std::cmp::min(deadline, Instant::now() + RETRY_DELAY)).await;
     }
 }
 
-async fn ensure_authorized(
-    client: &wokrouter_wokcore_client::WokCoreClient,
-    executable: std::path::PathBuf,
-) -> Result<(), CommandError> {
-    let token = authorize(executable.clone()).await?;
-    match client.service_status(&token).await {
-        Ok(_) => Ok(()),
-        Err(ServiceError::Unauthorized | ServiceError::Forbidden) => {
-            let token = reauthorize(executable).await?;
-            client.service_status(&token).await?;
-            Ok(())
+fn stop_started_core(child: Option<&mut (dyn StartedCore + '_)>) {
+    let Some(child) = child else {
+        return;
+    };
+    if matches!(child.try_wait(), Ok(true)) {
+        return;
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn validate_options(options: StartOptions) -> Result<bool, CommandError> {
+    match (options.json, options.progress_jsonl) {
+        (false, false) => Ok(false),
+        (true, true) => Ok(true),
+        _ => Err(CommandError::Usage),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StartOutcome {
+    already_running: bool,
+}
+
+struct StartFailure {
+    command: CommandError,
+    code: &'static str,
+    phase: &'static str,
+}
+
+impl StartFailure {
+    fn start(command: CommandError, phase: &'static str) -> Self {
+        Self {
+            command,
+            code: "start_failed",
+            phase,
         }
-        Err(error) => Err(error.into()),
+    }
+
+    fn authorization(command: CommandError, phase: &'static str) -> Self {
+        Self {
+            command,
+            code: "authorization_failed",
+            phase,
+        }
+    }
+
+    fn incompatible(phase: &'static str) -> Self {
+        Self {
+            command: CommandError::Incompatible,
+            code: "incompatible_manifest",
+            phase,
+        }
+    }
+
+    fn invalid_runtime(phase: &'static str) -> Self {
+        Self {
+            command: CommandError::InvalidRuntime,
+            code: "invalid_install_state",
+            phase,
+        }
+    }
+
+    fn install(error: WokCoreInstallError, phase: &'static str) -> Self {
+        Self {
+            command: CommandError::CoreControl,
+            code: install_error_code(error),
+            phase,
+        }
+    }
+}
+
+fn install_error_code(error: WokCoreInstallError) -> &'static str {
+    match error {
+        WokCoreInstallError::InvalidSource | WokCoreInstallError::DownloadFailed => {
+            "download_failed"
+        }
+        WokCoreInstallError::InvalidInstallState => "invalid_install_state",
+        WokCoreInstallError::InstallInProgress => "install_in_progress",
+        WokCoreInstallError::InvalidManifest => "invalid_manifest",
+        WokCoreInstallError::InvalidSignature => "invalid_signature",
+        WokCoreInstallError::IncompatibleManifest => "incompatible_manifest",
+        WokCoreInstallError::ArtifactSizeMismatch => "artifact_size_mismatch",
+        WokCoreInstallError::ArtifactHashMismatch => "artifact_hash_mismatch",
+        WokCoreInstallError::InvalidArchive => "invalid_archive",
+        WokCoreInstallError::UnsafeInstallLocation => "unsafe_install_location",
+        WokCoreInstallError::AtomicInstallFailed => "install_failed",
+        WokCoreInstallError::InstallRecordFailed => "install_record_failed",
+    }
+}
+
+async fn resolve_authorized_token(
+    service: &dyn StartService,
+    client: &WokCoreClient,
+    executable: &Path,
+) -> Result<SecretString, CommandError> {
+    let token = service.authorize(client, executable).await?;
+    match service.authorization_status(client, &token).await {
+        Err(ServiceError::Unauthorized | ServiceError::Forbidden) => {
+            service.reauthorize(client, executable).await
+        }
+        Ok(_) | Err(_) => Ok(token),
     }
 }
 
@@ -94,28 +727,13 @@ fn spawn_command(executable: &Path) -> Command {
     command
 }
 
-fn kill_created_child(child: &mut Child) {
-    if child.try_wait().is_ok_and(|status| status.is_none()) {
-        let _ = child.kill();
-        let _ = child.wait();
+fn start_message(already_running: bool) -> &'static str {
+    if already_running {
+        "WokCore is already running."
+    } else {
+        "WokCore is running."
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{ffi::OsStr, path::Path};
-
-    use super::spawn_command;
-
-    #[test]
-    fn start_process_contains_only_the_fixed_serve_command() {
-        let executable = Path::new(r"C:\Program Files\WokCore\wokcore.exe");
-        let command = spawn_command(executable);
-
-        assert_eq!(command.get_program(), executable.as_os_str());
-        assert_eq!(
-            command.get_args().collect::<Vec<_>>(),
-            vec![OsStr::new("serve"), OsStr::new("--json")]
-        );
-    }
-}
+mod tests;

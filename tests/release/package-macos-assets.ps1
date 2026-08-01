@@ -454,7 +454,7 @@ function Get-ValidatedAppFingerprint {
         [StringComparer]::Ordinal
     )
     $forbidden = [regex]::new(
-        "(?i)(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen)"
+        "(?i)(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen|packaged[-_]?acceptance)"
     )
     foreach ($entry in $Inventory) {
         Assert-ExactProperties `
@@ -640,7 +640,7 @@ function Assert-DmgRoot {
         [StringComparer]::Ordinal
     )
     $forbidden = [regex]::new(
-        "(?i)(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen)"
+        "(?i)(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen|packaged[-_]?acceptance)"
     )
     foreach ($entry in $inventory) {
         Assert-ExactProperties `
@@ -686,7 +686,7 @@ function Assert-DmgRoot {
                 -Kind Directory `
                 -Description "DMG background metadata"
             $forbiddenMetadata = [regex]::new(
-                "(?i)(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen)"
+                "(?i)(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen|packaged[-_]?acceptance)"
             )
             foreach (
                 $item in Get-ChildItem `

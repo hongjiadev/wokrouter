@@ -1,11 +1,12 @@
 use std::process::ExitCode;
 
+use wokrouter_cli::commands::start::StartOptions;
 use wokrouter_cli::commands::{self, CommandError};
-use wokrouter_platform::{AppPaths, ClientKind};
+use wokrouter_platform::{AppPaths, ClientKind, select_wokcore_runtime};
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
-    Start,
+    Start(StartOptions),
     Status { json: bool },
     Stop,
     Integrate { client: ClientKind },
@@ -28,11 +29,44 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<u8, CommandError> {
     let command = parse_command(std::env::args().skip(1))?;
-    let paths = AppPaths::discover()?;
+    let paths = match AppPaths::discover() {
+        Ok(paths) => paths,
+        Err(error) if structured_start(&command) => {
+            return Ok(commands::start::render_structured_platform_error(
+                error,
+                &mut commands::start::StandardStartCommandOutput,
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
     match command {
-        Command::Start => commands::start::execute(&paths).await,
-        Command::Status { json } => commands::status::execute(&paths, json).await,
-        Command::Stop => commands::stop::execute(&paths).await,
+        Command::Start(options) => {
+            let runtime = match select_wokcore_runtime(&paths).await {
+                Ok(runtime) => runtime,
+                Err(error) if options.json && options.progress_jsonl => {
+                    return Ok(commands::start::render_structured_platform_error(
+                        error,
+                        &mut commands::start::StandardStartCommandOutput,
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            };
+            commands::start::execute_with_options(
+                &paths,
+                &runtime,
+                options,
+                &mut commands::start::StandardStartCommandOutput,
+            )
+            .await
+        }
+        Command::Status { json } => {
+            let runtime = select_wokcore_runtime(&paths).await?;
+            commands::status::execute(&runtime, json).await
+        }
+        Command::Stop => {
+            let runtime = select_wokcore_runtime(&paths).await?;
+            commands::stop::execute(&runtime).await
+        }
         Command::Integrate { client } => commands::integrations::integrate(&paths, client).await,
         Command::Restore { client } => commands::integrations::restore(&paths, client).await,
         Command::Doctor { json } => commands::integrations::doctor(&paths, json).await,
@@ -45,10 +79,31 @@ async fn run() -> Result<u8, CommandError> {
     }
 }
 
+fn structured_start(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Start(StartOptions {
+            json: true,
+            progress_jsonl: true,
+        })
+    )
+}
+
 fn parse_command(arguments: impl Iterator<Item = String>) -> Result<Command, CommandError> {
     let arguments = arguments.collect::<Vec<_>>();
     match arguments.as_slice() {
-        [command] if command == "start" => Ok(Command::Start),
+        [command] if command == "start" => Ok(Command::Start(StartOptions {
+            json: false,
+            progress_jsonl: false,
+        })),
+        [command, json, progress]
+            if command == "start" && json == "--json" && progress == "--progress-jsonl" =>
+        {
+            Ok(Command::Start(StartOptions {
+                json: true,
+                progress_jsonl: true,
+            }))
+        }
         [command] if command == "status" => Ok(Command::Status { json: false }),
         [command, option] if command == "status" && option == "--json" => {
             Ok(Command::Status { json: true })
@@ -92,8 +147,46 @@ fn parse_client(value: &str) -> Result<ClientKind, CommandError> {
 #[cfg(test)]
 mod tests {
     use super::{Command, parse_command};
-    use wokrouter_cli::commands::CommandError;
+    use wokrouter_cli::commands::{CommandError, start::StartOptions};
     use wokrouter_platform::ClientKind;
+
+    #[test]
+    fn start_modes_are_parsed_exactly() {
+        assert_eq!(
+            parse(&["start"]).unwrap(),
+            Command::Start(StartOptions {
+                json: false,
+                progress_jsonl: false,
+            })
+        );
+        assert_eq!(
+            parse(&["start", "--json", "--progress-jsonl"]).unwrap(),
+            Command::Start(StartOptions {
+                json: true,
+                progress_jsonl: true,
+            })
+        );
+        assert_eq!(
+            parse(&["start", "--progress-jsonl"]).unwrap_err(),
+            CommandError::Usage
+        );
+        assert_eq!(
+            parse(&["start", "--json"]).unwrap_err(),
+            CommandError::Usage
+        );
+        assert_eq!(
+            parse(&["start", "--progress-jsonl", "--json"]).unwrap_err(),
+            CommandError::Usage
+        );
+        assert_eq!(
+            parse(&["start", "--json", "--json", "--progress-jsonl"]).unwrap_err(),
+            CommandError::Usage
+        );
+        assert_eq!(
+            parse(&["start", "--json", "--progress-jsonl", "--extra"]).unwrap_err(),
+            CommandError::Usage
+        );
+    }
 
     #[test]
     fn client_and_doctor_commands_are_parsed_exactly() {

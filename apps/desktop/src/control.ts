@@ -13,6 +13,7 @@ const coreStatusSchema = z
       "incompatible",
       "invalid_runtime",
     ]),
+    runtime_channel: z.enum(["development", "production"]),
     version: z.string().trim().min(1).max(64).optional(),
     management_api_major: z.number().int().positive().optional(),
     capabilities: z.array(z.string().trim().min(1).max(128)).max(256),

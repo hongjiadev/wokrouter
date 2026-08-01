@@ -1,5 +1,7 @@
 mod support;
 
+use std::{fs, path::PathBuf, sync::Arc};
+
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
 use tempfile::tempdir;
@@ -9,7 +11,7 @@ use wiremock::{
 };
 use wokrouter_wokcore_client::{ManagementError, WokCoreClient};
 
-use support::{INSTANCE_ID, write_discovery};
+use support::{INSTANCE_ID, write_discovery, write_discovery_with_pid};
 
 const MANAGEMENT_TOKEN: &str = "wok_proxy_v1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const CLIENT_TOKEN: &str = "wok_proxy_v1_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
@@ -86,6 +88,104 @@ async fn runtime_bound_token_issue_revokes_when_discovery_identity_changes() {
             .unwrap_err(),
         ManagementError::InvalidRuntime
     );
+}
+
+#[tokio::test]
+async fn bound_runtime_token_issue_rejects_replaced_process_before_token_mutation() {
+    let first = MockServer::start().await;
+    let second = MockServer::start().await;
+    let (fixture, discovery, client, runtime) = bound_client_with_runtime(&first).await;
+    mount_handshake(&second, INSTANCE_ID).await;
+    mount_token_mutations(&first).await;
+    mount_token_mutations(&second).await;
+    write_discovery_with_pid(&discovery, &second.uri(), INSTANCE_ID, 42, 1, None);
+
+    assert_eq!(
+        client
+            .issue_proxy_token_for_runtime(
+                &runtime,
+                &SecretString::from(MANAGEMENT_TOKEN.to_owned()),
+                "wokrouter.codex",
+            )
+            .await
+            .unwrap_err(),
+        ManagementError::Missing
+    );
+    assert_no_token_mutations(&first).await;
+    assert_no_token_mutations(&second).await;
+    drop(fixture);
+}
+
+#[tokio::test]
+async fn bound_runtime_token_issue_rejects_missing_discovery_before_token_mutation() {
+    let server = MockServer::start().await;
+    let (fixture, discovery, client, runtime) = bound_client_with_runtime(&server).await;
+    mount_token_mutations(&server).await;
+    fs::remove_file(&discovery).unwrap();
+
+    assert_eq!(
+        client
+            .issue_proxy_token_for_runtime(
+                &runtime,
+                &SecretString::from(MANAGEMENT_TOKEN.to_owned()),
+                "wokrouter.codex",
+            )
+            .await
+            .unwrap_err(),
+        ManagementError::Missing
+    );
+    assert_no_token_mutations(&server).await;
+    drop(fixture);
+}
+
+#[tokio::test]
+async fn bound_runtime_token_issue_rejects_invalid_discovery_before_token_mutation() {
+    let server = MockServer::start().await;
+    let (fixture, discovery, client, runtime) = bound_client_with_runtime(&server).await;
+    mount_token_mutations(&server).await;
+    write_discovery_with_pid(&discovery, &server.uri(), INSTANCE_ID, 0, 1, None);
+
+    assert_eq!(
+        client
+            .issue_proxy_token_for_runtime(
+                &runtime,
+                &SecretString::from(MANAGEMENT_TOKEN.to_owned()),
+                "wokrouter.codex",
+            )
+            .await
+            .unwrap_err(),
+        ManagementError::InvalidRuntime
+    );
+    assert_no_token_mutations(&server).await;
+    drop(fixture);
+}
+
+#[tokio::test]
+async fn bound_runtime_token_issue_with_preallocated_id_rejects_replaced_process_before_token_mutation()
+ {
+    let first = MockServer::start().await;
+    let second = MockServer::start().await;
+    let (fixture, discovery, client, runtime) = bound_client_with_runtime(&first).await;
+    mount_handshake(&second, INSTANCE_ID).await;
+    mount_token_mutations(&first).await;
+    mount_token_mutations(&second).await;
+    write_discovery_with_pid(&discovery, &second.uri(), INSTANCE_ID, 42, 1, None);
+
+    assert_eq!(
+        client
+            .issue_proxy_token_for_runtime_with_preallocated_id(
+                &runtime,
+                &SecretString::from(MANAGEMENT_TOKEN.to_owned()),
+                "wokrouter.codex",
+                "01234567-89ab-4cde-8fab-0123456789ab",
+            )
+            .await
+            .unwrap_err(),
+        ManagementError::Missing
+    );
+    assert_no_token_mutations(&first).await;
+    assert_no_token_mutations(&second).await;
+    drop(fixture);
 }
 
 #[tokio::test]
@@ -190,6 +290,61 @@ fn client(server: &MockServer) -> (tempfile::TempDir, WokCoreClient) {
         fixture,
         WokCoreClient::new(discovery).expect("test client should initialize"),
     )
+}
+
+async fn bound_client_with_runtime(
+    server: &MockServer,
+) -> (
+    tempfile::TempDir,
+    PathBuf,
+    WokCoreClient,
+    wokrouter_wokcore_client::IntegrationRuntime,
+) {
+    mount_handshake(server, INSTANCE_ID).await;
+    let fixture = tempdir().unwrap();
+    let discovery = fixture.path().join("discovery.json");
+    write_discovery_with_pid(&discovery, &server.uri(), INSTANCE_ID, 41, 1, None);
+    let client = WokCoreClient::new(&discovery).unwrap();
+    let client = client.bound_to_runtime(
+        client.discovered_runtime_identity().unwrap(),
+        Arc::new(|_| true),
+    );
+    let runtime = client.integration_runtime().await.unwrap();
+    (fixture, discovery, client, runtime)
+}
+
+async fn mount_token_mutations(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/wokcore/v1/clients/authorize"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "client_id": "wokrouter.codex",
+            "token_id": "01234567-89ab-4cde-8fab-0123456789ab",
+            "token": CLIENT_TOKEN,
+            "scopes": ["proxy.use"]
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(
+            "/wokcore/v1/clients/wokrouter.codex/tokens/01234567-89ab-4cde-8fab-0123456789ab",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"revoked": true})))
+        .mount(server)
+        .await;
+}
+
+async fn assert_no_token_mutations(server: &MockServer) {
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        requests.iter().all(|request| {
+            !matches!(
+                request.url.path(),
+                "/wokcore/v1/clients/authorize"
+                    | "/wokcore/v1/clients/wokrouter.codex/tokens/01234567-89ab-4cde-8fab-0123456789ab"
+            )
+        }),
+        "bound token issuance must not authorize or revoke after discovery changes"
+    );
 }
 
 async fn mount_handshake(server: &MockServer, instance_id: &str) {

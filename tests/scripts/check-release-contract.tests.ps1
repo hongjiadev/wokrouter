@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$ScenarioPattern = ""
+)
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
@@ -21,6 +23,12 @@ function New-ReleaseFixture {
     )
     $null = New-Item -ItemType Directory -Path (Join-Path $root ".github/workflows") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri/src") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri/capabilities") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/scripts") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/cli/src/bin") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/cli/src/commands") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/cli/src/commands/start") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "docs/operations") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "tests/release") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "release") -Force
@@ -29,7 +37,16 @@ function New-ReleaseFixture {
             ".github/workflows/release.yml",
             "Cargo.toml",
             "Cargo.lock",
+            "apps/cli/Cargo.toml",
+            "apps/cli/src/main.rs",
+            "apps/cli/src/bin/wokrouter-packaged-acceptance.rs",
+            "apps/cli/src/commands/start.rs",
+            "apps/cli/src/commands/start/tests.rs",
             "apps/desktop/package.json",
+            "apps/desktop/scripts/stage-sidecars.mjs",
+            "apps/desktop/src-tauri/Cargo.toml",
+            "apps/desktop/src-tauri/src/main.rs",
+            "apps/desktop/src-tauri/capabilities/main.json",
             "apps/desktop/src-tauri/tauri.conf.json",
             "docs/operations/development.md",
             "tests/release/WokRouter.ReleaseContract.psm1",
@@ -48,6 +65,27 @@ function New-ReleaseFixture {
     return $root
 }
 
+function Set-FixtureLineEndings {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][ValidateSet("crlf", "lf")][string] $Style
+    )
+
+    $path = Join-Path $Root ".github/workflows/release.yml"
+    $content = (Get-Content -LiteralPath $path -Raw -Encoding UTF8).Replace(
+        "`r`n",
+        "`n"
+    )
+    if ($Style -ceq "crlf") {
+        $content = $content.Replace("`n", "`r`n")
+    }
+    [IO.File]::WriteAllText(
+        $path,
+        $content,
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
 function Edit-FixtureFile {
     param(
         [Parameter(Mandatory)][string]$Root,
@@ -63,7 +101,42 @@ function Edit-FixtureFile {
     if (-not $content.Contains($old)) {
         throw "Fixture mutation source was not found in ${RelativePath}: $OldText"
     }
-    Set-Content -LiteralPath $path -Value $content.Replace($old, $new) -Encoding UTF8
+    [IO.File]::WriteAllText(
+        $path,
+        $content.Replace($old, $new),
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
+function Wrap-FixtureBlockInFalseCondition {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $RelativePath,
+        [Parameter(Mandatory)][string] $Block
+    )
+
+    $path = Join-Path $Root $RelativePath
+    $content = (Get-Content -LiteralPath $path -Raw -Encoding UTF8).Replace(
+        "`r`n",
+        "`n"
+    )
+    $wanted = $Block.Replace("`r`n", "`n").TrimEnd("`n")
+    if (
+        [regex]::Matches(
+            $content,
+            [regex]::Escape($wanted)
+        ).Count -ne 1
+    ) {
+        throw "Fixture block is not unique in ${RelativePath}: $Block"
+    }
+    $indent = [regex]::Match($wanted, '^[ \t]*').Value
+    $indented = [regex]::Replace($wanted, '(?m)^', '    ')
+    $wrapped = "$indent" + 'if ($false) {' + "`n$indented`n$indent}"
+    [IO.File]::WriteAllText(
+        $path,
+        $content.Replace($wanted, $wrapped),
+        [Text.UTF8Encoding]::new($false)
+    )
 }
 
 function Invoke-Check {
@@ -119,6 +192,12 @@ function Assert-Rejects {
 function Invoke-Scenario {
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][scriptblock]$Test)
 
+    if (
+        $ScenarioPattern.Length -gt 0 -and
+        $Name -notmatch $ScenarioPattern
+    ) {
+        return
+    }
     $script:scenarioCount += 1
     try {
         & $Test
@@ -134,6 +213,1283 @@ try {
     Invoke-Scenario -Name "real release workflow satisfies the contract" -Test {
         $root = New-ReleaseFixture
         Assert-Passes -Root $root -Scenario "real release fixture"
+    }
+
+    Invoke-Scenario -Name "acceptance CLI bin must remain required-feature gated" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/Cargo.toml" `
+            -OldText 'required-features = ["packaged-acceptance"]' `
+            -NewText 'required-features = []'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "required-feature gated" `
+            -Scenario "ungated acceptance CLI bin"
+    }
+
+    foreach ($manifestMutation in @(
+            @{
+                Name = "automatic binary discovery"
+                Old = "autobins = false"
+                New = "autobins = true"
+            },
+            @{
+                Name = "default acceptance feature"
+                Old = "default = []"
+                New = 'default = ["packaged-acceptance"]'
+            }
+        )) {
+        Invoke-Scenario -Name "CLI manifest rejects $($manifestMutation.Name)" -Test {
+            $root = New-ReleaseFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "apps/cli/Cargo.toml" `
+                -OldText $manifestMutation.Old `
+                -NewText $manifestMutation.New
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText "explicit non-default, required-feature gated bin" `
+                -Scenario $manifestMutation.Name
+        }
+    }
+
+    Invoke-Scenario -Name "normal CLI main cannot read acceptance environment" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/main.rs" `
+            -OldText 'async fn run() -> Result<u8, CommandError> {' `
+            -NewText @'
+async fn run() -> Result<u8, CommandError> {
+    let _ = std::env::var("WOKROUTER_PACKAGED_ACCEPTANCE_ORIGIN");
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "normal CLI must not reference packaged acceptance" `
+            -Scenario "normal CLI acceptance environment read"
+    }
+
+    foreach ($desktopManifestMutation in @(
+            @{
+                Name = "default desktop acceptance feature"
+                Old = "default = []"
+                New = 'default = ["packaged-acceptance"]'
+            },
+            @{
+                Name = "desktop seam detached from acceptance CLI"
+                Old = 'packaged-acceptance = ["wokrouter-cli/packaged-acceptance", "tauri/custom-protocol"]'
+                New = "packaged-acceptance = []"
+            }
+        )) {
+        Invoke-Scenario -Name "desktop manifest rejects $($desktopManifestMutation.Name)" -Test {
+            $root = New-ReleaseFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "apps/desktop/src-tauri/Cargo.toml" `
+                -OldText $desktopManifestMutation.Old `
+                -NewText $desktopManifestMutation.New
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText "desktop acceptance seam must be one exact non-default feature" `
+                -Scenario $desktopManifestMutation.Name
+        }
+    }
+
+    Invoke-Scenario -Name "normal CLI install source remains production under all features" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/commands/start.rs" `
+            -OldText @'
+fn production_install_source() -> Result<WokCoreInstallSource, WokCoreInstallError> {
+    WokCoreInstallSource::production()
+}
+'@ `
+            -NewText @'
+fn production_install_source() -> Result<WokCoreInstallSource, WokCoreInstallError> {
+    packaged_acceptance_install_source()
+}
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "normal CLI install source must remain production" `
+            -Scenario "all-features normal CLI acceptance source"
+    }
+
+    foreach ($normalCaller in @(
+            @{
+                Name = "unstructured start caller"
+                Old = 'let install_source = production_install_source().map_err'
+                New = 'let install_source = packaged_acceptance_install_source().map_err'
+            },
+            @{
+                Name = "structured start caller"
+                Old = 'let install_source = match production_install_source() {'
+                New = 'let install_source = match packaged_acceptance_install_source() {'
+            }
+        )) {
+        Invoke-Scenario -Name "$($normalCaller.Name) remains production" -Test {
+            $root = New-ReleaseFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "apps/cli/src/commands/start.rs" `
+                -OldText $normalCaller.Old `
+                -NewText $normalCaller.New
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText "normal CLI install source must remain production" `
+                -Scenario $normalCaller.Name
+        }
+    }
+
+    Invoke-Scenario -Name "commented production calls cannot mask an acceptance CLI caller" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/commands/start.rs" `
+            -OldText '    let install_source = production_install_source().map_err(|_| CommandError::CoreControl)?;' `
+            -NewText @'
+    // let install_source = production_install_source().map_err(|_| CommandError::CoreControl)?;
+    let install_source = packaged_acceptance_install_source()
+        .map_err(|_| CommandError::CoreControl)?;
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "normal CLI install source" `
+            -Scenario "acceptance CLI caller masked by a production comment"
+    }
+
+    Invoke-Scenario -Name "disabled production calls cannot mask an acceptance CLI caller" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/commands/start.rs" `
+            -OldText '    let install_source = production_install_source().map_err(|_| CommandError::CoreControl)?;' `
+            -NewText @'
+    #[cfg(any())]
+    let install_source = production_install_source().map_err(|_| CommandError::CoreControl)?;
+    #[cfg(not(any()))]
+    let install_source = packaged_acceptance_install_source()
+        .map_err(|_| CommandError::CoreControl)?;
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "normal CLI install source" `
+            -Scenario "acceptance CLI caller masked by disabled production code"
+    }
+
+    Invoke-Scenario -Name "all-features behavior test must exercise the normal entrypoint" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/commands/start/tests.rs" `
+            -OldText '        execute_with_options(' `
+            -NewText '        execute_packaged_acceptance_with_options('
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "all-features normal CLI behavior test" `
+            -Scenario "all-features behavior test bypass"
+    }
+
+    Invoke-Scenario -Name "all-features behavior test cannot be conditionally disabled" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/commands/start/tests.rs" `
+            -OldText '#[cfg(feature = "packaged-acceptance")]' `
+            -NewText '#[cfg(any())]'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "all-features normal CLI behavior test" `
+            -Scenario "disabled all-features behavior test"
+    }
+
+    Invoke-Scenario -Name "all-features behavior test requires the exact acceptance feature" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/commands/start/tests.rs" `
+            -OldText '#[cfg(feature = "packaged-acceptance")]' `
+            -NewText '#[cfg(feature = "disabled-acceptance")]'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "all-features normal CLI behavior test" `
+            -Scenario "all-features behavior test with an unknown equal-length feature"
+    }
+
+    Invoke-Scenario -Name "all-features behavior test cannot be ignored" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/commands/start/tests.rs" `
+            -OldText @'
+#[cfg(feature = "packaged-acceptance")]
+#[tokio::test]
+async fn normal_cli_entrypoint_ignores_acceptance_source_with_all_features() {
+'@ `
+            -NewText @'
+#[ignore]
+#[cfg(feature = "packaged-acceptance")]
+#[tokio::test]
+async fn normal_cli_entrypoint_ignores_acceptance_source_with_all_features() {
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "all-features normal CLI behavior test" `
+            -Scenario "ignored all-features behavior test"
+    }
+
+    Invoke-Scenario -Name "commented sidecar staging cannot mask active release arguments" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/scripts/stage-sidecars.mjs" `
+            -OldText @'
+export function cargoBuildArguments(targetTriple) {
+  return [
+    "build",
+    "--locked",
+    "--release",
+    "--target",
+    supportedTargetTriple(targetTriple),
+    "-p",
+    "wokrouter-cli",
+    "--bin",
+    "wokrouter",
+    "--no-default-features",
+  ];
+}
+'@ `
+            -NewText @'
+/*
+export function cargoBuildArguments(targetTriple) {
+  return [
+    "build",
+    "--locked",
+    "--release",
+    "--target",
+    supportedTargetTriple(targetTriple),
+    "-p",
+    "wokrouter-cli",
+    "--bin",
+    "wokrouter",
+    "--no-default-features",
+  ];
+}
+*/
+export function cargoBuildArguments(targetTriple) {
+  return [
+    "build",
+    "--locked",
+    "--release",
+    "--target",
+    supportedTargetTriple(targetTriple),
+    "-p",
+    "wokrouter-cli",
+    "--bin",
+    "wokrouter",
+  ];
+}
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "Release sidecar staging" `
+            -Scenario "active sidecar arguments masked by a commented release function"
+    }
+
+    Invoke-Scenario -Name "sidecar staging must execute with exact release arguments" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/scripts/stage-sidecars.mjs" `
+            -OldText '    "wokrouter",' `
+            -NewText '    "badrouter",'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "Release sidecar staging" `
+            -Scenario "same-length wrong sidecar binary name"
+    }
+
+    Invoke-Scenario -Name "release workflow cannot enable packaged acceptance" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText '            --config ../../target/wokrouter-release-config.json' `
+            -NewText @'
+            --config ../../target/wokrouter-release-config.json `
+            -- --features packaged-acceptance
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "must not enable or package packaged acceptance" `
+            -Scenario "release acceptance feature"
+    }
+
+    Invoke-Scenario -Name "release staging builds only the normal CLI target" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/scripts/stage-sidecars.mjs" `
+            -OldText '    "wokrouter",' `
+            -NewText '    "wokrouter-packaged-acceptance",'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "normal CLI target with no default features" `
+            -Scenario "acceptance sidecar staging"
+    }
+
+    Invoke-Scenario -Name "release staging cannot enable default features" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/scripts/stage-sidecars.mjs" `
+            -OldText '    "--no-default-features",' `
+            -NewText @'
+    "--features",
+    "packaged-acceptance",
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "normal CLI target with no default features" `
+            -Scenario "acceptance staging feature"
+    }
+
+    Invoke-Scenario -Name "Tauri external binaries exclude acceptance" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src-tauri/tauri.conf.json" `
+            -OldText '"externalBin": ["binaries/wokrouter"]' `
+            -NewText '"externalBin": ["binaries/wokrouter", "binaries/wokrouter-packaged-acceptance"]'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "exactly one production sidecar" `
+            -Scenario "acceptance Tauri external binary"
+    }
+
+    foreach ($packager in @("windows", "linux", "macos")) {
+        Invoke-Scenario -Name "$packager packager forbids acceptance payload names" -Test {
+            $root = New-ReleaseFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "tests/release/package-$packager-assets.ps1" `
+                -OldText '|packaged[-_]?acceptance' `
+                -NewText ''
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText "forbid packaged acceptance payload names" `
+                -Scenario "$packager packager acceptance name"
+        }
+    }
+
+    Invoke-Scenario -Name "release upload remains one exact allowlist" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText '          path: target/wokrouter-public-${{ matrix.target }}/*' `
+            -NewText @'
+          path: |
+            target/wokrouter-public-${{ matrix.target }}/*
+            target/**/*
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "one exact normalized payload allowlist" `
+            -Scenario "broad release upload"
+    }
+
+    Invoke-Scenario -Name "release event capability cannot become empty" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src-tauri/capabilities/main.json" `
+            -OldText @'
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+'@ `
+            -NewText '  "permissions": []'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "exact event listen/unlisten capability" `
+            -Scenario "empty release event capability"
+    }
+
+    Invoke-Scenario -Name "release workflow identity accepts CRLF and LF only" -Test {
+        foreach ($style in @("crlf", "lf")) {
+            $root = New-ReleaseFixture
+            Set-FixtureLineEndings -Root $root -Style $style
+            Assert-Passes `
+                -Root $root `
+                -Scenario "$style release fixture"
+        }
+
+        $root = New-ReleaseFixture
+        Set-FixtureLineEndings -Root $root -Style "lf"
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText "  cancel-in-progress: false" `
+            -NewText "  cancel-in-progress: true"
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "without cancellation" `
+            -Scenario "changed LF release identity"
+    }
+
+    Invoke-Scenario -Name "desktop source must retain the release-only GUI attribute" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src-tauri/src/main.rs" `
+            -OldText (
+                '#![cfg_attr(all(windows, not(debug_assertions)), ' +
+                'windows_subsystem = "windows")]'
+            ) `
+            -NewText (
+                '#![cfg_attr(all(windows, debug_assertions), ' +
+                'windows_subsystem = "windows")]'
+            )
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "release-only GUI subsystem attribute" `
+            -Scenario "missing desktop subsystem attribute"
+    }
+
+    Invoke-Scenario -Name "desktop source rejects a second active subsystem attribute" -Test {
+        $root = New-ReleaseFixture
+        $attribute = (
+            '#![cfg_attr(all(windows, not(debug_assertions)), ' +
+            'windows_subsystem = "windows")]'
+        )
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src-tauri/src/main.rs" `
+            -OldText $attribute `
+            -NewText (
+                $attribute + "`n" +
+                '#![windows_subsystem = "windows"]'
+            )
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "only active Windows subsystem declaration" `
+            -Scenario "second active desktop subsystem attribute"
+    }
+
+    Invoke-Scenario -Name "only desktop main may declare a Windows subsystem" -Test {
+        $root = New-ReleaseFixture
+        $otherMain = Join-Path $root "crates/other/src/main.rs"
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $otherMain)) |
+            Out-Null
+        [IO.File]::WriteAllText(
+            $otherMain,
+            "#![windows_subsystem = `"windows`"]`nfn main() {}`n",
+            [Text.UTF8Encoding]::new($false)
+        )
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "only in desktop main.rs" `
+            -Scenario "CLI-like main declaring a Windows subsystem"
+
+        $root = New-ReleaseFixture
+        $otherMain = Join-Path $root "crates/other/src/main.rs"
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $otherMain)) |
+            Out-Null
+        [IO.File]::WriteAllText(
+            $otherMain,
+            "// windows_subsystem is intentionally absent here.`nfn main() {}`n",
+            [Text.UTF8Encoding]::new($false)
+        )
+        Assert-Passes `
+            -Root $root `
+            -Scenario "comment mentioning a Windows subsystem"
+
+        $root = New-ReleaseFixture
+        $otherMain = Join-Path $root "crates/other/src/main.rs"
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $otherMain)) |
+            Out-Null
+        [IO.File]::WriteAllText(
+            $otherMain,
+            (
+                "/*`n" +
+                "#![windows_subsystem = `"windows`"]`n" +
+                "*/`n" +
+                "fn main() {}`n"
+            ),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Assert-Passes `
+            -Root $root `
+            -Scenario "block comment containing a subsystem attribute"
+    }
+
+    $stringDecoys = @(
+        @{
+            Name = "ordinary multiline string"
+            Source = @'
+const SUBSYSTEM_TEXT: &str = "
+#![windows_subsystem = \u{22}windows\u{22}]
+";
+fn main() {}
+'@
+        },
+        @{
+            Name = "raw string"
+            Source = @'
+const SUBSYSTEM_TEXT: &str = r##"
+#![windows_subsystem = "windows"]
+"##;
+fn main() {}
+'@
+        },
+        @{
+            Name = "byte string"
+            Source = @'
+const SUBSYSTEM_TEXT: &[u8] = b"
+#![windows_subsystem = \x22windows\x22]
+";
+fn main() {}
+'@
+        },
+        @{
+            Name = "byte raw string"
+            Source = @'
+const SUBSYSTEM_TEXT: &[u8] = br##"
+#![windows_subsystem = "windows"]
+"##;
+fn main() {}
+'@
+        }
+    )
+    foreach ($decoy in $stringDecoys) {
+        Invoke-Scenario `
+            -Name "other main ignores subsystem text in $($decoy.Name)" `
+            -Test {
+                $root = New-ReleaseFixture
+                $otherMain = Join-Path $root "crates/other/src/main.rs"
+                [IO.Directory]::CreateDirectory(
+                    (Split-Path -Parent $otherMain)
+                ) | Out-Null
+                [IO.File]::WriteAllText(
+                    $otherMain,
+                    $decoy.Source,
+                    [Text.UTF8Encoding]::new($false)
+                )
+                Assert-Passes `
+                    -Root $root `
+                    -Scenario "subsystem text in $($decoy.Name)"
+            }
+    }
+
+    $deadCodeCases = @(
+        @{
+            Name = "PE subsystem helper cannot be wrapped in dead code"
+            Path = "tests/release/WokRouter.ReleaseContract.psm1"
+            Expected = "script-scope PE subsystem helper"
+            Block = @'
+function Get-PeSubsystem {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $Path)
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 0x40 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+        throw "Windows executable has no valid DOS header."
+    }
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+    if (
+        $peOffset -lt 0 -or
+        $peOffset + 24 + 70 -gt $bytes.Length -or
+        [Text.Encoding]::ASCII.GetString($bytes, $peOffset, 4) -cne "PE`0`0"
+    ) {
+        throw "Windows executable has no valid PE header."
+    }
+    $optionalHeader = $peOffset + 24
+    $magic = [BitConverter]::ToUInt16($bytes, $optionalHeader)
+    if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {
+        throw "Windows executable has an unsupported optional header."
+    }
+    return [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)
+}
+'@
+        },
+        @{
+            Name = "source desktop GUI guard cannot be wrapped in dead code"
+            Path = "tests/release/package-windows-assets.ps1"
+            Expected = "source desktop GUI subsystem check"
+            Block = @'
+if ((& $peSubsystemCommand -Path $desktop) -ne 2) {
+    throw "Windows desktop executable must use the GUI subsystem."
+}
+'@
+        },
+        @{
+            Name = "source sidecar console guard cannot be wrapped in dead code"
+            Path = "tests/release/package-windows-assets.ps1"
+            Expected = "source sidecar console subsystem check"
+            Block = @'
+if ((& $peSubsystemCommand -Path $sidecar) -ne 3) {
+    throw "Windows sidecar executable must use the console subsystem."
+}
+'@
+        },
+        @{
+            Name = "MSI desktop GUI guard cannot be wrapped in dead code"
+            Path = "tests/release/package-windows-assets.ps1"
+            Expected = "MSI desktop GUI subsystem check"
+            Block = @'
+    if ((& $peSubsystemCommand -Path $byName["wokrouter-desktop.exe"]) -ne 2) {
+        throw "MSI desktop executable must use the GUI subsystem."
+    }
+'@
+        },
+        @{
+            Name = "MSI sidecar console guard cannot be wrapped in dead code"
+            Path = "tests/release/package-windows-assets.ps1"
+            Expected = "MSI sidecar console subsystem check"
+            Block = @'
+    if ((& $peSubsystemCommand -Path $byName["wokrouter.exe"]) -ne 3) {
+        throw "MSI sidecar executable must use the console subsystem."
+    }
+'@
+        },
+        @{
+            Name = "Portable desktop GUI guard cannot be wrapped in dead code"
+            Path = "tests/release/package-windows-assets.ps1"
+            Expected = "Portable desktop GUI subsystem check"
+            Block = @'
+    if ((& $peSubsystemCommand -Path $portableDesktop) -ne 2) {
+        throw "Portable desktop executable must use the GUI subsystem."
+    }
+'@
+        },
+        @{
+            Name = "Portable sidecar console guard cannot be wrapped in dead code"
+            Path = "tests/release/package-windows-assets.ps1"
+            Expected = "Portable sidecar console subsystem check"
+            Block = @'
+    if ((& $peSubsystemCommand -Path $portableSidecar) -ne 3) {
+        throw "Portable sidecar executable must use the console subsystem."
+    }
+'@
+        }
+    )
+    foreach ($case in $deadCodeCases) {
+        Invoke-Scenario -Name $case.Name -Test {
+            $root = New-ReleaseFixture
+            Wrap-FixtureBlockInFalseCondition `
+                -Root $root `
+                -RelativePath $case.Path `
+                -Block $case.Block
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText $case.Expected `
+                -Scenario $case.Name
+        }
+    }
+
+    Invoke-Scenario -Name "PE subsystem helper and export must remain exact" -Test {
+        foreach ($mutation in @(
+                @{
+                    Old = (
+                        'if ($bytes.Length -lt 0x40 -or ' +
+                        '$bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {'
+                    )
+                    New = (
+                        'if ($bytes.Length -lt 0x20 -or ' +
+                        '$bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { # ' +
+                        'if ($bytes.Length -lt 0x40 -or ' +
+                        '$bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {'
+                    )
+                },
+                @{
+                    Old = ", Get-PeSubsystem"
+                    New = "`n    # , Get-PeSubsystem"
+                }
+            )) {
+            $root = New-ReleaseFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "tests/release/WokRouter.ReleaseContract.psm1" `
+                -OldText $mutation.Old `
+                -NewText $mutation.New
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText "PE subsystem helper" `
+                -Scenario "missing PE subsystem helper/export"
+        }
+    }
+
+    Invoke-Scenario -Name "PE helper behavior cannot be supplied by an unrelated decoy" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/WokRouter.ReleaseContract.psm1" `
+            -OldText 'if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {' `
+            -NewText 'if ($magic -ne [UInt16] 0x20B) {'
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/WokRouter.ReleaseContract.psm1" `
+            -OldText @'
+Export-ModuleMember `
+    -Function Get-WokRouterTargetContracts, Get-WokRouterPayloadNames, Get-PeSubsystem
+'@ `
+            -NewText @'
+function Test-PeSubsystemRequirementDecoy {
+    if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {
+        throw "Windows executable has an unsupported optional header."
+    }
+}
+
+Export-ModuleMember `
+    -Function Get-WokRouterTargetContracts, Get-WokRouterPayloadNames, Get-PeSubsystem
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "exact script-scope PE subsystem helper" `
+            -Scenario "PE32 support supplied by an unrelated function"
+    }
+
+    Invoke-Scenario -Name "PE helper behavior cannot survive only in dead code" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/WokRouter.ReleaseContract.psm1" `
+            -OldText @'
+    if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {
+        throw "Windows executable has an unsupported optional header."
+    }
+'@ `
+            -NewText @'
+    if ($false) {
+        if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {
+            throw "Windows executable has an unsupported optional header."
+        }
+    }
+    if ($magic -ne [UInt16] 0x20B) {
+        throw "Windows executable has an unsupported optional header."
+    }
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "exact script-scope PE subsystem helper" `
+            -Scenario "PE32 support surviving only in dead code"
+    }
+
+    Invoke-Scenario -Name "PE helper cannot add an active Begin block" -Test {
+        $root = New-ReleaseFixture
+        # Keep EndBlock statement extents identical to the canonical helper.
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/WokRouter.ReleaseContract.psm1" `
+            -OldText @'
+function Get-PeSubsystem {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $Path)
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 0x40 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+        throw "Windows executable has no valid DOS header."
+    }
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+    if (
+        $peOffset -lt 0 -or
+        $peOffset + 24 + 70 -gt $bytes.Length -or
+        [Text.Encoding]::ASCII.GetString($bytes, $peOffset, 4) -cne "PE`0`0"
+    ) {
+        throw "Windows executable has no valid PE header."
+    }
+    $optionalHeader = $peOffset + 24
+    $magic = [BitConverter]::ToUInt16($bytes, $optionalHeader)
+    if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {
+        throw "Windows executable has an unsupported optional header."
+    }
+    return [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)
+}
+'@ `
+            -NewText @'
+function Get-PeSubsystem {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $Path)
+
+    begin {
+        if ($Path -match "never-match-review") {
+            throw "unexpected path"
+        }
+    }
+    end {
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 0x40 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+        throw "Windows executable has no valid DOS header."
+    }
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+    if (
+        $peOffset -lt 0 -or
+        $peOffset + 24 + 70 -gt $bytes.Length -or
+        [Text.Encoding]::ASCII.GetString($bytes, $peOffset, 4) -cne "PE`0`0"
+    ) {
+        throw "Windows executable has no valid PE header."
+    }
+    $optionalHeader = $peOffset + 24
+    $magic = [BitConverter]::ToUInt16($bytes, $optionalHeader)
+    if ($magic -notin @([UInt16] 0x10B, [UInt16] 0x20B)) {
+        throw "Windows executable has an unsupported optional header."
+    }
+    return [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)
+    }
+}
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "exact script-scope PE subsystem helper" `
+            -Scenario "helper with an active Begin block"
+    }
+
+    Invoke-Scenario -Name "Windows packager cannot shadow the PE subsystem module helper" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+'@ `
+            -NewText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+function Get-PeSubsystem {
+    param([Parameter(Mandatory)][string] $Path)
+
+    if (-not [string]::IsNullOrWhiteSpace($ToolAdapterPath)) {
+        return WokRouter.ReleaseContract\Get-PeSubsystem -Path $Path
+    }
+    return [UInt16] 2
+}
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "owned PE subsystem FunctionInfo snapshot binding" `
+            -Scenario "packager-local PE subsystem shadow"
+    }
+
+    Invoke-Scenario -Name "Windows packager cannot define a qualified PE subsystem shadow" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+'@ `
+            -NewText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+function WokRouter.ReleaseContract\Get-PeSubsystem {
+    param([Parameter(Mandatory)][string] $Path)
+
+    if ([IO.Path]::GetFileName($Path) -ceq "wokrouter-desktop.exe") {
+        return [UInt16] 2
+    }
+    return [UInt16] 3
+}
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "owned PE subsystem FunctionInfo snapshot binding" `
+            -Scenario "qualified packager-local PE subsystem shadow"
+    }
+
+    Invoke-Scenario -Name "Windows packager cannot rewrite the owned PE subsystem command" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+'@ `
+            -NewText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+Set-Variable -Name peSubsystemCommand -Value {
+    param([string] $Path)
+
+    if ([IO.Path]::GetFileName($Path) -ceq "wokrouter-desktop.exe") {
+        return [UInt16] 2
+    }
+    return [UInt16] 3
+}
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "owned PE subsystem FunctionInfo snapshot binding" `
+            -Scenario "PE subsystem FunctionInfo rewritten through Set-Variable"
+    }
+
+    Invoke-Scenario -Name "Windows packager cannot rewrite the module PE subsystem function" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+'@ `
+            -NewText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+& $releaseContractModule {
+    Set-Item Function:Get-PeSubsystem {
+        param([string] $Path)
+
+        if ([IO.Path]::GetFileName($Path) -ceq "wokrouter-desktop.exe") {
+            return [UInt16] 2
+        }
+        return [UInt16] 3
+    }
+}
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "owned PE subsystem FunctionInfo snapshot binding" `
+            -Scenario "module PE subsystem function rewritten through Function provider"
+    }
+
+    $guiSidecarMutations = @(
+        @{
+            Old = @'
+if ((& $peSubsystemCommand -Path $sidecar) -ne 3) {
+    throw "Windows sidecar executable must use the console subsystem."
+}
+'@
+            New = @'
+if ((& $peSubsystemCommand -Path $sidecar) -ne 2) {
+    throw "Windows sidecar executable must use the console subsystem."
+}
+'@
+            Name = "source GUI CLI sidecar"
+            Expected = "source sidecar console subsystem check"
+        },
+        @{
+            Old = @'
+    if ((& $peSubsystemCommand -Path $byName["wokrouter.exe"]) -ne 3) {
+        throw "MSI sidecar executable must use the console subsystem."
+    }
+'@
+            New = @'
+    if ((& $peSubsystemCommand -Path $byName["wokrouter.exe"]) -ne 2) {
+        throw "MSI sidecar executable must use the console subsystem."
+    }
+'@
+            Name = "MSI GUI CLI sidecar"
+            Expected = "MSI sidecar console subsystem check"
+        },
+        @{
+            Old = @'
+    if ((& $peSubsystemCommand -Path $portableSidecar) -ne 3) {
+        throw "Portable sidecar executable must use the console subsystem."
+    }
+'@
+            New = @'
+    if ((& $peSubsystemCommand -Path $portableSidecar) -ne 2) {
+        throw "Portable sidecar executable must use the console subsystem."
+    }
+'@
+            Name = "Portable GUI CLI sidecar"
+            Expected = "Portable sidecar console subsystem check"
+        }
+    )
+    foreach ($mutation in $guiSidecarMutations) {
+        Invoke-Scenario -Name "$($mutation.Name) contract mutation fails" -Test {
+            $root = New-ReleaseFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "tests/release/package-windows-assets.ps1" `
+                -OldText $mutation.Old `
+                -NewText $mutation.New
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText $mutation.Expected `
+                -Scenario $mutation.Name
+        }
+    }
+
+    Invoke-Scenario -Name "Portable desktop query must come from the extracted archive" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+    $portableDesktopFiles = @(
+        Get-ChildItem `
+            -LiteralPath $portableExtracted `
+            -Force `
+            -Recurse `
+            -File |
+            Where-Object Name -CEQ "wokrouter-desktop.exe"
+    )
+'@ `
+            -NewText @'
+    $portableDesktopFiles = @(
+        Get-Item -LiteralPath $desktop
+    )
+    if ($false) {
+        $portableDesktopFiles = @(
+            Get-ChildItem `
+                -LiteralPath $portableExtracted `
+                -Force `
+                -Recurse `
+                -File |
+                Where-Object Name -CEQ "wokrouter-desktop.exe"
+        )
+    }
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "Portable desktop extraction provenance" `
+            -Scenario "Portable desktop selected from the source executable"
+    }
+
+    Invoke-Scenario -Name "Portable desktop query cannot be overwritten before validation" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+    $portableDesktopFiles = @(
+        Get-ChildItem `
+            -LiteralPath $portableExtracted `
+            -Force `
+            -Recurse `
+            -File |
+            Where-Object Name -CEQ "wokrouter-desktop.exe"
+    )
+'@ `
+            -NewText @'
+    $portableDesktopFiles = @(
+        Get-ChildItem `
+            -LiteralPath $portableExtracted `
+            -Force `
+            -Recurse `
+            -File |
+            Where-Object Name -CEQ "wokrouter-desktop.exe"
+    )
+    $portableDesktopFiles = @(
+        Get-Item -LiteralPath $desktop
+    )
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "Portable desktop extraction provenance" `
+            -Scenario "Portable candidate reassigned from the source executable"
+    }
+
+    Invoke-Scenario -Name "Portable sidecar query must come from the extracted archive" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+    $portableSidecarFiles = @(
+        Get-ChildItem `
+            -LiteralPath $portableExtracted `
+            -Force `
+            -Recurse `
+            -File |
+            Where-Object Name -CEQ "wokrouter.exe"
+    )
+'@ `
+            -NewText @'
+    $portableSidecarFiles = @(
+        Get-Item -LiteralPath $sidecar
+    )
+    if ($false) {
+        $portableSidecarFiles = @(
+            Get-ChildItem `
+                -LiteralPath $portableExtracted `
+                -Force `
+                -Recurse `
+                -File |
+                Where-Object Name -CEQ "wokrouter.exe"
+        )
+    }
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "Portable sidecar extraction provenance" `
+            -Scenario "Portable sidecar selected from the source executable"
+    }
+
+    Invoke-Scenario -Name "Portable extracted root cannot be overwritten before validation" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+    Assert-TreeSafe `
+        -Root $portableExtracted `
+        -Description "Extracted Portable archive"
+    $portableDesktopFiles = @(
+'@ `
+            -NewText @'
+    Assert-TreeSafe `
+        -Root $portableExtracted `
+        -Description "Extracted Portable archive"
+    $portableExtracted = Join-Path $temporary "portable-source-decoy"
+    [IO.Directory]::CreateDirectory($portableExtracted) | Out-Null
+    [IO.File]::Copy(
+        $desktop,
+        (Join-Path $portableExtracted "wokrouter-desktop.exe")
+    )
+    $portableDesktopFiles = @(
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "Portable desktop extraction provenance" `
+            -Scenario "Portable extracted root reassigned to a source copy"
+    }
+
+    Invoke-Scenario -Name "Portable archive path cannot be overwritten before extraction" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+    finally {
+        $archive.Dispose()
+    }
+
+    $portableExtracted = Join-Path $temporary "portable"
+'@ `
+            -NewText @'
+    finally {
+        $archive.Dispose()
+    }
+
+    $publishedZipOutput = $zipOutput
+    $portableSourceDecoy = Join-Path $temporary "portable-source-decoy"
+    [IO.Directory]::CreateDirectory($portableSourceDecoy) | Out-Null
+    [IO.File]::Copy(
+        $desktop,
+        (Join-Path $portableSourceDecoy "wokrouter-desktop.exe")
+    )
+    $zipOutput = Join-Path $temporary "portable-source-decoy.zip"
+    [IO.Compression.ZipFile]::CreateFromDirectory(
+        $portableSourceDecoy,
+        $zipOutput
+    )
+
+    $portableExtracted = Join-Path $temporary "portable"
+'@
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+    if ((& $peSubsystemCommand -Path $portableSidecar) -ne 3) {
+        throw "Portable sidecar executable must use the console subsystem."
+    }
+
+    Write-Output $zipOutput
+'@ `
+            -NewText @'
+    if ((& $peSubsystemCommand -Path $portableSidecar) -ne 3) {
+        throw "Portable sidecar executable must use the console subsystem."
+    }
+    $zipOutput = $publishedZipOutput
+
+    Write-Output $zipOutput
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "Portable desktop extraction provenance" `
+            -Scenario "Portable archive path reassigned to a source-only archive"
+    }
+
+    Invoke-Scenario -Name "source MSI and Portable subsystem checks cannot be removed" -Test {
+        foreach ($mutation in @(
+                @{
+                    Old = 'if ((& $peSubsystemCommand -Path $desktop) -ne 2) {'
+                    New = (
+                        'if ($false) { # ' +
+                        'if ((& $peSubsystemCommand -Path $desktop) -ne 2) {'
+                    )
+                    Expected = "source desktop GUI subsystem check"
+                },
+                @{
+                    Old = 'if ((& $peSubsystemCommand -Path $sidecar) -ne 3) {'
+                    New = (
+                        'if ($false) { # ' +
+                        'if ((& $peSubsystemCommand -Path $sidecar) -ne 3) {'
+                    )
+                    Expected = "source sidecar console subsystem check"
+                },
+                @{
+                    Old = (
+                        'if ((& $peSubsystemCommand -Path ' +
+                        '$byName["wokrouter-desktop.exe"]) -ne 2) {'
+                    )
+                    New = (
+                        'if ($false) { # ' +
+                        'if ((& $peSubsystemCommand -Path ' +
+                        '$byName["wokrouter-desktop.exe"]) -ne 2) {'
+                    )
+                    Expected = "MSI desktop GUI subsystem check"
+                },
+                @{
+                    Old = (
+                        'if ((& $peSubsystemCommand -Path ' +
+                        '$byName["wokrouter.exe"]) -ne 3) {'
+                    )
+                    New = (
+                        'if ($false) { # ' +
+                        'if ((& $peSubsystemCommand -Path ' +
+                        '$byName["wokrouter.exe"]) -ne 3) {'
+                    )
+                    Expected = "MSI sidecar console subsystem check"
+                },
+                @{
+                    Old = (
+                        'if ((& $peSubsystemCommand -Path ' +
+                        '$portableDesktop) -ne 2) {'
+                    )
+                    New = (
+                        'if ($false) { # ' +
+                        'if ((& $peSubsystemCommand -Path ' +
+                        '$portableDesktop) -ne 2) {'
+                    )
+                    Expected = "Portable desktop GUI subsystem check"
+                },
+                @{
+                    Old = (
+                        'if ((& $peSubsystemCommand -Path ' +
+                        '$portableSidecar) -ne 3) {'
+                    )
+                    New = (
+                        'if ($false) { # ' +
+                        'if ((& $peSubsystemCommand -Path ' +
+                        '$portableSidecar) -ne 3) {'
+                    )
+                    Expected = "Portable sidecar console subsystem check"
+                }
+            )) {
+            $root = New-ReleaseFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "tests/release/package-windows-assets.ps1" `
+                -OldText $mutation.Old `
+                -NewText $mutation.New
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText $mutation.Expected `
+                -Scenario "missing $($mutation.Expected)"
+        }
     }
 
     Invoke-Scenario -Name "release assembly imports the contract module by path" -Test {

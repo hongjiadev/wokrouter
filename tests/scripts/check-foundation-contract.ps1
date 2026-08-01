@@ -13,6 +13,39 @@ $rootPath = (Resolve-Path -LiteralPath $Root).Path
 $workflowPath = Join-Path $rootPath ".github/workflows/ci.yml"
 $denyPath = Join-Path $rootPath "deny.toml"
 $developmentPath = Join-Path $rootPath "docs/operations/development.md"
+$runtimeSelectorPath = Join-Path $rootPath "crates/wokrouter-platform/src/wokcore_runtime.rs"
+$runtimeSelectorTestsPath = Join-Path $rootPath "crates/wokrouter-platform/tests/wokcore_runtime.rs"
+$wokcoreClientPath = Join-Path $rootPath "crates/wokrouter-wokcore-client/src/lib.rs"
+$wokcorePublicKeyPath = Join-Path $rootPath "crates/wokrouter-platform/src/wokcore_install/wokcore-minisign.pub"
+$commandModelPath = Join-Path $rootPath "apps/cli/src/commands/mod.rs"
+$desktopControlPath = Join-Path $rootPath "apps/desktop/src-tauri/src/control.rs"
+$coreOperationPath = Join-Path $rootPath "apps/desktop/src-tauri/src/core_operation.rs"
+$coreOperationHelperPath = Join-Path $rootPath "apps/desktop/src-tauri/src/core_operation/helper.rs"
+$coreOperationJournalPath = Join-Path $rootPath "apps/desktop/src-tauri/src/core_operation/journal.rs"
+$desktopLibPath = Join-Path $rootPath "apps/desktop/src-tauri/src/lib.rs"
+$frontendControlPath = Join-Path $rootPath "apps/desktop/src/control.ts"
+$coreUpdateEligibilityPath = Join-Path $rootPath "apps/desktop/src/coreUpdateEligibility.ts"
+$coreLifecyclePath = Join-Path $rootPath "apps/desktop/src/components/CoreLifecycle.tsx"
+$coreLifecycleTestsPath = Join-Path $rootPath "apps/desktop/src/components/CoreLifecycle.test.tsx"
+$managementPanelPath = Join-Path $rootPath "apps/desktop/src/components/ManagementPanel.tsx"
+$localeTestsPath = Join-Path $rootPath "apps/desktop/src/locale.test.ts"
+$desktopPackagePath = Join-Path $rootPath "apps/desktop/package.json"
+$eventCapabilityPath = Join-Path $rootPath "apps/desktop/src-tauri/capabilities/main.json"
+$desktopBootstrapPath = Join-Path $rootPath "apps/desktop/src/main.tsx"
+$frontendLocalePath = Join-Path $rootPath "apps/desktop/src/locale.ts"
+$desktopI18nPath = Join-Path $rootPath "apps/desktop/src/i18n/index.ts"
+$systemLocalePath = Join-Path $rootPath "crates/wokrouter-platform/src/system/locale.rs"
+$packagedEventSmokePath = Join-Path $rootPath "tests/scripts/smoke-packaged-event-bridge.ps1"
+$packagedGuiAcceptancePath = Join-Path $rootPath "tests/scripts/packaged-gui-acceptance.ps1"
+$packagedGuiAcceptanceTestsPath = Join-Path $rootPath "tests/scripts/packaged-gui-acceptance.tests.ps1"
+$englishCatalogPath = Join-Path $rootPath "apps/desktop/src/i18n/locales/en.json"
+$simplifiedChineseCatalogPath = Join-Path $rootPath "apps/desktop/src/i18n/locales/zh-CN.json"
+$desktopMainPath = Join-Path $rootPath "apps/desktop/src-tauri/src/main.rs"
+$windowsPackagerPath = Join-Path $rootPath "tests/release/package-windows-assets.ps1"
+$coreOperationParserPath = Join-Path $rootPath "apps/desktop/src-tauri/src/core_operation/parser.rs"
+$wokcoreInstallTestsPath = Join-Path $rootPath "crates/wokrouter-platform/tests/wokcore_install.rs"
+$cliStartTestsPath = Join-Path $rootPath "apps/cli/src/commands/start/tests.rs"
+$cliStartPath = Join-Path $rootPath "apps/cli/src/commands/start.rs"
 $failures = [System.Collections.Generic.List[string]]::new()
 
 function Add-ContractFailure {
@@ -24,6 +57,1721 @@ function Add-ContractFailure {
     if (-not $failures.Contains($Message)) {
         $failures.Add($Message)
     }
+}
+
+function Get-PowerShellAst {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput(
+        $Source,
+        [ref] $tokens,
+        [ref] $parseErrors
+    )
+    if ($parseErrors.Count -ne 0) {
+        throw "$Description contains invalid PowerShell syntax."
+    }
+    return $ast
+}
+
+function Get-ExactPowerShellGuardAst {
+    param(
+        [Parameter(Mandatory)]
+        [object]$Ast,
+
+        [Parameter(Mandatory)]
+        [string]$Condition,
+
+        [Parameter(Mandatory)]
+        [string]$ThrowStatement
+    )
+
+    return @(
+        $Ast.FindAll(
+            {
+                param($node)
+
+                if (
+                    $node -isnot [Management.Automation.Language.IfStatementAst] -or
+                    $node.Clauses.Count -ne 1 -or
+                    $null -ne $node.ElseClause
+                ) {
+                    return $false
+                }
+                $statements = @($node.Clauses[0].Item2.Statements)
+                return (
+                    $node.Clauses[0].Item1.Extent.Text.Trim() -ceq $Condition -and
+                    $statements.Count -eq 1 -and
+                    $statements[0] -is [Management.Automation.Language.ThrowStatementAst] -and
+                    $statements[0].Extent.Text.Trim() -ceq $ThrowStatement
+                )
+            },
+            $true
+        )
+    )
+}
+
+function Set-RustMaskedRange {
+    param(
+        [Parameter(Mandatory)]
+        [char[]]$View,
+
+        [Parameter(Mandatory)]
+        [int]$Start,
+
+        [Parameter(Mandatory)]
+        [int]$End
+    )
+
+    for ($index = $Start; $index -lt $End; $index += 1) {
+        if ($View[$index] -ne "`r" -and $View[$index] -ne "`n") {
+            $View[$index] = " "
+        }
+    }
+}
+
+function Test-RustIdentifierCharacter {
+    param(
+        [Parameter(Mandatory)]
+        [char]$Character
+    )
+
+    return $Character -eq "_" -or [char]::IsLetterOrDigit($Character)
+}
+
+function Get-RustCodeView {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $view = $Source.ToCharArray()
+    $commentStrippedView = $Source.ToCharArray()
+    $index = 0
+    while ($index -lt $Source.Length) {
+        $current = $Source[$index]
+        $next = if ($index + 1 -lt $Source.Length) {
+            $Source[$index + 1]
+        }
+        else {
+            [char]0
+        }
+
+        if ($current -eq "/" -and $next -eq "/") {
+            $end = $index + 2
+            while (
+                $end -lt $Source.Length -and
+                $Source[$end] -ne "`r" -and
+                $Source[$end] -ne "`n"
+            ) {
+                $end += 1
+            }
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            Set-RustMaskedRange `
+                -View $commentStrippedView `
+                -Start $index `
+                -End $end
+            $index = $end
+            continue
+        }
+
+        if ($current -eq "/" -and $next -eq "*") {
+            $depth = 1
+            $end = $index + 2
+            while ($end -lt $Source.Length -and $depth -gt 0) {
+                if (
+                    $end + 1 -lt $Source.Length -and
+                    $Source[$end] -eq "/" -and
+                    $Source[$end + 1] -eq "*"
+                ) {
+                    $depth += 1
+                    $end += 2
+                    continue
+                }
+                if (
+                    $end + 1 -lt $Source.Length -and
+                    $Source[$end] -eq "*" -and
+                    $Source[$end + 1] -eq "/"
+                ) {
+                    $depth -= 1
+                    $end += 2
+                    continue
+                }
+                $end += 1
+            }
+            if ($depth -ne 0) {
+                Add-ContractFailure `
+                    -Message "$Description must be lexically valid: unterminated block comment."
+                return $null
+            }
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            Set-RustMaskedRange `
+                -View $commentStrippedView `
+                -Start $index `
+                -End $end
+            $index = $end
+            continue
+        }
+
+        $rawPrefixLength = 0
+        $rawHashCount = 0
+        $rawCursor = -1
+        $atTokenBoundary = $false
+        if ($current -eq "r" -or $current -eq "b") {
+            $atTokenBoundary = (
+                $index -eq 0 -or
+                -not (Test-RustIdentifierCharacter -Character $Source[$index - 1])
+            )
+        }
+        if ($atTokenBoundary -and $current -eq "r") {
+            $rawPrefixLength = 1
+            $rawCursor = $index + 1
+        }
+        elseif (
+            $atTokenBoundary -and
+            $current -eq "b" -and
+            $next -eq "r"
+        ) {
+            $rawPrefixLength = 2
+            $rawCursor = $index + 2
+        }
+        if ($rawCursor -ge 0) {
+            while (
+                $rawCursor -lt $Source.Length -and
+                $Source[$rawCursor] -eq "#"
+            ) {
+                $rawHashCount += 1
+                $rawCursor += 1
+            }
+            if (
+                $rawCursor -ge $Source.Length -or
+                $Source[$rawCursor] -ne '"'
+            ) {
+                $rawPrefixLength = 0
+                $rawCursor = -1
+            }
+        }
+        if ($rawCursor -ge 0) {
+            $end = $rawCursor + 1
+            $closed = $false
+            while ($end -lt $Source.Length) {
+                if ($Source[$end] -eq '"') {
+                    $matchesDelimiter = $true
+                    for ($hash = 0; $hash -lt $rawHashCount; $hash += 1) {
+                        if (
+                            $end + 1 + $hash -ge $Source.Length -or
+                            $Source[$end + 1 + $hash] -ne "#"
+                        ) {
+                            $matchesDelimiter = $false
+                            break
+                        }
+                    }
+                    if ($matchesDelimiter) {
+                        $end += 1 + $rawHashCount
+                        $closed = $true
+                        break
+                    }
+                }
+                $end += 1
+            }
+            if (-not $closed) {
+                Add-ContractFailure `
+                    -Message "$Description must be lexically valid: unterminated raw string."
+                return $null
+            }
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            $index = $end
+            continue
+        }
+
+        $quoteIndex = -1
+        if ($current -eq '"') {
+            $quoteIndex = $index
+        }
+        elseif ($current -eq "b" -and $next -eq '"') {
+            $quoteIndex = $index + 1
+        }
+        if ($quoteIndex -ge 0) {
+            $end = $quoteIndex + 1
+            $closed = $false
+            while ($end -lt $Source.Length) {
+                if ($Source[$end] -eq "\") {
+                    $end += 2
+                    continue
+                }
+                if ($Source[$end] -eq '"') {
+                    $end += 1
+                    $closed = $true
+                    break
+                }
+                $end += 1
+            }
+            if (-not $closed) {
+                Add-ContractFailure `
+                    -Message "$Description must be lexically valid: unterminated string."
+                return $null
+            }
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            $index = $end
+            continue
+        }
+
+        $characterQuote = -1
+        $byteCharacter = $false
+        if ($current -eq "b" -and $next -eq "'") {
+            $characterQuote = $index + 1
+            $byteCharacter = $true
+        }
+        elseif ($current -eq "'") {
+            $characterQuote = $index
+        }
+        if ($characterQuote -ge 0) {
+            $contentStart = $characterQuote + 1
+            if (
+                -not $byteCharacter -and
+                $contentStart -lt $Source.Length -and
+                (Test-RustIdentifierCharacter -Character $Source[$contentStart]) -and
+                (
+                    $contentStart + 1 -ge $Source.Length -or
+                    $Source[$contentStart + 1] -ne "'"
+                )
+            ) {
+                $index += 1
+                continue
+            }
+
+            $end = $contentStart
+            $closed = $false
+            while ($end -lt $Source.Length) {
+                if ($Source[$end] -eq "\") {
+                    $end += 2
+                    continue
+                }
+                if ($Source[$end] -eq "'") {
+                    $end += 1
+                    $closed = $true
+                    break
+                }
+                if ($Source[$end] -eq "`r" -or $Source[$end] -eq "`n") {
+                    break
+                }
+                $end += 1
+            }
+            if (-not $closed) {
+                Add-ContractFailure `
+                    -Message "$Description must be lexically valid: unterminated character literal."
+                return $null
+            }
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            $index = $end
+            continue
+        }
+
+        $index += 1
+    }
+
+    $code = -join $view
+    $braceDepth = 0
+    for ($index = 0; $index -lt $code.Length; $index += 1) {
+        if ($code[$index] -eq "{") {
+            $braceDepth += 1
+        }
+        elseif ($code[$index] -eq "}") {
+            $braceDepth -= 1
+            if ($braceDepth -lt 0) {
+                Add-ContractFailure `
+                    -Message "$Description must have balanced braces: negative depth."
+                return $null
+            }
+        }
+    }
+    if ($braceDepth -ne 0) {
+        Add-ContractFailure `
+            -Message "$Description must have balanced braces: unclosed body."
+        return $null
+    }
+    $delimiterStack = [System.Collections.Generic.Stack[char]]::new()
+    for ($index = 0; $index -lt $code.Length; $index += 1) {
+        $current = $code[$index]
+        if ($current -eq "(" -or $current -eq "[" -or $current -eq "{") {
+            $delimiterStack.Push($current)
+            continue
+        }
+        if ($current -ne ")" -and $current -ne "]" -and $current -ne "}") {
+            continue
+        }
+        if ($delimiterStack.Count -eq 0) {
+            Add-ContractFailure `
+                -Message "$Description must have balanced Rust delimiters."
+            return $null
+        }
+        $opening = $delimiterStack.Pop()
+        if (
+            ($current -eq ")" -and $opening -ne "(") -or
+            ($current -eq "]" -and $opening -ne "[") -or
+            ($current -eq "}" -and $opening -ne "{")
+        ) {
+            Add-ContractFailure `
+                -Message "$Description must have balanced Rust delimiters."
+            return $null
+        }
+    }
+    if ($delimiterStack.Count -ne 0) {
+        Add-ContractFailure `
+            -Message "$Description must have balanced Rust delimiters."
+        return $null
+    }
+
+    return [pscustomobject]@{
+        Code = $code
+        CommentStripped = -join $commentStrippedView
+    }
+}
+
+function Get-TypeScriptQuotedLiteralEnd {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [int]$Start,
+
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $quote = $Source[$Start]
+    $index = $Start + 1
+    while ($index -lt $Source.Length) {
+        if ($Source[$index] -eq "\") {
+            $index += 2
+            continue
+        }
+        if ($Source[$index] -eq $quote) {
+            return $index + 1
+        }
+        if ($Source[$index] -eq "`r" -or $Source[$index] -eq "`n") {
+            break
+        }
+        $index += 1
+    }
+
+    Add-ContractFailure `
+        -Message "$Description must be lexically valid: unterminated string literal."
+    return -1
+}
+
+function Get-TypeScriptBlockCommentEnd {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [int]$Start,
+
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $index = $Start + 2
+    while ($index + 1 -lt $Source.Length) {
+        if ($Source[$index] -eq "*" -and $Source[$index + 1] -eq "/") {
+            return $index + 2
+        }
+        $index += 1
+    }
+
+    Add-ContractFailure `
+        -Message "$Description must be lexically valid: unterminated block comment."
+    return -1
+}
+
+function Get-TypeScriptTemplateInterpolationEnd {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [int]$Start,
+
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $braceDepth = 1
+    $index = $Start
+    while ($index -lt $Source.Length) {
+        $current = $Source[$index]
+        $next = if ($index + 1 -lt $Source.Length) {
+            $Source[$index + 1]
+        }
+        else {
+            [char]0
+        }
+
+        if ($current -eq "/" -and $next -eq "/") {
+            $index += 2
+            while (
+                $index -lt $Source.Length -and
+                $Source[$index] -ne "`r" -and
+                $Source[$index] -ne "`n"
+            ) {
+                $index += 1
+            }
+            continue
+        }
+        if ($current -eq "/" -and $next -eq "*") {
+            $index = Get-TypeScriptBlockCommentEnd `
+                -Source $Source `
+                -Start $index `
+                -Description $Description
+            if ($index -lt 0) {
+                return -1
+            }
+            continue
+        }
+        if ($current -eq "'" -or $current -eq '"') {
+            $index = Get-TypeScriptQuotedLiteralEnd `
+                -Source $Source `
+                -Start $index `
+                -Description $Description
+            if ($index -lt 0) {
+                return -1
+            }
+            continue
+        }
+        if ($current -eq "``") {
+            $index = Get-TypeScriptTemplateLiteralEnd `
+                -Source $Source `
+                -Start $index `
+                -Description $Description
+            if ($index -lt 0) {
+                return -1
+            }
+            continue
+        }
+        if ($current -eq "{") {
+            $braceDepth += 1
+        }
+        elseif ($current -eq "}") {
+            $braceDepth -= 1
+            if ($braceDepth -eq 0) {
+                return $index + 1
+            }
+        }
+        $index += 1
+    }
+
+    Add-ContractFailure `
+        -Message "$Description must be lexically valid: unterminated template interpolation."
+    return -1
+}
+
+function Get-TypeScriptTemplateLiteralEnd {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [int]$Start,
+
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $index = $Start + 1
+    while ($index -lt $Source.Length) {
+        if ($Source[$index] -eq "\") {
+            $index += 2
+            continue
+        }
+        if ($Source[$index] -eq "``") {
+            return $index + 1
+        }
+        if (
+            $Source[$index] -eq '$' -and
+            $index + 1 -lt $Source.Length -and
+            $Source[$index + 1] -eq "{"
+        ) {
+            $index = Get-TypeScriptTemplateInterpolationEnd `
+                -Source $Source `
+                -Start ($index + 2) `
+                -Description $Description
+            if ($index -lt 0) {
+                return -1
+            }
+            continue
+        }
+        $index += 1
+    }
+
+    Add-ContractFailure `
+        -Message "$Description must be lexically valid: unterminated template literal."
+    return -1
+}
+
+function Get-TypeScriptCodeView {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $view = $Source.ToCharArray()
+    $commentStrippedView = $Source.ToCharArray()
+    $index = 0
+    while ($index -lt $Source.Length) {
+        $current = $Source[$index]
+        $next = if ($index + 1 -lt $Source.Length) {
+            $Source[$index + 1]
+        }
+        else {
+            [char]0
+        }
+
+        if ($current -eq "/" -and $next -eq "/") {
+            $end = $index + 2
+            while (
+                $end -lt $Source.Length -and
+                $Source[$end] -ne "`r" -and
+                $Source[$end] -ne "`n"
+            ) {
+                $end += 1
+            }
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            Set-RustMaskedRange `
+                -View $commentStrippedView `
+                -Start $index `
+                -End $end
+            $index = $end
+            continue
+        }
+
+        if ($current -eq "/" -and $next -eq "*") {
+            $end = Get-TypeScriptBlockCommentEnd `
+                -Source $Source `
+                -Start $index `
+                -Description $Description
+            if ($end -lt 0) {
+                return $null
+            }
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            Set-RustMaskedRange `
+                -View $commentStrippedView `
+                -Start $index `
+                -End $end
+            $index = $end
+            continue
+        }
+
+        if ($current -eq "'" -or $current -eq '"') {
+            $end = Get-TypeScriptQuotedLiteralEnd `
+                -Source $Source `
+                -Start $index `
+                -Description $Description
+            if ($end -lt 0) {
+                return $null
+            }
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            $index = $end
+            continue
+        }
+
+        if ($current -eq "``") {
+            $end = Get-TypeScriptTemplateLiteralEnd `
+                -Source $Source `
+                -Start $index `
+                -Description $Description
+            if ($end -lt 0) {
+                return $null
+            }
+            Set-RustMaskedRange -View $view -Start $index -End $end
+            $index = $end
+            continue
+        }
+
+        $index += 1
+    }
+
+    $code = -join $view
+    $delimiterStack = [System.Collections.Generic.List[char]]::new()
+    for ($index = 0; $index -lt $code.Length; $index += 1) {
+        $current = $code[$index]
+        if ($current -eq "(" -or $current -eq "[" -or $current -eq "{") {
+            $delimiterStack.Add($current)
+            continue
+        }
+        if ($current -ne ")" -and $current -ne "]" -and $current -ne "}") {
+            continue
+        }
+        if ($delimiterStack.Count -eq 0) {
+            Add-ContractFailure `
+                -Message "$Description must have balanced TypeScript delimiters."
+            return $null
+        }
+        $opening = $delimiterStack[$delimiterStack.Count - 1]
+        $delimiterStack.RemoveAt($delimiterStack.Count - 1)
+        if (
+            ($current -eq ")" -and $opening -ne "(") -or
+            ($current -eq "]" -and $opening -ne "[") -or
+            ($current -eq "}" -and $opening -ne "{")
+        ) {
+            Add-ContractFailure `
+                -Message "$Description must have balanced TypeScript delimiters."
+            return $null
+        }
+    }
+    if ($delimiterStack.Count -ne 0) {
+        Add-ContractFailure `
+            -Message "$Description must have balanced TypeScript delimiters."
+        return $null
+    }
+
+    return [pscustomobject]@{
+        Code = $code
+        CommentStripped = -join $commentStrippedView
+    }
+}
+
+function Get-TypeScriptDirectStatements {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$Description,
+
+        [AllowNull()]
+        [object]$CodeView
+    )
+
+    $codeView = if ($null -ne $CodeView) {
+        $CodeView
+    }
+    else {
+        Get-TypeScriptCodeView -Source $Source -Description $Description
+    }
+    if ($null -eq $codeView) {
+        return @()
+    }
+    if ($codeView.Code.Length -ne $Source.Length) {
+        Add-ContractFailure `
+            -Message "$Description code view must preserve source offsets."
+        return @()
+    }
+
+    $statements = @()
+    $statementStart = 0
+    $braceDepth = 0
+    $parenthesisDepth = 0
+    $bracketDepth = 0
+    for ($index = 0; $index -lt $codeView.Code.Length; $index += 1) {
+        $current = $codeView.Code[$index]
+        switch ($current) {
+            "{" { $braceDepth += 1; continue }
+            "(" { $parenthesisDepth += 1; continue }
+            "[" { $bracketDepth += 1; continue }
+            "}" { $braceDepth -= 1 }
+            ")" { $parenthesisDepth -= 1 }
+            "]" { $bracketDepth -= 1 }
+        }
+        $atStatementBoundary = (
+            $braceDepth -eq 0 -and
+            $parenthesisDepth -eq 0 -and
+            $bracketDepth -eq 0 -and
+            ($current -eq ";" -or $current -eq "}")
+        )
+        if (-not $atStatementBoundary) {
+            continue
+        }
+
+        $trimmedStart = $statementStart
+        while (
+            $trimmedStart -le $index -and
+            [char]::IsWhiteSpace($codeView.Code[$trimmedStart])
+        ) {
+            $trimmedStart += 1
+        }
+        if ($trimmedStart -le $index) {
+            $length = $index - $trimmedStart + 1
+            $statements += [pscustomobject]@{
+                Index = $trimmedStart
+                Length = $length
+                Source = $Source.Substring($trimmedStart, $length)
+                Code = $codeView.Code.Substring($trimmedStart, $length)
+            }
+        }
+        $statementStart = $index + 1
+    }
+
+    $trimmedStart = $statementStart
+    while (
+        $trimmedStart -lt $codeView.Code.Length -and
+        [char]::IsWhiteSpace($codeView.Code[$trimmedStart])
+    ) {
+        $trimmedStart += 1
+    }
+    if ($trimmedStart -lt $codeView.Code.Length) {
+        $length = $codeView.Code.Length - $trimmedStart
+        $statements += [pscustomobject]@{
+            Index = $trimmedStart
+            Length = $length
+            Source = $Source.Substring($trimmedStart, $length)
+            Code = $codeView.Code.Substring($trimmedStart, $length)
+        }
+    }
+
+    return @($statements)
+}
+
+function Get-RustOwnershipAtIndex {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Structure,
+
+        [Parameter(Mandatory)]
+        [int]$Index
+    )
+
+    $braceDepth = 0
+    $parenthesisDepth = 0
+    $bracketDepth = 0
+    $statementStart = $true
+    for ($cursor = 0; $cursor -lt $Index; $cursor += 1) {
+        $current = $Structure[$cursor]
+        if ([char]::IsWhiteSpace($current)) {
+            continue
+        }
+
+        $allDepthsZero = (
+            $braceDepth -eq 0 -and
+            $parenthesisDepth -eq 0 -and
+            $bracketDepth -eq 0
+        )
+        if ($current -eq "{") {
+            if ($allDepthsZero) {
+                $statementStart = $false
+            }
+            $braceDepth += 1
+            continue
+        }
+        if ($current -eq "(") {
+            if ($allDepthsZero) {
+                $statementStart = $false
+            }
+            $parenthesisDepth += 1
+            continue
+        }
+        if ($current -eq "[") {
+            if ($allDepthsZero) {
+                $statementStart = $false
+            }
+            $bracketDepth += 1
+            continue
+        }
+        if ($current -eq "}") {
+            $braceDepth -= 1
+            if (
+                $braceDepth -eq 0 -and
+                $parenthesisDepth -eq 0 -and
+                $bracketDepth -eq 0
+            ) {
+                $statementStart = $true
+            }
+            continue
+        }
+        if ($current -eq ")") {
+            $parenthesisDepth -= 1
+            continue
+        }
+        if ($current -eq "]") {
+            $bracketDepth -= 1
+            continue
+        }
+        if ($allDepthsZero) {
+            if ($current -eq ";") {
+                $statementStart = $true
+            }
+            else {
+                $statementStart = $false
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        AllDelimiterDepthsZero = (
+            $braceDepth -eq 0 -and
+            $parenthesisDepth -eq 0 -and
+            $bracketDepth -eq 0
+        )
+        StatementStart = $statementStart
+    }
+}
+
+function Get-RustOwnedPatternMatches {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$Pattern,
+
+        [Parameter(Mandatory)]
+        [string]$Description,
+
+        [switch]$RequireStatementStart
+    )
+
+    $codeView = Get-RustCodeView -Source $Source -Description $Description
+    if ($null -eq $codeView) {
+        return @()
+    }
+    $matches = @([regex]::Matches(
+        $codeView.Code,
+        $Pattern,
+        [System.Text.RegularExpressions.RegexOptions]::Multiline
+    ))
+    $ownedMatches = @()
+    foreach ($match in $matches) {
+        $ownership = Get-RustOwnershipAtIndex `
+            -Structure $codeView.Code `
+            -Index $match.Index
+        if (
+            $ownership.AllDelimiterDepthsZero -and
+            (-not $RequireStatementStart -or $ownership.StatementStart)
+        ) {
+            $ownedMatches += $match
+        }
+    }
+    return @($ownedMatches)
+}
+
+function Get-UniqueDirectStatementIndex {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$Pattern,
+
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $matches = @(Get-RustOwnedPatternMatches `
+        -Source $Source `
+        -Pattern $Pattern `
+        -Description $Description `
+        -RequireStatementStart)
+    if ($matches.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "$Description must occur as one direct statement; found $($matches.Count)."
+        return -1
+    }
+    return $matches[0].Index
+}
+
+function Get-UniqueBracedItem {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$SignaturePattern,
+
+        [Parameter(Mandatory)]
+        [string]$Description,
+
+        [switch]$TopLevel,
+
+        [switch]$DirectStatement,
+
+        [int]$MatchOrdinal = -1,
+
+        [AllowNull()]
+        [object]$CodeView
+    )
+
+    $codeView = if ($null -ne $CodeView) {
+        $CodeView
+    }
+    else {
+        Get-RustCodeView -Source $Source -Description $Description
+    }
+    if ($null -eq $codeView) {
+        return $null
+    }
+    $structure = $codeView.Code
+    $matches = @([regex]::Matches(
+        $structure,
+        $SignaturePattern,
+        [System.Text.RegularExpressions.RegexOptions]::Multiline
+    ))
+    if ($TopLevel -or $DirectStatement) {
+        $topLevelMatches = @()
+        foreach ($candidateMatch in $matches) {
+            $ownership = Get-RustOwnershipAtIndex `
+                -Structure $structure `
+                -Index $candidateMatch.Index
+            if (
+                $ownership.AllDelimiterDepthsZero -and
+                (-not $DirectStatement -or $ownership.StatementStart)
+            ) {
+                $topLevelMatches += $candidateMatch
+            }
+        }
+        $matches = @($topLevelMatches)
+    }
+    if ($MatchOrdinal -ge 0) {
+        if ($MatchOrdinal -ge $matches.Count) {
+            Add-ContractFailure `
+                -Message "$Description match ordinal $MatchOrdinal is unavailable; found $($matches.Count)."
+            return $null
+        }
+        $match = $matches[$MatchOrdinal]
+    }
+    elseif ($matches.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "$Description must remain uniquely identifiable; found $($matches.Count)."
+        return $null
+    }
+    else {
+        $match = $matches[0]
+    }
+    $parenthesisDepth = 0
+    $bracketDepth = 0
+    for (
+        $index = $match.Index;
+        $index -lt $match.Index + $match.Length;
+        $index += 1
+    ) {
+        switch ($structure[$index]) {
+            "(" { $parenthesisDepth += 1 }
+            ")" { $parenthesisDepth -= 1 }
+            "[" { $bracketDepth += 1 }
+            "]" { $bracketDepth -= 1 }
+        }
+        if ($parenthesisDepth -lt 0 -or $bracketDepth -lt 0) {
+            Add-ContractFailure `
+                -Message "$Description has unbalanced signature delimiters."
+            return $null
+        }
+    }
+
+    $openingBrace = -1
+    $scanStart = $match.Index + $match.Length
+    for ($index = $scanStart; $index -lt $structure.Length; $index += 1) {
+        $current = $structure[$index]
+        switch ($current) {
+            "(" { $parenthesisDepth += 1; continue }
+            ")" {
+                $parenthesisDepth -= 1
+                if ($parenthesisDepth -lt 0) {
+                    Add-ContractFailure `
+                        -Message "$Description has unbalanced signature parentheses."
+                    return $null
+                }
+                continue
+            }
+            "[" { $bracketDepth += 1; continue }
+            "]" {
+                $bracketDepth -= 1
+                if ($bracketDepth -lt 0) {
+                    Add-ContractFailure `
+                        -Message "$Description has unbalanced signature brackets."
+                    return $null
+                }
+                continue
+            }
+        }
+        if ($parenthesisDepth -eq 0 -and $bracketDepth -eq 0) {
+            if ($current -eq ";") {
+                Add-ContractFailure `
+                    -Message "$Description must have a braced body, not a semicolon declaration."
+                return $null
+            }
+            if ($current -eq "{") {
+                $openingBrace = $index
+                break
+            }
+        }
+    }
+    if ($openingBrace -lt 0) {
+        Add-ContractFailure -Message "$Description must have a braced body."
+        return $null
+    }
+    $declarationTail = $structure.Substring(
+        $scanStart,
+        $openingBrace - $scanStart
+    )
+    if (
+        $declarationTail -match
+        '(?m)^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?(?:async[ \t]+)?(?:fn|mod|struct|enum|impl|trait|type|const|static)\b'
+    ) {
+        Add-ContractFailure `
+            -Message "$Description must open its body before the next Rust item."
+        return $null
+    }
+
+    $depth = 0
+    $closingBrace = -1
+    for ($index = $openingBrace; $index -lt $structure.Length; $index += 1) {
+        if ($structure[$index] -eq "{") {
+            $depth += 1
+        }
+        elseif ($structure[$index] -eq "}") {
+            $depth -= 1
+            if ($depth -lt 0) {
+                Add-ContractFailure `
+                    -Message "$Description has a negative braced-body depth."
+                return $null
+            }
+            if ($depth -eq 0) {
+                $closingBrace = $index
+                break
+            }
+        }
+    }
+    if ($closingBrace -lt 0) {
+        Add-ContractFailure -Message "$Description has an unbalanced braced body."
+        return $null
+    }
+
+    return [pscustomobject]@{
+        SignatureIndex = $match.Index
+        OpeningBraceIndex = $openingBrace
+        ClosingBraceIndex = $closingBrace
+        Attributes = if ($match.Groups["attributes"].Success) {
+            $Source.Substring(
+                $match.Groups["attributes"].Index,
+                $match.Groups["attributes"].Length
+            )
+        }
+        else {
+            ""
+        }
+        CodeAttributes = $match.Groups["attributes"].Value
+        Body = $Source.Substring(
+            $openingBrace + 1,
+            $closingBrace - $openingBrace - 1
+        )
+        CodeBody = $structure.Substring(
+            $openingBrace + 1,
+            $closingBrace - $openingBrace - 1
+        )
+    }
+}
+
+function Get-UniquePatternIndex {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$Pattern,
+
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $matches = [regex]::Matches($Source, $Pattern)
+    if ($matches.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "$Description must occur exactly once; found $($matches.Count)."
+        return -1
+    }
+    return $matches[0].Index
+}
+
+function Get-RustOuterAttributesBeforeItem {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [int]$ItemStart,
+
+        [Parameter(Mandatory)]
+        [string]$Description,
+
+        [AllowNull()]
+        [object]$CodeView
+    )
+
+    $codeView = if ($null -ne $CodeView) {
+        $CodeView
+    }
+    else {
+        Get-RustCodeView -Source $Source -Description $Description
+    }
+    if ($null -eq $codeView) {
+        return $null
+    }
+    if ($ItemStart -lt 0 -or $ItemStart -gt $Source.Length) {
+        Add-ContractFailure `
+            -Message "$Description has an invalid item start."
+        return $null
+    }
+
+    $structure = $codeView.Code
+    $cursor = $ItemStart
+    $attributes = @()
+    while ($cursor -gt 0) {
+        while (
+            $cursor -gt 0 -and
+            [char]::IsWhiteSpace($structure[$cursor - 1])
+        ) {
+            $cursor -= 1
+        }
+        if ($cursor -eq 0 -or $structure[$cursor - 1] -ne "]") {
+            break
+        }
+
+        $attributeEnd = $cursor
+        $bracketDepth = 0
+        $openingBracket = -1
+        for ($index = $cursor - 1; $index -ge 0; $index -= 1) {
+            if ($structure[$index] -eq "]") {
+                $bracketDepth += 1
+            }
+            elseif ($structure[$index] -eq "[") {
+                $bracketDepth -= 1
+                if ($bracketDepth -eq 0) {
+                    $openingBracket = $index
+                    break
+                }
+                if ($bracketDepth -lt 0) {
+                    break
+                }
+            }
+        }
+        if ($openingBracket -lt 0) {
+            Add-ContractFailure `
+                -Message "$Description must have balanced outer attribute brackets."
+            return $null
+        }
+
+        $hashIndex = $openingBracket - 1
+        while (
+            $hashIndex -ge 0 -and
+            [char]::IsWhiteSpace($structure[$hashIndex])
+        ) {
+            $hashIndex -= 1
+        }
+        if ($hashIndex -lt 0 -or $structure[$hashIndex] -ne "#") {
+            break
+        }
+
+        $attributeStart = $hashIndex
+        $attributeLength = $attributeEnd - $attributeStart
+        $attributeCode = $structure.Substring(
+            $attributeStart,
+            $attributeLength
+        )
+        $delimiterStack = [System.Collections.Generic.Stack[char]]::new()
+        $balanced = $true
+        for ($index = 0; $index -lt $attributeCode.Length; $index += 1) {
+            $current = $attributeCode[$index]
+            if ($current -eq "(" -or $current -eq "[" -or $current -eq "{") {
+                $delimiterStack.Push($current)
+                continue
+            }
+            if ($current -ne ")" -and $current -ne "]" -and $current -ne "}") {
+                continue
+            }
+            if ($delimiterStack.Count -eq 0) {
+                $balanced = $false
+                break
+            }
+            $opening = $delimiterStack.Pop()
+            if (
+                ($current -eq ")" -and $opening -ne "(") -or
+                ($current -eq "]" -and $opening -ne "[") -or
+                ($current -eq "}" -and $opening -ne "{")
+            ) {
+                $balanced = $false
+                break
+            }
+        }
+        if (-not $balanced -or $delimiterStack.Count -ne 0) {
+            Add-ContractFailure `
+                -Message "$Description must have balanced outer attribute token trees."
+            return $null
+        }
+
+        $attribute = [pscustomobject]@{
+            Source = $Source.Substring(
+                $attributeStart,
+                $attributeLength
+            )
+            Code = $attributeCode
+        }
+        $attributes = @($attribute) + $attributes
+        $cursor = $attributeStart
+    }
+
+    return [pscustomobject]@{
+        Items = @($attributes)
+        Code = (($attributes | ForEach-Object { $_.Code }) -join "`n")
+    }
+}
+
+function Get-PreviousNonWhitespaceIndex {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [int]$BeforeIndex
+    )
+
+    for ($index = $BeforeIndex - 1; $index -ge 0; $index -= 1) {
+        if (-not [char]::IsWhiteSpace($Source[$index])) {
+            return $index
+        }
+    }
+    return -1
+}
+
+function Get-MatchingOpeningParenthesisIndex {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [int]$ClosingIndex
+    )
+
+    if (
+        $ClosingIndex -lt 0 -or
+        $ClosingIndex -ge $Source.Length -or
+        $Source[$ClosingIndex] -ne ")"
+    ) {
+        return -1
+    }
+    $depth = 0
+    for ($index = $ClosingIndex; $index -ge 0; $index -= 1) {
+        if ($Source[$index] -eq ")") {
+            $depth += 1
+        }
+        elseif ($Source[$index] -eq "(") {
+            $depth -= 1
+            if ($depth -eq 0) {
+                return $index
+            }
+        }
+    }
+    return -1
+}
+
+function Test-TypeScriptExecutableTestDescription {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$TestDescription,
+
+        [Parameter(Mandatory)]
+        [object]$CodeView
+    )
+
+    $descriptionMatches = [regex]::Matches(
+        $CodeView.CommentStripped,
+        [regex]::Escape($TestDescription)
+    )
+    foreach ($descriptionMatch in $descriptionMatches) {
+        $quoteIndex = $descriptionMatch.Index - 1
+        $closingQuoteIndex = (
+            $descriptionMatch.Index + $descriptionMatch.Length
+        )
+        if (
+            $quoteIndex -lt 0 -or
+            $closingQuoteIndex -ge $Source.Length
+        ) {
+            continue
+        }
+        $quote = $Source[$quoteIndex]
+        if (
+            ($quote -ne '"' -and $quote -ne "'") -or
+            $Source[$closingQuoteIndex] -ne $quote
+        ) {
+            continue
+        }
+
+        $callOpeningIndex = Get-PreviousNonWhitespaceIndex `
+            -Source $CodeView.Code `
+            -BeforeIndex $quoteIndex
+        if (
+            $callOpeningIndex -lt 0 -or
+            $CodeView.Code[$callOpeningIndex] -ne "("
+        ) {
+            continue
+        }
+        $calleeEndIndex = Get-PreviousNonWhitespaceIndex `
+            -Source $CodeView.Code `
+            -BeforeIndex $callOpeningIndex
+        if ($calleeEndIndex -lt 0) {
+            continue
+        }
+        $directPrefix = $CodeView.Code.Substring(0, $calleeEndIndex + 1)
+        if (
+            $directPrefix -match
+            '(?<![A-Za-z0-9_$\.])(?:it|test)$'
+        ) {
+            return $true
+        }
+        if ($CodeView.Code[$calleeEndIndex] -ne ")") {
+            continue
+        }
+        $eachOpeningIndex = Get-MatchingOpeningParenthesisIndex `
+            -Source $CodeView.Code `
+            -ClosingIndex $calleeEndIndex
+        if ($eachOpeningIndex -lt 0) {
+            continue
+        }
+        $eachCalleeEndIndex = Get-PreviousNonWhitespaceIndex `
+            -Source $CodeView.Code `
+            -BeforeIndex $eachOpeningIndex
+        if ($eachCalleeEndIndex -lt 0) {
+            continue
+        }
+        $eachPrefix = $CodeView.Code.Substring(0, $eachCalleeEndIndex + 1)
+        if (
+            $eachPrefix -match
+            '(?<![A-Za-z0-9_$\.])(?:it|test)\.each$'
+        ) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Test-RustExecutableTestFunction {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [string]$FunctionName,
+
+        [Parameter(Mandatory)]
+        [object]$CodeView,
+
+        [Parameter(Mandatory)]
+        [object]$Container
+    )
+
+    $functionPattern = (
+        '(?m)^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?' +
+        '(?:async[ \t]+)?fn[ \t]+' +
+        [regex]::Escape($FunctionName) +
+        '[ \t]*\('
+    )
+    $functionMatches = [regex]::Matches(
+        $CodeView.Code,
+        $functionPattern
+    )
+    if ($functionMatches.Count -ne 1) {
+        return $false
+    }
+    $functionMatch = $functionMatches[0]
+    $ownership = if ($Container.Kind -eq "TopLevel") {
+        Get-RustOwnershipAtIndex `
+            -Structure $CodeView.Code `
+            -Index $functionMatch.Index
+    }
+    elseif (
+        $Container.Kind -eq "CfgTestModule" -and
+        $functionMatch.Index -gt $Container.OpeningBraceIndex -and
+        $functionMatch.Index -lt $Container.ClosingBraceIndex
+    ) {
+        $modulePrefix = $CodeView.Code.Substring(
+            $Container.OpeningBraceIndex + 1,
+            $functionMatch.Index - $Container.OpeningBraceIndex - 1
+        )
+        Get-RustOwnershipAtIndex `
+            -Structure $modulePrefix `
+            -Index $modulePrefix.Length
+    }
+    else {
+        $null
+    }
+    if (
+        $null -eq $ownership -or
+        -not $ownership.AllDelimiterDepthsZero
+    ) {
+        return $false
+    }
+    $attributes = Get-RustOuterAttributesBeforeItem `
+        -Source $Source `
+        -ItemStart $functionMatch.Index `
+        -Description "Rust lifecycle acceptance test function" `
+        -CodeView $CodeView
+    if ($null -eq $attributes) {
+        return $false
+    }
+    $testAttributes = [regex]::Matches(
+        $attributes.Code,
+        '(?m)^[ \t]*#\[(?:test|tokio::test)\][ \t]*$'
+    )
+    if (
+        $testAttributes.Count -ne 1 -or
+        $attributes.Code -match
+        '(?m)^[ \t]*#\[(?:cfg|cfg_attr|ignore|should_panic)\b'
+    ) {
+        return $false
+    }
+    return $true
+}
+
+function Test-RustTestSupportFeatureInnerCfg {
+    param(
+        [Parameter(Mandatory)]
+        [string]$CommentStrippedAttribute
+    )
+
+    return (
+        $CommentStrippedAttribute -match
+        '(?s)\A#!\[[ \t\r\n]*cfg[ \t\r\n]*\([ \t\r\n]*feature[ \t\r\n]*=[ \t\r\n]*"test-support"[ \t\r\n]*\)[ \t\r\n]*\]\z'
+    )
+}
+
+function Get-RustExecutableTestContainer {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [ValidateSet("TopLevel", "CfgTestModule")]
+        [string]$Kind,
+
+        [Parameter(Mandatory)]
+        [object]$CodeView,
+
+        [bool]$RequireTestSupportFeatureCfg = $false
+    )
+
+    $fileInnerCfgAttributes = @(
+        Get-RustDirectConditionalInnerAttributes `
+            -Source $Source `
+            -CodeView $CodeView
+    )
+    if ($Kind -eq "TopLevel") {
+        if ($RequireTestSupportFeatureCfg) {
+            if (
+                $fileInnerCfgAttributes.Count -ne 1 -or
+                -not (
+                    Test-RustTestSupportFeatureInnerCfg `
+                        -CommentStrippedAttribute (
+                            $fileInnerCfgAttributes[0].CommentStripped
+                        )
+                )
+            ) {
+                return $null
+            }
+        }
+        elseif ($fileInnerCfgAttributes.Count -ne 0) {
+            return $null
+        }
+        return [pscustomobject]@{
+            Kind = "TopLevel"
+        }
+    }
+    if ($fileInnerCfgAttributes.Count -ne 0) {
+        return $null
+    }
+
+    $testModule = Get-UniqueBracedItem `
+        -Source $Source `
+        -SignaturePattern '(?ms)(?<attributes>(?:(?:^[ \t]*#\[[^\r\n]*\][ \t]*\r?\n)|(?:^[ \t]*\r?\n))*)^[ \t]*mod[ \t]+tests[ \t]*' `
+        -Description "Lifecycle acceptance test module" `
+        -TopLevel `
+        -CodeView $CodeView
+    if (
+        $null -eq $testModule -or
+        $testModule.CodeAttributes -notmatch
+        '(?s)^\s*#\[cfg\([ \t]*test[ \t]*\)\]\s*$'
+    ) {
+        return $null
+    }
+    $moduleBodyLength = (
+        $testModule.ClosingBraceIndex -
+        $testModule.OpeningBraceIndex -
+        1
+    )
+    $moduleCodeView = [pscustomobject]@{
+        Code = $testModule.CodeBody
+        CommentStripped = $CodeView.CommentStripped.Substring(
+            $testModule.OpeningBraceIndex + 1,
+            $moduleBodyLength
+        )
+    }
+    $moduleInnerCfgAttributes = @(
+        Get-RustDirectConditionalInnerAttributes `
+            -Source $testModule.Body `
+            -CodeView $moduleCodeView
+    )
+    if ($moduleInnerCfgAttributes.Count -ne 0) {
+        return $null
+    }
+
+    return [pscustomobject]@{
+        Kind = "CfgTestModule"
+        OpeningBraceIndex = $testModule.OpeningBraceIndex
+        ClosingBraceIndex = $testModule.ClosingBraceIndex
+    }
+}
+
+function Get-RustDirectConditionalInnerAttributes {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Source,
+
+        [Parameter(Mandatory)]
+        [object]$CodeView
+    )
+
+    $attributes = @()
+    $attributeStarts = [regex]::Matches(
+        $CodeView.Code,
+        '(?m)^[ \t]*#!\['
+    )
+    foreach ($attributeStart in $attributeStarts) {
+        $hashIndex = $CodeView.Code.IndexOf(
+            "#",
+            $attributeStart.Index,
+            $attributeStart.Length
+        )
+        $ownership = Get-RustOwnershipAtIndex `
+            -Structure $CodeView.Code `
+            -Index $hashIndex
+        if (-not $ownership.AllDelimiterDepthsZero) {
+            continue
+        }
+
+        $openingBracketIndex = $CodeView.Code.IndexOf(
+            "[",
+            $hashIndex,
+            $attributeStart.Index + $attributeStart.Length - $hashIndex
+        )
+        $bracketDepth = 0
+        $closingBracketIndex = -1
+        for (
+            $index = $openingBracketIndex;
+            $index -lt $CodeView.Code.Length;
+            $index += 1
+        ) {
+            if ($CodeView.Code[$index] -eq "[") {
+                $bracketDepth += 1
+            }
+            elseif ($CodeView.Code[$index] -eq "]") {
+                $bracketDepth -= 1
+                if ($bracketDepth -eq 0) {
+                    $closingBracketIndex = $index
+                    break
+                }
+            }
+        }
+        if ($closingBracketIndex -lt 0) {
+            continue
+        }
+        $attributeLength = $closingBracketIndex - $hashIndex + 1
+        $commentStripped = $CodeView.CommentStripped.Substring(
+            $hashIndex,
+            $attributeLength
+        )
+        if (
+            $commentStripped -match
+            '(?s)^#!\[[ \t\r\n]*(?:cfg|cfg_attr)\b'
+        ) {
+            $attributes += [pscustomobject]@{
+                CommentStripped = $commentStripped
+            }
+        }
+    }
+    return @($attributes)
+}
+
+function Get-TopLevelRustBody {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Body
+    )
+
+    $codeView = Get-RustCodeView `
+        -Source $Body `
+        -Description "Rust top-level body"
+    if ($null -eq $codeView) {
+        return ""
+    }
+    $structure = $codeView.Code
+    $result = [System.Text.StringBuilder]::new($Body.Length)
+    $depth = 0
+    for ($index = 0; $index -lt $Body.Length; $index += 1) {
+        $current = $structure[$index]
+        if ($current -eq "{") {
+            $depth += 1
+            $null = $result.Append(" ")
+            continue
+        }
+        if ($current -eq "}") {
+            $depth -= 1
+            if ($depth -lt 0) {
+                Add-ContractFailure `
+                    -Message "Rust top-level body has a negative brace depth."
+                return ""
+            }
+            $null = $result.Append(" ")
+            continue
+        }
+        if ($depth -eq 0) {
+            $null = $result.Append($structure[$index])
+        }
+        elseif (
+            $structure[$index] -eq "`r" -or
+            $structure[$index] -eq "`n"
+        ) {
+            $null = $result.Append($structure[$index])
+        }
+        else {
+            $null = $result.Append(" ")
+        }
+    }
+    if ($depth -ne 0) {
+        Add-ContractFailure `
+            -Message "Rust top-level body has an unbalanced brace depth."
+        return ""
+    }
+    return $result.ToString()
 }
 
 function Get-LineIndent {
@@ -485,6 +2233,43 @@ $workflowLines = @(Get-Content -LiteralPath $workflowPath -Encoding UTF8)
 $workflow = $workflowLines -join "`n"
 $deny = Get-Content -LiteralPath $denyPath -Raw -Encoding UTF8
 $development = Get-Content -LiteralPath $developmentPath -Raw -Encoding UTF8
+$runtimeSelector = Get-Content -LiteralPath $runtimeSelectorPath -Raw -Encoding UTF8
+$runtimeSelectorTests = Get-Content -LiteralPath $runtimeSelectorTestsPath -Raw -Encoding UTF8
+$wokcoreClient = Get-Content -LiteralPath $wokcoreClientPath -Raw -Encoding UTF8
+$wokcorePublicKey = Get-Content -LiteralPath $wokcorePublicKeyPath -Raw -Encoding UTF8
+$commandModel = Get-Content -LiteralPath $commandModelPath -Raw -Encoding UTF8
+$desktopControl = Get-Content -LiteralPath $desktopControlPath -Raw -Encoding UTF8
+$coreOperation = Get-Content -LiteralPath $coreOperationPath -Raw -Encoding UTF8
+$coreOperationHelper = Get-Content -LiteralPath $coreOperationHelperPath -Raw -Encoding UTF8
+$coreOperationJournal = Get-Content -LiteralPath $coreOperationJournalPath -Raw -Encoding UTF8
+$desktopLib = Get-Content -LiteralPath $desktopLibPath -Raw -Encoding UTF8
+$frontendControl = Get-Content -LiteralPath $frontendControlPath -Raw -Encoding UTF8
+$coreUpdateEligibility = Get-Content -LiteralPath $coreUpdateEligibilityPath -Raw -Encoding UTF8
+$coreLifecycle = Get-Content -LiteralPath $coreLifecyclePath -Raw -Encoding UTF8
+$coreLifecycleTests = Get-Content -LiteralPath $coreLifecycleTestsPath -Raw -Encoding UTF8
+$managementPanel = Get-Content -LiteralPath $managementPanelPath -Raw -Encoding UTF8
+$localeTests = Get-Content -LiteralPath $localeTestsPath -Raw -Encoding UTF8
+$desktopPackageSource = Get-Content -LiteralPath $desktopPackagePath -Raw -Encoding UTF8
+$eventCapabilitySource = Get-Content -LiteralPath $eventCapabilityPath -Raw -Encoding UTF8
+$desktopBootstrap = Get-Content -LiteralPath $desktopBootstrapPath -Raw -Encoding UTF8
+$frontendLocale = Get-Content -LiteralPath $frontendLocalePath -Raw -Encoding UTF8
+$desktopI18n = Get-Content -LiteralPath $desktopI18nPath -Raw -Encoding UTF8
+$systemLocale = Get-Content -LiteralPath $systemLocalePath -Raw -Encoding UTF8
+$packagedEventSmoke = Get-Content -LiteralPath $packagedEventSmokePath -Raw -Encoding UTF8
+$packagedGuiAcceptance = Get-Content `
+    -LiteralPath $packagedGuiAcceptancePath `
+    -Raw `
+    -Encoding UTF8
+$packagedGuiAcceptanceTests = Get-Content `
+    -LiteralPath $packagedGuiAcceptanceTestsPath `
+    -Raw `
+    -Encoding UTF8
+$desktopMain = Get-Content -LiteralPath $desktopMainPath -Raw -Encoding UTF8
+$windowsPackager = Get-Content -LiteralPath $windowsPackagerPath -Raw -Encoding UTF8
+$coreOperationParser = Get-Content -LiteralPath $coreOperationParserPath -Raw -Encoding UTF8
+$wokcoreInstallTests = Get-Content -LiteralPath $wokcoreInstallTestsPath -Raw -Encoding UTF8
+$cliStartTests = Get-Content -LiteralPath $cliStartTestsPath -Raw -Encoding UTF8
+$cliStart = Get-Content -LiteralPath $cliStartPath -Raw -Encoding UTF8
 $jobs = Get-WorkflowJobs -Lines $workflowLines
 
 $requiredJobs = @(
@@ -498,6 +2283,701 @@ $requiredJobs = @(
 foreach ($jobName in $requiredJobs) {
     if (-not $jobs.ContainsKey($jobName)) {
         Add-ContractFailure -Message "Workflow jobs mapping is missing '$jobName'."
+    }
+}
+
+$desktopPackage = $null
+try {
+    $desktopPackage = $desktopPackageSource | ConvertFrom-Json
+}
+catch {
+    Add-ContractFailure -Message "Desktop package manifest must contain valid JSON."
+}
+if (
+    $null -ne $desktopPackage -and
+    $desktopPackage.scripts.'i18n:check' -cne
+    "node scripts/check-i18n-catalogs.mjs"
+) {
+    Add-ContractFailure `
+        -Message "Desktop package must expose the standalone i18n:check catalog command."
+}
+
+$eventCapability = $null
+try {
+    $eventCapability = $eventCapabilitySource | ConvertFrom-Json
+}
+catch {
+    Add-ContractFailure -Message "Desktop event capability must contain valid JSON."
+}
+if ($null -ne $eventCapability) {
+    $capabilityProperties = @($eventCapability.PSObject.Properties.Name | Sort-Object)
+    $expectedCapabilityProperties = @(
+        '$schema',
+        'description',
+        'identifier',
+        'permissions',
+        'windows'
+    )
+    $capabilityWindows = @($eventCapability.windows)
+    $capabilityPermissions = @($eventCapability.permissions)
+    if (
+        (Compare-Object $capabilityProperties $expectedCapabilityProperties) -or
+        $eventCapability.'$schema' -cne '../gen/schemas/desktop-schema.json' -or
+        $eventCapability.identifier -cne 'main-event-listener' -or
+        $eventCapability.description -cne
+        'Allows the main window to monitor WokCore operations.' -or
+        $capabilityWindows.Count -ne 1 -or
+        $capabilityWindows[0] -cne 'main' -or
+        $capabilityPermissions.Count -ne 2 -or
+        $capabilityPermissions[0] -cne 'core:event:allow-listen' -or
+        $capabilityPermissions[1] -cne 'core:event:allow-unlisten'
+    ) {
+        Add-ContractFailure `
+            -Message "Desktop main window must receive only core event listen and unlisten permissions."
+    }
+}
+
+$systemLocaleCodeView = Get-RustCodeView `
+    -Source $systemLocale `
+    -Description "System locale module"
+$detectSystemLocale = Get-UniqueBracedItem `
+    -Source $systemLocale `
+    -SignaturePattern '(?m)^pub\s+fn\s+detect_system_locale\s*\(\s*\)\s*->\s*Option\s*<\s*String\s*>' `
+    -Description "System locale detector" `
+    -TopLevel `
+    -CodeView $systemLocaleCodeView
+$localeFromCandidate = Get-UniqueBracedItem `
+    -Source $systemLocale `
+    -SignaturePattern '(?m)^fn\s+locale_from_candidate\s*\(\s*candidate\s*:\s*Option\s*<\s*&str\s*>\s*\)\s*->\s*Option\s*<\s*String\s*>' `
+    -Description "System locale candidate normalizer" `
+    -TopLevel `
+    -CodeView $systemLocaleCodeView
+if (
+    $null -eq $detectSystemLocale -or
+    ($detectSystemLocale.CodeBody -replace '\s', '') -cne
+    'locale_from_candidate(sys_locale::get_locale().as_deref())' -or
+    $null -eq $localeFromCandidate -or
+    ($localeFromCandidate.CodeBody -replace '\s', '') -cne
+    'candidate.and_then(normalize_locale)'
+) {
+    Add-ContractFailure `
+        -Message "System locale detection must preserve a missing or invalid OS candidate as Option::None."
+}
+
+$desktopLibCodeViewForLocale = Get-RustCodeView `
+    -Source $desktopLib `
+    -Description "Desktop Tauri library"
+$systemLocaleCommand = Get-UniqueBracedItem `
+    -Source $desktopLib `
+    -SignaturePattern '(?m)^fn\s+system_locale\s*\(\s*\)\s*->\s*Option\s*<\s*String\s*>' `
+    -Description "Desktop system locale command" `
+    -TopLevel `
+    -CodeView $desktopLibCodeViewForLocale
+if (
+    $null -eq $systemLocaleCommand -or
+    ($systemLocaleCommand.CodeBody -replace '\s', '') -notmatch
+    [regex]::Escape('wokrouter_platform::detect_system_locale()')
+) {
+    Add-ContractFailure `
+        -Message "Desktop system_locale command must preserve the optional OS locale candidate."
+}
+
+$frontendLocaleCodeView = Get-TypeScriptCodeView `
+    -Source $frontendLocale `
+    -Description "Desktop locale resolver"
+$supportedLocaleResolver = Get-UniqueBracedItem `
+    -Source $frontendLocale `
+    -SignaturePattern '(?m)^export\s+function\s+resolveSupportedLocale\s*\(\s*systemLocale\s*:\s*string\s*\|\s*null\s*\|\s*undefined\s*,' `
+    -Description "Desktop supported locale resolver" `
+    -TopLevel `
+    -CodeView $frontendLocaleCodeView
+if ($null -eq $supportedLocaleResolver) {
+    Add-ContractFailure `
+        -Message "Desktop locale resolver must accept a null OS candidate for navigator fallback."
+}
+
+$packagedEventSmokeAst = Get-PowerShellAst `
+    -Source $packagedEventSmoke `
+    -Description "Packaged desktop event bridge smoke"
+$smokeCommands = @($packagedEventSmokeAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst]
+        }, $true) | ForEach-Object { $_.GetCommandName() })
+if (
+    $smokeCommands -notcontains 'Start-Process' -or
+    $smokeCommands -notcontains 'Invoke-RestMethod' -or
+    $packagedEventSmoke -notmatch 'ClientWebSocket' -or
+    $packagedEventSmoke -notmatch 'Runtime\.evaluate' -or
+    $packagedEventSmoke -notmatch 'document\.querySelector\([^\r\n]*role="progressbar"' -or
+    $packagedEventSmoke -notmatch
+    '-not\s*\(\s*Test-Path\s+-LiteralPath\s+\$sidecarMarker\s+-PathType\s+Leaf\s*\)' -or
+    $packagedEventSmoke -notmatch 'WOKROUTER_EVENT_SMOKE_MARKER' -or
+    $packagedEventSmoke -notmatch
+    '(?m)^\s*\$env:WEBVIEW2_USER_DATA_FOLDER\s*=\s*\$webViewDataRoot\s*$' -or
+    $packagedEventSmoke -notmatch 'Get-OwnedWebViewProcesses' -or
+    $packagedEventSmoke -notmatch 'Stop-OwnedWebViewProcesses' -or
+    $packagedEventSmoke -notmatch 'exact smoke identity'
+) {
+    Add-ContractFailure `
+        -Message "Packaged desktop smoke must launch the real EXE, isolate exact WebView ownership, and observe a started sidecar plus WebView progress."
+}
+
+$packagedGuiAcceptanceTestsAst = Get-PowerShellAst `
+    -Source $packagedGuiAcceptanceTests `
+    -Description "Packaged GUI acceptance self-test"
+$packagedGuiSelfTestInvocations = @($packagedGuiAcceptanceTestsAst.FindAll({
+            param($node)
+            if (
+                $node -isnot [Management.Automation.Language.CommandAst] -or
+                $node.InvocationOperator -ne
+                [Management.Automation.Language.TokenKind]::Ampersand -or
+                $node.CommandElements.Count -lt 2 -or
+                $node.CommandElements[0] -isnot
+                [Management.Automation.Language.VariableExpressionAst] -or
+                $node.CommandElements[0].VariablePath.UserPath -cne "harness"
+            ) {
+                return $false
+            }
+            $parameters = @($node.CommandElements | Where-Object {
+                    $_ -is [Management.Automation.Language.CommandParameterAst]
+                } | ForEach-Object { $_.ParameterName })
+            return (
+                $parameters -contains "SelfTest" -and
+                $parameters -contains "EvidenceRoot" -and
+                $parameters -contains "TimeoutSeconds"
+            )
+        }, $true))
+if ($packagedGuiSelfTestInvocations.Count -ne 1) {
+    Add-ContractFailure `
+        -Message "The packaged GUI acceptance self-test must execute the harness exactly once with isolated evidence and a timeout."
+}
+
+$packagedGuiAcceptanceAst = Get-PowerShellAst `
+    -Source $packagedGuiAcceptance `
+    -Description "Packaged GUI live acceptance harness"
+$packagedGuiFunctionAsts = @($packagedGuiAcceptanceAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst]
+        }, $true))
+$packagedGuiFunctions = @($packagedGuiFunctionAsts | ForEach-Object Name)
+$requiredPackagedGuiFunctions = @(
+    "Build-LiveAcceptanceApplication",
+    "Add-AcceptanceDocumentScript",
+    "Invoke-MissingInstallLive",
+    "Invoke-PreinstalledUpdateLive",
+    "Invoke-LocaleLive"
+)
+$requiredPackagedGuiScenarios = @(
+    "MissingInstall",
+    "UpdateCancelConfirm",
+    "ActiveRequests",
+    "Rollback",
+    "CloseReopen",
+    "Locale"
+)
+$requiredAllLoopScenarios = @($requiredPackagedGuiScenarios | Select-Object -First 5)
+$requiredFunctionsHaveReachableBodies = $true
+foreach ($requiredFunction in $requiredPackagedGuiFunctions) {
+    $matches = @($packagedGuiFunctionAsts | Where-Object { $_.Name -ceq $requiredFunction })
+    if ($matches.Count -ne 1) {
+        $requiredFunctionsHaveReachableBodies = $false
+        continue
+    }
+    $functionTerminals = @($matches[0].Body.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.ReturnStatementAst] -or
+                $node -is [Management.Automation.Language.ExitStatementAst]
+            }, $true))
+    $allowedTerminalCount = if ($requiredFunction -ceq 'Build-LiveAcceptanceApplication') {
+        1
+    } else {
+        0
+    }
+    if ($functionTerminals.Count -ne $allowedTerminalCount) {
+        $requiredFunctionsHaveReachableBodies = $false
+    } elseif ($allowedTerminalCount -eq 1) {
+        $directStatements = @($matches[0].Body.EndBlock.Statements)
+        if (
+            $directStatements.Count -eq 0 -or
+            $functionTerminals[0] -ne $directStatements[-1]
+        ) {
+            $requiredFunctionsHaveReachableBodies = $false
+        }
+    }
+}
+
+$allDispatchers = @($packagedGuiAcceptanceAst.EndBlock.Statements | Where-Object {
+        $_ -is [Management.Automation.Language.IfStatementAst] -and
+        $_.Clauses.Count -eq 1 -and
+        $_.Clauses[0].Item1.Extent.Text.Trim() -ceq '$Scenario -ceq "All"'
+    })
+$allDispatcherValid = $false
+if ($allDispatchers.Count -eq 1) {
+    $allBody = $allDispatchers[0].Clauses[0].Item2
+    $allStatements = @($allBody.Statements)
+    $allStatementTypes = @($allStatements | ForEach-Object { $_.GetType().Name })
+    $allCommands = @($allBody.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.CommandAst]
+            }, $true) | ForEach-Object { $_.GetCommandName() })
+    $allLoops = @($allStatements | Where-Object {
+            $_ -is [Management.Automation.Language.ForEachStatementAst]
+        })
+    $allLoopScenarios = @()
+    if ($allLoops.Count -eq 1) {
+        $allLoopScenarios = @($allLoops[0].Condition.FindAll({
+                    param($node)
+                    $node -is [Management.Automation.Language.StringConstantExpressionAst]
+                }, $true) | ForEach-Object Value)
+    }
+    $allCompletionStrings = @($allBody.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+                $node.Value -ceq 'All packaged GUI acceptance scenarios passed.'
+            }, $true))
+    $allDispatcherValid = (
+        ($allStatementTypes -join ',') -ceq
+        'IfStatementAst,AssignmentStatementAst,ForEachStatementAst,PipelineAst,PipelineAst,ExitStatementAst' -and
+        $allStatements[-1].Extent.Text.Trim() -ceq 'exit 0' -and
+        @($allCommands | Where-Object { $_ -ceq 'Invoke-MissingInstallLive' }).Count -eq 1 -and
+        @($allCommands | Where-Object { $_ -ceq 'Invoke-PreinstalledUpdateLive' }).Count -eq 1 -and
+        @($allCommands | Where-Object { $_ -ceq 'Invoke-LocaleLive' }).Count -eq 1 -and
+        $allLoopScenarios.Count -eq $requiredAllLoopScenarios.Count -and
+        @($requiredAllLoopScenarios | Where-Object {
+                $allLoopScenarios -notcontains $_
+            }).Count -eq 0 -and
+        $allCompletionStrings.Count -eq 1
+    )
+}
+
+$documentScriptFunctions = @($packagedGuiFunctionAsts | Where-Object {
+        $_.Name -ceq 'Add-AcceptanceDocumentScript'
+    })
+$localeFunctions = @($packagedGuiFunctionAsts | Where-Object {
+        $_.Name -ceq 'Invoke-LocaleLive'
+    })
+$localeEvidenceValid = $false
+if ($documentScriptFunctions.Count -eq 1 -and $localeFunctions.Count -eq 1) {
+    $documentTraceStrings = @($documentScriptFunctions[0].Body.FindAll({
+                param($node)
+                ($node -is [Management.Automation.Language.StringConstantExpressionAst] -or
+                    $node -is [Management.Automation.Language.ExpandableStringExpressionAst]) -and
+                $node.Value.Contains('visibleFrames')
+            }, $true))
+    $localeFrameReads = @($localeFunctions[0].Body.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+                $node.Value -ceq 'window.__wokrouterAcceptance.visibleFrames'
+            }, $true))
+    $localeColdStarts = @($localeFunctions[0].Body.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.ExpandableStringExpressionAst] -and
+                $node.Value -ceq
+                '--remote-debugging-port=$cdpPort --lang=$($case.navigator_locale)'
+            }, $true))
+    $localeEvidenceValid = (
+        $documentTraceStrings.Count -eq 1 -and
+        $localeFrameReads.Count -eq 1 -and
+        $localeColdStarts.Count -eq 1
+    )
+}
+if (
+    @($requiredPackagedGuiFunctions | Where-Object {
+            $packagedGuiFunctions -notcontains $_
+        }).Count -gt 0 -or
+    -not $requiredFunctionsHaveReachableBodies -or
+    -not $allDispatcherValid -or
+    -not $localeEvidenceValid
+) {
+    Add-ContractFailure `
+        -Message "The packaged GUI live harness must execute all six isolated scenarios with cold-start navigator locale and first-frame evidence."
+}
+
+foreach ($catalog in @(
+        @{
+            Path = $englishCatalogPath
+            Description = "English catalog"
+        },
+        @{
+            Path = $simplifiedChineseCatalogPath
+            Description = "Simplified Chinese catalog"
+        }
+    )) {
+    if (-not (Test-Path -LiteralPath $catalog.Path -PathType Leaf)) {
+        Add-ContractFailure `
+            -Message "Desktop i18n must retain the $($catalog.Description)."
+    }
+}
+
+$desktopBootstrapCodeView = Get-TypeScriptCodeView `
+    -Source $desktopBootstrap `
+    -Description "Desktop bootstrap module"
+$bootstrap = Get-UniqueBracedItem `
+    -Source $desktopBootstrap `
+    -SignaturePattern '(?m)^export[ \t]+async[ \t]+function[ \t]+bootstrap[ \t]*\(' `
+    -Description "Desktop bootstrap" `
+    -TopLevel `
+    -CodeView $desktopBootstrapCodeView
+if ($null -ne $bootstrap) {
+    $bootstrapCodeView = [pscustomobject]@{ Code = $bootstrap.CodeBody }
+    $bootstrapStatements = @(Get-TypeScriptDirectStatements `
+        -Source $bootstrap.Body `
+        -Description "Desktop bootstrap body" `
+        -CodeView $bootstrapCodeView)
+    $systemLocaleCalls = @($bootstrapStatements | Where-Object {
+            [regex]::IsMatch(
+                $_.Source,
+                '(?s)^const\s+systemLocale\s*=\s*await\s+invoke\s*<\s*string\s*\|\s*null\s*>\s*\(\s*"system_locale"\s*\)\s*\.\s*catch\s*\(\s*\(\s*\)\s*=>\s*undefined\s*,?\s*\)\s*;$'
+            )
+        })
+    $localeResolutionCalls = @($bootstrapStatements | Where-Object {
+            [regex]::IsMatch(
+                $_.Source,
+                '(?s)^const\s+locale\s*=\s*resolveSupportedLocale\s*\(\s*systemLocale\s*,\s*browserLocaleCandidates\s*\(\s*window\s*\.\s*navigator\s*\)\s*,?\s*\)\s*;$'
+            )
+        })
+    $initializeCalls = @($bootstrapStatements | Where-Object {
+            [regex]::IsMatch(
+                $_.Source,
+                '^await\s+initializeI18n\s*\(\s*locale\s*\)\s*;$'
+            )
+        })
+    $documentLocaleCalls = @($bootstrapStatements | Where-Object {
+            [regex]::IsMatch(
+                $_.Source,
+                '^initializeDocumentLocale\s*\(\s*document\s*\.\s*documentElement\s*,\s*locale\s*\)\s*;$'
+            )
+        })
+    $renderCalls = @($bootstrapStatements | Where-Object {
+            [regex]::IsMatch(
+                $_.Source,
+                '(?s)^createRoot\s*\(\s*root\s*\)\s*\.\s*render\s*\(.*\)\s*;$'
+            )
+        })
+    $unconditionalTerminators = @($bootstrapStatements | Where-Object {
+            [regex]::IsMatch($_.Code, '^(?:return|throw)\b') -or
+            [regex]::IsMatch(
+                $_.Code,
+                '(?s)^if\s*\(\s*true\s*\)\s*\{\s*(?:return(?:\s+[^;]*)?|throw\s+[^;]+)\s*;\s*\}\s*$'
+            )
+        })
+    $requiredBootstrapStatementsPresent = (
+        $systemLocaleCalls.Count -eq 1 -and
+        $localeResolutionCalls.Count -eq 1 -and
+        $initializeCalls.Count -eq 1 -and
+        $documentLocaleCalls.Count -eq 1 -and
+        $renderCalls.Count -eq 1
+    )
+    $bootstrapHasEarlyTerminator = $false
+    if ($renderCalls.Count -eq 1) {
+        $bootstrapHasEarlyTerminator = @(
+            $unconditionalTerminators | Where-Object {
+                $_.Index -lt $renderCalls[0].Index
+            }
+        ).Count -gt 0
+    }
+    if (-not $requiredBootstrapStatementsPresent -or $bootstrapHasEarlyTerminator) {
+        Add-ContractFailure `
+            -Message "Desktop bootstrap must retain reachable direct bootstrap statements for system locale resolution, i18n initialization, document locale initialization, and rendering."
+    }
+    if (
+        $requiredBootstrapStatementsPresent -and
+        (
+            $systemLocaleCalls[0].Index -ge $localeResolutionCalls[0].Index -or
+            $localeResolutionCalls[0].Index -ge $initializeCalls[0].Index -or
+            $initializeCalls[0].Index -ge $documentLocaleCalls[0].Index -or
+            $documentLocaleCalls[0].Index -ge $renderCalls[0].Index
+        )
+    ) {
+        Add-ContractFailure `
+            -Message "Desktop bootstrap must resolve the system locale and await i18n before desktop rendering."
+    }
+}
+
+if ($null -ne $desktopBootstrapCodeView) {
+    $desktopModuleStatements = @(Get-TypeScriptDirectStatements `
+        -Source $desktopBootstrap `
+        -Description "Desktop bootstrap module" `
+        -CodeView $desktopBootstrapCodeView)
+    $bootstrapInvocations = @($desktopModuleStatements | Where-Object {
+            [regex]::IsMatch($_.Source, '^void\s+bootstrap\s*\(\s*\)\s*;$')
+        })
+    if ($bootstrapInvocations.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "Desktop bootstrap module must invoke bootstrap at module scope exactly once."
+    }
+}
+
+$desktopI18nCodeView = Get-TypeScriptCodeView `
+    -Source $desktopI18n `
+    -Description "Desktop i18n module"
+$managementPanelCodeView = Get-TypeScriptCodeView `
+    -Source $managementPanel `
+    -Description "Desktop management panel"
+if ($null -ne $managementPanelCodeView) {
+    $managementPanelItem = Get-UniqueBracedItem `
+        -Source $managementPanel `
+        -SignaturePattern '(?m)^export[ \t]+function[ \t]+ManagementPanel[ \t]*\(' `
+        -Description "Desktop ManagementPanel component" `
+        -TopLevel `
+        -CodeView $managementPanelCodeView
+    $managementLabelValid = $false
+    if ($null -ne $managementPanelItem) {
+        $bodyOffset = $managementPanelItem.OpeningBraceIndex + 1
+        $managementPanelBodyView = [pscustomobject]@{
+            Code = $managementPanelItem.CodeBody
+            CommentStripped = $managementPanelCodeView.CommentStripped.Substring(
+                $bodyOffset,
+                $managementPanelItem.Body.Length
+            )
+        }
+        $renderStatements = @(
+            Get-TypeScriptDirectStatements `
+                -Source $managementPanelItem.Body `
+                -Description "Desktop ManagementPanel component body" `
+                -CodeView $managementPanelBodyView |
+                Where-Object { $_.Code -match '(?s)^return[ \t\r\n]*\(' }
+        )
+        if ($renderStatements.Count -eq 1) {
+            $renderStatement = $renderStatements[0]
+            $renderCommentStripped = $managementPanelBodyView.CommentStripped.Substring(
+                $renderStatement.Index,
+                $renderStatement.Length
+            )
+            $liveManagementLabel = [regex]::Match(
+                $renderCommentStripped,
+                '(?s)^return\s*\(\s*(?<section><section\s+className\s*=\s*"management-panel"\s+aria-labelledby\s*=\s*"management-heading"\s*>)\s*(?<header><header\s+className\s*=\s*"management-header"\s*>)\s*(?<container><div\s*>)\s*(?<label><p\s+className\s*=\s*"section-label"\s*>\s*\{\s*t\s*\(\s*"management\.providers\.panelLabel"\s*\)\s*\}\s*</p>)'
+            )
+            $managementLabelValid = $liveManagementLabel.Success
+            foreach ($groupName in @("section", "header", "container", "label")) {
+                if (
+                    -not $managementLabelValid -or
+                    $renderStatement.Code[$liveManagementLabel.Groups[$groupName].Index] -ne '<'
+                ) {
+                    $managementLabelValid = $false
+                    break
+                }
+            }
+        }
+    }
+    if (-not $managementLabelValid) {
+        Add-ContractFailure `
+            -Message "Management panel label must be rendered through its translation key."
+    }
+}
+$i18nInitializer = Get-UniqueBracedItem `
+    -Source $desktopI18n `
+    -SignaturePattern '(?m)^export[ \t]+async[ \t]+function[ \t]+initializeI18n[ \t]*\(' `
+    -Description "Desktop i18n initializer" `
+    -TopLevel `
+    -CodeView $desktopI18nCodeView
+if ($null -ne $i18nInitializer) {
+    $i18nInitializerCodeView = [pscustomobject]@{
+        Code = $i18nInitializer.CodeBody
+    }
+    $i18nStatements = @(Get-TypeScriptDirectStatements `
+        -Source $i18nInitializer.Body `
+        -Description "Desktop i18n initializer body" `
+        -CodeView $i18nInitializerCodeView)
+    $initStatements = @($i18nStatements | Where-Object {
+            $_.Code -match '^await\s+i18n\s*\.\s*use\s*\(\s*initReactI18next\s*\)\s*\.\s*init\s*\('
+        })
+    $supportedLanguagesAreExact = $false
+    if ($initStatements.Count -eq 1) {
+        $initStatement = $initStatements[0]
+        $initCall = [regex]::Match(
+            $initStatement.Code,
+            '^await\s+i18n\s*\.\s*use\s*\(\s*initReactI18next\s*\)\s*\.\s*init\s*\('
+        )
+        $optionsOpeningBrace = $initCall.Index + $initCall.Length
+        while (
+            $optionsOpeningBrace -lt $initStatement.Code.Length -and
+            [char]::IsWhiteSpace($initStatement.Code[$optionsOpeningBrace])
+        ) {
+            $optionsOpeningBrace += 1
+        }
+        if (
+            $optionsOpeningBrace -lt $initStatement.Code.Length -and
+            $initStatement.Code[$optionsOpeningBrace] -eq "{"
+        ) {
+            $depth = 0
+            $optionsClosingBrace = -1
+            for (
+                $index = $optionsOpeningBrace;
+                $index -lt $initStatement.Code.Length;
+                $index += 1
+            ) {
+                if ($initStatement.Code[$index] -eq "{") {
+                    $depth += 1
+                }
+                elseif ($initStatement.Code[$index] -eq "}") {
+                    $depth -= 1
+                    if ($depth -eq 0) {
+                        $optionsClosingBrace = $index
+                        break
+                    }
+                }
+            }
+            if ($optionsClosingBrace -gt $optionsOpeningBrace) {
+                $optionsBodyStart = $optionsOpeningBrace + 1
+                $optionsBodyLength = $optionsClosingBrace - $optionsBodyStart
+                $optionsCodeBody = $initStatement.Code.Substring(
+                    $optionsBodyStart,
+                    $optionsBodyLength
+                )
+                $optionsSourceBody = $initStatement.Source.Substring(
+                    $optionsBodyStart,
+                    $optionsBodyLength
+                )
+                $supportedLanguageProperties = @()
+                foreach ($candidate in @([regex]::Matches(
+                            $optionsCodeBody,
+                            '(?<![A-Za-z0-9_$])supportedLngs\s*:'
+                        ))) {
+                    $ownership = Get-RustOwnershipAtIndex `
+                        -Structure $optionsCodeBody `
+                        -Index $candidate.Index
+                    if ($ownership.AllDelimiterDepthsZero) {
+                        $supportedLanguageProperties += $candidate
+                    }
+                }
+                $exactSupportedLanguageProperties = @(
+                    $supportedLanguageProperties | Where-Object {
+                        $sourceTail = $optionsSourceBody.Substring($_.Index)
+                        [regex]::IsMatch(
+                            $sourceTail,
+                            '^supportedLngs\s*:\s*\[\s*"en"\s*,\s*"zh-CN"\s*\]\s*(?=,|$)'
+                        )
+                    }
+                )
+                $topLevelSpreadProperties = @()
+                foreach ($candidate in @([regex]::Matches(
+                            $optionsCodeBody,
+                            '\.\.\.'
+                        ))) {
+                    $ownership = Get-RustOwnershipAtIndex `
+                        -Structure $optionsCodeBody `
+                        -Index $candidate.Index
+                    if ($ownership.AllDelimiterDepthsZero) {
+                        $topLevelSpreadProperties += $candidate
+                    }
+                }
+                $supportedLanguagesAreExact = (
+                    $supportedLanguageProperties.Count -eq 1 -and
+                    $exactSupportedLanguageProperties.Count -eq 1 -and
+                    $topLevelSpreadProperties.Count -eq 0
+                )
+            }
+        }
+    }
+    if (-not $supportedLanguagesAreExact) {
+        Add-ContractFailure `
+            -Message 'Desktop i18n must bind supportedLngs: ["en", "zh-CN"] exactly to the awaited i18n.init options.'
+    }
+}
+
+$desktopMainCodeView = Get-RustCodeView `
+    -Source $desktopMain `
+    -Description "Desktop Rust entry point"
+if ($null -ne $desktopMainCodeView) {
+    $subsystemAttributes = @([regex]::Matches(
+            $desktopMainCodeView.Code,
+            '(?m)^#!\[cfg_attr\([ \t]*all\([ \t]*windows[ \t]*,[ \t]*not\([ \t]*debug_assertions[ \t]*\)[ \t]*\)[ \t]*,[ \t]*windows_subsystem[ \t]*=[ \t]+\)[ \t]*\][ \t]*$'
+        ))
+    $exactSubsystemAttributes = @(
+        $subsystemAttributes | Where-Object {
+            ($desktopMain.Substring($_.Index, $_.Length) -replace '\s', '') -ceq
+            '#![cfg_attr(all(windows,not(debug_assertions)),windows_subsystem="windows")]'
+        }
+    )
+    if ($exactSubsystemAttributes.Count -ne 1) {
+        Add-ContractFailure `
+            -Message 'Desktop Rust entry point must retain windows_subsystem = "windows" for non-debug Windows builds.'
+    }
+
+    $desktopMainFunction = Get-UniqueBracedItem `
+        -Source $desktopMain `
+        -SignaturePattern '(?m)^fn[ \t]+main[ \t]*\([ \t]*\)[ \t]*' `
+        -Description "Desktop Rust main function" `
+        -TopLevel `
+        -CodeView $desktopMainCodeView
+    if ($null -ne $desktopMainFunction) {
+        $helperDispatch = Get-UniqueBracedItem `
+            -Source $desktopMainFunction.Body `
+            -SignaturePattern '(?m)^[ \t]*if[ \t]+let[ \t]+Some\(exit_code\)[ \t]*=[ \t]*wokrouter_desktop::run_core_operation_helper_if_requested\(\)[ \t]*' `
+            -Description "Desktop hidden core-operation helper dispatch" `
+            -DirectStatement
+        $tauriDispatch = Get-UniqueBracedItem `
+            -Source $desktopMainFunction.Body `
+            -SignaturePattern '(?m)^[ \t]*if[ \t]+wokrouter_desktop::run\(\)\.is_err\(\)[ \t]*' `
+            -Description "Desktop Tauri dispatch" `
+            -DirectStatement
+        if ($null -ne $helperDispatch) {
+            $null = Get-UniqueDirectStatementIndex `
+                -Source $helperDispatch.Body `
+                -Pattern '(?m)^[ \t]*std::process::exit\(i32::from\(exit_code\)\)[ \t]*;' `
+                -Description "Desktop hidden helper exit"
+        }
+        if (
+            $null -ne $helperDispatch -and
+            $null -ne $tauriDispatch -and
+            $helperDispatch.ClosingBraceIndex -ge $tauriDispatch.SignatureIndex
+        ) {
+            Add-ContractFailure `
+                -Message "Desktop entry point must dispatch and exit the hidden core-operation helper before starting Tauri."
+        }
+    }
+}
+
+$windowsPackagerAst = $null
+try {
+    $windowsPackagerAst = Get-PowerShellAst `
+        -Source $windowsPackager `
+        -Description "Windows packager"
+}
+catch {
+    Add-ContractFailure `
+        -Message "Windows packager GUI subsystem checks are invalid: $($_.Exception.Message)"
+}
+if ($null -ne $windowsPackagerAst) {
+    $sourceDesktopGuards = @(
+        Get-ExactPowerShellGuardAst `
+            -Ast $windowsPackagerAst `
+            -Condition '(& $peSubsystemCommand -Path $desktop) -ne 2' `
+            -ThrowStatement 'throw "Windows desktop executable must use the GUI subsystem."'
+    )
+    $sourceDesktopGuardIsInvalid = (
+        $sourceDesktopGuards.Count -ne 1 -or
+        -not [object]::ReferenceEquals(
+            $sourceDesktopGuards[0].Parent,
+            $windowsPackagerAst.EndBlock
+        )
+    )
+    if ($sourceDesktopGuardIsInvalid) {
+        Add-ContractFailure `
+            -Message "Windows packager must retain the active script-scope source desktop GUI subsystem check."
+    }
+    else {
+        $guardStatementIndex = [array]::IndexOf(
+            @($windowsPackagerAst.EndBlock.Statements),
+            $sourceDesktopGuards[0]
+        )
+        $terminalStatementsBeforeGuard = @(
+            $windowsPackagerAst.EndBlock.Statements |
+                Select-Object -First $guardStatementIndex |
+                Where-Object {
+                    $_ -is [System.Management.Automation.Language.ReturnStatementAst] -or
+                    $_ -is [System.Management.Automation.Language.ExitStatementAst] -or
+                    $_ -is [System.Management.Automation.Language.ThrowStatementAst]
+                }
+        )
+        if (
+            $guardStatementIndex -lt 0 -or
+            $terminalStatementsBeforeGuard.Count -gt 0
+        ) {
+            Add-ContractFailure `
+                -Message "Windows packager must retain a reachable script-scope source desktop GUI subsystem check."
+        }
     }
 }
 
@@ -584,11 +3064,52 @@ if ($jobs.ContainsKey("frontend")) {
     $frontendSteps = @(Get-JobSteps -Job $jobs["frontend"])
     foreach ($command in @(
             "pnpm --dir apps/desktop install --frozen-lockfile",
+            "pnpm --dir apps/desktop i18n:check",
             "pnpm --dir apps/desktop typecheck",
             "pnpm --dir apps/desktop test:unit",
             "pnpm --dir apps/desktop build"
         )) {
         Assert-JobRunStep -JobName "frontend" -Steps $frontendSteps -Command $command
+    }
+
+    $installIndex = -1
+    $catalogIndex = -1
+    $testIndex = -1
+    for ($index = 0; $index -lt $frontendSteps.Count; $index += 1) {
+        if (-not $frontendSteps[$index].Fields.ContainsKey("run")) {
+            continue
+        }
+        switch ($frontendSteps[$index].Fields["run"]) {
+            "pnpm --dir apps/desktop install --frozen-lockfile" {
+                $installIndex = $index
+            }
+            "pnpm --dir apps/desktop i18n:check" {
+                $catalogIndex = $index
+                if (
+                    -not $frontendSteps[$index].Fields.ContainsKey("name") -or
+                    $frontendSteps[$index].Fields["name"] -cne
+                    "Check desktop translation catalogs"
+                ) {
+                    Add-ContractFailure `
+                        -Message "Frontend catalog check step must use the documented name."
+                }
+            }
+            "pnpm --dir apps/desktop test:unit" {
+                $testIndex = $index
+            }
+        }
+    }
+    if (
+        $installIndex -ge 0 -and
+        $catalogIndex -ge 0 -and
+        $testIndex -ge 0 -and
+        (
+            $installIndex -ge $catalogIndex -or
+            $catalogIndex -ge $testIndex
+        )
+    ) {
+        Add-ContractFailure `
+            -Message "Frontend catalog check must run after frozen install and before tests."
     }
 
     $pnpmStep = Get-ActionStep -Steps $frontendSteps -Action "pnpm/action-setup@v6"
@@ -871,6 +3392,1835 @@ if (
 if ($development -notmatch "cargo deny --version") {
     Add-ContractFailure `
         -Message "Development docs must require cargo-deny version verification."
+}
+
+$lifecycleEvidenceFragments = @(
+    "## WokCore lifecycle acceptance evidence",
+    "does not currently provide a command that drives a live signed",
+    "pnpm.cmd --dir apps/desktop exec vitest run src/components/CoreLifecycle.test.tsx",
+    "tests/scripts/run-fixed-test-host.ps1",
+    "1. **Missing to running without a click.**",
+    "missing_production_runtime_installs_starts_authorizes_and_reports_structured_progress",
+    "signed_release_reports_monotonic_download_and_authoritative_install_phases",
+    "2. **Signed update cancel and confirm.**",
+    "accessible confirmation and invokes the expected version once",
+    "system_runner_uses_only_the_three_fixed_child_commands",
+    "3. **Active requests remain.**",
+    "returns management after",
+    "versions_bytes_and_active_requests_are_strictly_validated",
+    "4. **Verification failure and rollback.**",
+    "artifact_hash_mismatch_leaves_no_install_or_record",
+    "invalid_manifest_signature_is_rejected_before_artifact_download",
+    "5. **Close and reopen during an operation.**",
+    "duplicate_installs_coalesce_conflicts_fail_and_terminal_allows_retry",
+    "subscribes before recovering a running snapshot and",
+    "6. **IDE Development performs zero update work.**",
+    "development_suppresses_every_install_and_update_path_before_authority_or_runner",
+    "a_selected_development_session_never_switches_to_production",
+    "7. **Chinese and English UI.**",
+    "pnpm.cmd --dir apps/desktop exec vitest run src/locale.test.ts",
+    "pwsh tests/scripts/check-foundation-contract.tests.ps1"
+)
+$lifecycleEvidenceComplete = $true
+foreach ($lifecycleEvidenceFragment in $lifecycleEvidenceFragments) {
+    if (-not $development.Contains($lifecycleEvidenceFragment)) {
+        $lifecycleEvidenceComplete = $false
+        break
+    }
+}
+if (-not $lifecycleEvidenceComplete) {
+    Add-ContractFailure `
+        -Message "Development docs must retain reproducible lifecycle acceptance evidence for all seven paths and disclose missing live GUI harnesses."
+}
+$lifecycleAcceptanceFixtures = @(
+    @{
+        Kind = "TypeScript"
+        Source = $coreLifecycleTests
+        Names = @(
+            "starts one production install in StrictMode and restores normal content after success",
+            "requires an accessible confirmation and invokes the expected version once",
+            "returns management after active requests defer the update and reconfirms retry",
+            "subscribes before recovering a running snapshot and unmounts only the listener",
+            "treats install_in_progress as another process and polls trusted status without retrying",
+            "polls operation and core until a released external install becomes retryable",
+            "never checks or installs updates for a development %s runtime",
+            "never starts production installation for a development %s status"
+        )
+    },
+    @{
+        Kind = "Rust"
+        Container = "CfgTestModule"
+        Source = $coreOperation
+        Names = @(
+            "system_runner_uses_only_the_three_fixed_child_commands",
+            "duplicate_installs_coalesce_conflicts_fail_and_terminal_allows_retry",
+            "development_suppresses_every_install_and_update_path_before_authority_or_runner",
+            "unavailable_production_journal_fails_closed_before_runner_or_authority",
+            "hidden_helper_request_requires_the_exact_safe_argument_shape",
+            "operation_journal_round_trips_only_the_strict_safe_snapshot",
+            "helper_timeout_attaches_when_the_bound_operation_lease_is_owned",
+            "helper_timeout_fence_blocks_a_late_operation_owner",
+            "helper_timeout_fence_preserves_a_terminal_written_before_fencing",
+            "real_helper_survives_coordinator_reopen_and_prevents_a_second_launch",
+            "reopened_coordinator_recovers_a_real_helper_failure",
+            "released_external_lease_with_missing_core_becomes_install_failed_and_retryable",
+            "active_external_install_lease_blocks_update_checks_and_installs",
+            "reopened_coordinator_recovers_a_real_update_terminal"
+        )
+    },
+    @{
+        Kind = "Rust"
+        Container = "CfgTestModule"
+        Source = $coreOperationParser
+        Names = @(
+            "versions_bytes_and_active_requests_are_strictly_validated",
+            "update_active_requests_are_valid_during_rolling_back"
+        )
+    },
+    @{
+        Kind = "Rust"
+        Container = "TopLevel"
+        RequireTestSupportFeatureCfg = $true
+        Source = $wokcoreInstallTests
+        Names = @(
+            "signed_release_reports_monotonic_download_and_authoritative_install_phases",
+            "artifact_hash_mismatch_leaves_no_install_or_record",
+            "invalid_manifest_signature_is_rejected_before_artifact_download"
+        )
+    },
+    @{
+        Kind = "Rust"
+        Container = "TopLevel"
+        Source = $cliStartTests
+        Names = @(
+            "missing_production_runtime_installs_starts_authorizes_and_reports_structured_progress"
+        )
+    },
+    @{
+        Kind = "Rust"
+        Container = "TopLevel"
+        Source = $runtimeSelectorTests
+        Names = @(
+            "a_selected_development_session_never_switches_to_production"
+        )
+    },
+    @{
+        Kind = "TypeScript"
+        Source = $localeTests
+        Names = @(
+            "initializes the document from the selected %s catalog"
+        )
+    }
+)
+$lifecycleAcceptanceFixturesExist = $true
+foreach ($fixtureGroup in $lifecycleAcceptanceFixtures) {
+    $fixtureCodeView = Get-RustCodeView `
+        -Source $fixtureGroup.Source `
+        -Description "$($fixtureGroup.Kind) lifecycle acceptance test source"
+    if ($null -eq $fixtureCodeView) {
+        $lifecycleAcceptanceFixturesExist = $false
+        break
+    }
+    $fixtureContainer = if ($fixtureGroup.Kind -eq "Rust") {
+        Get-RustExecutableTestContainer `
+            -Source $fixtureGroup.Source `
+            -Kind $fixtureGroup.Container `
+            -CodeView $fixtureCodeView `
+            -RequireTestSupportFeatureCfg (
+                [bool]$fixtureGroup.RequireTestSupportFeatureCfg
+            )
+    }
+    else {
+        $null
+    }
+    if (
+        $fixtureGroup.Kind -eq "Rust" -and
+        $null -eq $fixtureContainer
+    ) {
+        $lifecycleAcceptanceFixturesExist = $false
+        break
+    }
+    foreach ($fixtureName in $fixtureGroup.Names) {
+        $fixtureExists = if ($fixtureGroup.Kind -eq "TypeScript") {
+            Test-TypeScriptExecutableTestDescription `
+                -Source $fixtureGroup.Source `
+                -TestDescription $fixtureName `
+                -CodeView $fixtureCodeView
+        }
+        else {
+            Test-RustExecutableTestFunction `
+                -Source $fixtureGroup.Source `
+                -FunctionName $fixtureName `
+                -CodeView $fixtureCodeView `
+                -Container $fixtureContainer
+        }
+        if (-not $fixtureExists) {
+            $lifecycleAcceptanceFixturesExist = $false
+            break
+        }
+    }
+    if (-not $lifecycleAcceptanceFixturesExist) {
+        break
+    }
+}
+if (-not $lifecycleAcceptanceFixturesExist) {
+    Add-ContractFailure `
+        -Message "Every documented lifecycle acceptance fixture must remain present in an executable test source."
+}
+
+$expectedWokCorePublicKey = @"
+untrusted comment: minisign public key 7EF262CD8E9FE136
+RWQ24Z+OzWLyfjz0X7JFepiizNYEsUBt/cJisQWQ9o9EAK8TURVs9hts
+"@
+if (
+    $wokcorePublicKey.TrimEnd("`r", "`n") -ne
+    $expectedWokCorePublicKey.TrimEnd("`r", "`n")
+) {
+    Add-ContractFailure `
+        -Message "The production Minisign public key must retain key id 7EF262CD8E9FE136 and its exact validated payload."
+}
+
+$secretHeaderPattern = (
+    '(?im)^[ \t]*untrusted comment:[ \t]*' +
+    'minisign[ \t]+(?:encrypted[ \t]+)?secret[ \t]+key\b'
+)
+$generatedDirectoryNames = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase
+)
+foreach (
+    $generatedDirectoryName in @(
+        ".git",
+        ".next",
+        "build",
+        "coverage",
+        "dist",
+        "gen",
+        "node_modules",
+        "target"
+    )
+) {
+    $null = $generatedDirectoryNames.Add($generatedDirectoryName)
+}
+$secretHeaderFound = $false
+foreach ($sourceRootName in @("apps", "crates")) {
+    $sourceRoot = Join-Path $rootPath $sourceRootName
+    if (-not (Test-Path -LiteralPath $sourceRoot)) {
+        continue
+    }
+    $sourceRootPrefix = $sourceRoot.TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    ) + [System.IO.Path]::DirectorySeparatorChar
+    foreach ($sourceFile in Get-ChildItem -LiteralPath $sourceRoot -Recurse -File -Force) {
+        $relativePath = $sourceFile.FullName.Substring($sourceRootPrefix.Length)
+        $relativeSegments = @($relativePath -split '[\\/]')
+        $generated = $false
+        for (
+            $segmentIndex = 0;
+            $segmentIndex -lt $relativeSegments.Count - 1;
+            $segmentIndex += 1
+        ) {
+            if ($generatedDirectoryNames.Contains($relativeSegments[$segmentIndex])) {
+                $generated = $true
+                break
+            }
+        }
+        if ($generated) {
+            continue
+        }
+
+        $buffer = New-Object byte[] (64 * 1024)
+        $stream = [System.IO.File]::Open(
+            $sourceFile.FullName,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::ReadWrite
+        )
+        try {
+            $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
+        }
+        finally {
+            $stream.Dispose()
+        }
+        $sourceText = [System.Text.Encoding]::UTF8.GetString(
+            $buffer,
+            0,
+            $bytesRead
+        ).TrimStart([char]0xFEFF)
+        if ($sourceText -match $secretHeaderPattern) {
+            $secretHeaderFound = $true
+            break
+        }
+    }
+    if ($secretHeaderFound) {
+        break
+    }
+}
+if ($secretHeaderFound) {
+    Add-ContractFailure `
+        -Message "Product source must not contain a Minisign private or encrypted secret key header."
+}
+
+$coreOperationCodeView = Get-RustCodeView `
+    -Source $coreOperation `
+    -Description "Core operation coordinator source"
+$coreOperationHelperCodeView = Get-RustCodeView `
+    -Source $coreOperationHelper `
+    -Description "Core operation hidden helper source"
+$coreOperationJournalCodeView = Get-RustCodeView `
+    -Source $coreOperationJournal `
+    -Description "Core operation journal source"
+$desktopLibCodeView = Get-RustCodeView `
+    -Source $desktopLib `
+    -Description "Desktop Tauri library source"
+
+$coreOperationSnapshot = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^pub\(crate\)[ \t]+struct[ \t]+CoreOperationSnapshot[ \t]*' `
+    -Description "Core operation safe journal snapshot" `
+    -TopLevel `
+    -CodeView $coreOperationCodeView
+if ($null -ne $coreOperationSnapshot) {
+    $snapshotDenyUnknownFields = [regex]::Matches(
+        $coreOperationCodeView.Code,
+        '(?m)^#\[serde\(deny_unknown_fields\)\][ \t]*\r?\n[ \t]*pub\(crate\)[ \t]+struct[ \t]+CoreOperationSnapshot\b'
+    )
+    $snapshotFieldNames = @(
+        [regex]::Matches(
+            $coreOperationSnapshot.CodeBody,
+            '(?m)^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?([a-z][a-z0-9_]*)[ \t]*:'
+        ) | ForEach-Object { $_.Groups[1].Value }
+    )
+    $expectedSnapshotFieldNames = @(
+        "schema_version",
+        "operation_id",
+        "sequence",
+        "operation",
+        "state",
+        "phase",
+        "current_version",
+        "target_version",
+        "bytes_completed",
+        "bytes_total",
+        "active_requests",
+        "error_code"
+    )
+    if (
+        $snapshotDenyUnknownFields.Count -ne 1 -or
+        ($snapshotFieldNames -join "`n") -cne
+        ($expectedSnapshotFieldNames -join "`n")
+    ) {
+        Add-ContractFailure `
+            -Message "Core operation journal snapshot must deny unknown fields and retain only the strict safe projection."
+    }
+}
+
+$spawnOperationHelper = Get-UniqueBracedItem `
+    -Source $coreOperationHelper `
+    -SignaturePattern '(?ms)^pub\(super\)[ \t]+fn[ \t]+spawn_helper_process[ \t]*\([ \t\r\n]*executable:[ \t]*&Path,[ \t\r\n]*operation_id:[ \t]*Uuid,[ \t\r\n]*operation:[ \t]*CoreOperationKind,[ \t\r\n]*\)[ \t]*->[^{]+' `
+    -Description "Core operation hidden helper spawn" `
+    -TopLevel `
+    -CodeView $coreOperationHelperCodeView
+if ($null -ne $spawnOperationHelper) {
+    $spawnOperationHelperBody = (
+        $coreOperationHelperCodeView.CommentStripped.Substring(
+            $spawnOperationHelper.OpeningBraceIndex + 1,
+            $spawnOperationHelper.ClosingBraceIndex -
+                $spawnOperationHelper.OpeningBraceIndex -
+                1
+        ) -replace '\s', ''
+    )
+    $spawnOperationHelperArguments = [regex]::Matches(
+        $spawnOperationHelper.CodeBody,
+        '\.arg[ \t\r\n]*\('
+    )
+    if (
+        $spawnOperationHelperArguments.Count -ne 3 -or
+        $spawnOperationHelperBody -notmatch '\.arg\(OPERATION_HELPER_FLAG\)\.arg\(operation_id\.to_string\(\)\)\.arg\(matchoperation\{CoreOperationKind::Install=>"install",CoreOperationKind::Update=>"update",\}\)' -or
+        $spawnOperationHelperBody -notmatch '\.stdin\(Stdio::null\(\)\)\.stdout\(Stdio::null\(\)\)\.stderr\(Stdio::null\(\)\)\.kill_on_drop\(false\)' -or
+        $spawnOperationHelperBody -notmatch 'command\.creation_flags\(0x0800_0000\);' -or
+        $spawnOperationHelperBody -match '\.env(?:s)?\(' -or
+        $spawnOperationHelperBody -match '\.(?:args|raw_arg|raw_args)\('
+    ) {
+        Add-ContractFailure `
+            -Message "Hidden core-operation helper spawn must pass only the exact flag, canonical operation id, and install/update kind with null stdio, no environment payload, CREATE_NO_WINDOW, and kill_on_drop false."
+    }
+}
+
+$parseOperationHelperRequest = Get-UniqueBracedItem `
+    -Source $coreOperationHelper `
+    -SignaturePattern '(?m)^pub\(super\)[ \t]+fn[ \t]+parse_operation_helper_request[ \t]*\(' `
+    -Description "Core operation hidden helper request parser" `
+    -TopLevel `
+    -CodeView $coreOperationHelperCodeView
+if ($null -ne $parseOperationHelperRequest) {
+    $parseOperationHelperRequestBody = (
+        $coreOperationHelperCodeView.CommentStripped.Substring(
+            $parseOperationHelperRequest.OpeningBraceIndex + 1,
+            $parseOperationHelperRequest.ClosingBraceIndex -
+                $parseOperationHelperRequest.OpeningBraceIndex -
+                1
+        ) -replace '\s', ''
+    )
+    if (
+        $parseOperationHelperRequestBody -notmatch '\(Some\(operation_id\),Some\(operation\),None\)=\(arguments\.next\(\),arguments\.next\(\),arguments\.next\(\)\)' -or
+        $parseOperationHelperRequestBody -notmatch 'ifparsed_id\.to_string\(\)!=operation_id\{returnOperationHelperRequest::Invalid;' -or
+        $parseOperationHelperRequestBody -notmatch 'letoperation=matchoperation\{"install"=>CoreOperationKind::Install,"update"=>CoreOperationKind::Update,_=>returnOperationHelperRequest::Invalid,\};'
+    ) {
+        Add-ContractFailure `
+            -Message "Hidden core-operation helper request must reject extra arguments, non-canonical ids, paths, tokens, and kinds other than install/update."
+    }
+}
+
+$systemOperationHelper = Get-UniqueBracedItem `
+    -Source $coreOperationHelper `
+    -SignaturePattern '(?m)^async[ \t]+fn[ \t]+run_system_operation_helper[ \t]*\(' `
+    -Description "System core-operation hidden helper" `
+    -TopLevel `
+    -CodeView $coreOperationHelperCodeView
+if ($null -ne $systemOperationHelper) {
+    $systemOperationHelperBody = $systemOperationHelper.CodeBody -replace '\s', ''
+    if (
+        $systemOperationHelperBody -notmatch 'AppPaths::discover\(\)' -or
+        $systemOperationHelperBody -notmatch 'OperationJournal::open\(&paths\.runtime_dir\)' -or
+        $systemOperationHelperBody -notmatch 'discover_recorded_wokcore_executable\(&paths\.wokcore_install_record\)' -or
+        $systemOperationHelperBody -notmatch 'OperationRequest::Update\{executable\}'
+    ) {
+        Add-ContractFailure `
+            -Message "System core-operation helper must rediscover private paths and the trusted WokCore install record instead of accepting caller-supplied paths."
+    }
+}
+
+$journalRead = Get-UniqueBracedItem `
+    -Source $coreOperationJournal `
+    -SignaturePattern '(?m)^[ \t]*pub\(super\)[ \t]+fn[ \t]+read[ \t]*\(' `
+    -Description "Core operation journal read" `
+    -CodeView $coreOperationJournalCodeView
+$journalWrite = Get-UniqueBracedItem `
+    -Source $coreOperationJournal `
+    -SignaturePattern '(?m)^[ \t]*pub\(super\)[ \t]+fn[ \t]+write[ \t]*\(' `
+    -Description "Core operation journal write" `
+    -CodeView $coreOperationJournalCodeView
+if ($null -ne $journalRead) {
+    $journalReadBody = $journalRead.CodeBody -replace '\s', ''
+    if (
+        $journalReadBody -notmatch '^self\.ensure_stable_root\(\)\?;let_record_lock=self\.lock_record_shared\(\)\?;self\.ensure_stable_root\(\)\?;' -or
+        $journalReadBody -notmatch 'serde_json::from_value::<CoreOperationSnapshot>\(value\)' -or
+        $journalReadBody -notmatch 'if!snapshot\.is_safe_projection\(\)'
+    ) {
+        Add-ContractFailure `
+            -Message "Core operation journal reads must hold the shared record lock and validate the strict typed safe projection."
+    }
+}
+if ($null -ne $journalWrite) {
+    $journalWriteBody = $journalWrite.CodeBody -replace '\s', ''
+    if (
+        $journalWriteBody -notmatch '^self\.ensure_stable_root\(\)\?;if!snapshot\.is_safe_projection\(\)' -or
+        $journalWriteBody -notmatch 'let_record_lock=self\.lock_record_exclusive\(\)\?;self\.ensure_stable_root\(\)\?;' -or
+        $journalWriteBody -notmatch '\.write_all\(&bytes\)\.and_then\(\|\(\)\|file\.sync_all\(\)\)\.and_then\(\|\(\)\|replace_file\(&temporary,&self\.record\)\)\.and_then\(\|\(\)\|secure_private_file\(&self\.record\)\)\.and_then\(\|\(\)\|sync_directory\(&self\.root\)\)'
+    ) {
+        Add-ContractFailure `
+            -Message "Core operation journal writes must hold the exclusive record lock and durably replace only a validated private snapshot."
+    }
+}
+if (
+    $null -ne $coreOperationJournalCodeView -and
+    (
+        $coreOperationJournalCodeView.Code -notmatch '(?m)^const[ \t]+MAX_JOURNAL_BYTES:[ \t]*usize[ \t]*=[ \t]*16[ \t]*\*[ \t]*1024[ \t]*;' -or
+        $coreOperationJournalCodeView.Code -notmatch 'MOVEFILE_REPLACE_EXISTING[ \t\r\n]*\|[ \t\r\n]*MOVEFILE_WRITE_THROUGH'
+    )
+) {
+    Add-ContractFailure `
+        -Message "Core operation journal must remain bounded and use write-through atomic replacement on Windows."
+}
+
+$systemHelperLauncher = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^impl[ \t]+HelperLauncher[ \t]+for[ \t]+SystemHelperLauncher[ \t]*' `
+    -Description "System hidden helper launcher" `
+    -TopLevel `
+    -CodeView $coreOperationCodeView
+$systemHelperLaunch = if ($null -ne $systemHelperLauncher) {
+    Get-UniqueBracedItem `
+        -Source $systemHelperLauncher.Body `
+        -SignaturePattern '(?m)^[ \t]*fn[ \t]+launch[ \t]*\(' `
+        -Description "System hidden helper launch method" `
+        -TopLevel
+}
+else {
+    $null
+}
+if (
+    $null -ne $systemHelperLaunch -and
+    ($systemHelperLaunch.CodeBody -replace '\s', '') -cne
+    'letexecutable=env::current_exe().map_err(|_|RunnerError::Spawn)?;helper::spawn_helper_process(&executable,operation_id,operation)'
+) {
+    Add-ContractFailure `
+        -Message "System helper launcher must launch only the current desktop executable with the operation id and kind."
+}
+
+$productionCoordinatorConstructor = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*pub\(crate\)[ \t]+fn[ \t]+new[ \t]*\(' `
+    -Description "Production core operation coordinator constructor" `
+    -CodeView $coreOperationCodeView
+if (
+    $null -ne $productionCoordinatorConstructor -and
+    ($productionCoordinatorConstructor.CodeBody -replace '\s', '') -notmatch
+    'authority:Arc::new\(SystemTrustedRuntimeAuthority::discover\(\)\),persistent_operations:true,journal,'
+) {
+    Add-ContractFailure `
+        -Message "Production core operation coordination must fail closed when private persistent state cannot be initialized."
+}
+
+$startPersistentOperation = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+start_persistent_operation[ \t]*\(' `
+    -Description "Persistent core operation start arbitration" `
+    -CodeView $coreOperationCodeView
+if ($null -ne $startPersistentOperation) {
+    $claimIndex = Get-UniqueDirectStatementIndex `
+        -Source $startPersistentOperation.Body `
+        -Pattern '(?m)^[ \t]*let[ \t]+claim[ \t]*=[ \t]*self\.acquire_claim\(journal\)\.await\?[ \t]*;' `
+        -Description "Persistent core operation claim"
+    $initialJournalWriteIndex = Get-UniqueDirectStatementIndex `
+        -Source $startPersistentOperation.Body `
+        -Pattern '(?m)^[ \t]*journal\.write\(&snapshot\)\?[ \t]*;' `
+        -Description "Persistent core operation initial journal write"
+    $helperLaunch = Get-UniqueBracedItem `
+        -Source $startPersistentOperation.Body `
+        -SignaturePattern '(?m)^[ \t]*let[ \t]+mut[ \t]+helper[ \t]*=[ \t]*match[ \t]+launcher\.launch\(snapshot\.operation_id,[ \t]*operation\)[ \t]*' `
+        -Description "Persistent core operation helper launch" `
+        -DirectStatement
+    $helperLaunchCalls = [regex]::Matches(
+        $startPersistentOperation.CodeBody,
+        'launcher\.launch[ \t\r\n]*\('
+    )
+    $existingRunning = Get-UniqueBracedItem `
+        -Source $startPersistentOperation.Body `
+        -SignaturePattern '(?m)^[ \t]*if[ \t]+existing\.state[ \t]*==[ \t]*CoreOperationState::Running[ \t]*' `
+        -Description "Persistent existing-running arbitration"
+    if ($null -ne $existingRunning) {
+        $existingRunningBody = $existingRunning.CodeBody -replace '\s', ''
+        if (
+            $existingRunningBody -notmatch 'ifoperation==CoreOperationKind::Install&&existing\.operation==CoreOperationKind::Install\{.*self\.ensure_persistent_monitor\(existing\.clone\(\),sink\)\.await;returnOk\(existing\);\}returnErr\(CoreOperationError::OperationInProgress\);'
+        ) {
+            Add-ContractFailure `
+                -Message "Persistent operation arbitration must coalesce the same install and reject every conflicting running operation."
+        }
+    }
+    if (
+        $helperLaunchCalls.Count -ne 1 -or
+        $claimIndex -lt 0 -or
+        $initialJournalWriteIndex -lt 0 -or
+        $null -eq $helperLaunch -or
+        $claimIndex -ge $initialJournalWriteIndex -or
+        $initialJournalWriteIndex -ge $helperLaunch.SignatureIndex
+    ) {
+        Add-ContractFailure `
+            -Message "Persistent operation start must claim, journal, and launch exactly one hidden helper in that order."
+    }
+    $startPersistentOperationBody = $startPersistentOperation.CodeBody -replace '\s', ''
+    $coreOperationBody = $coreOperationCodeView.CommentStripped -replace '\s', ''
+    if (
+        $startPersistentOperationBody -notmatch 'Ok\(Err\(error\)\)=>\{drop\(claim\);reap_helper\(helper\);returnErr\(error\);\}' -or
+        $startPersistentOperationBody -notmatch 'drop\(claim\);reap_helper\(helper\);self\.store_persistent_snapshot' -or
+        $startPersistentOperationBody -notmatch 'Err\(_\)=>\{letresolution=matchfence_helper_timeout\(journal,&snapshot\)' -or
+        $startPersistentOperationBody -notmatch 'HelperTimeoutResolution::Active\(current\)=>current' -or
+        $startPersistentOperationBody -notmatch 'HelperTimeoutResolution::Fenced\(fence\)=>\{let_=helper\.kill\(\)\.await;let_=helper\.wait\(\)\.await;.*letwrite_result=journal\.write\(&failed\);drop\(fence\);write_result\?;' -or
+        $coreOperationBody -notmatch 'fnreap_helper\(muthelper:tokio::process::Child\)\{tauri::async_runtime::spawn\(asyncmove\{let_=helper\.wait\(\)\.await;\}\);\}'
+    ) {
+        Add-ContractFailure `
+            -Message "A launched core-operation helper must be explicitly reaped, and readiness timeout must fence the operation lease before killing it."
+    }
+
+    $externalInstallConflict = Get-UniqueBracedItem `
+        -Source $startPersistentOperation.Body `
+        -SignaturePattern '(?m)^[ \t]*if[ \t]+existing\.operation[ \t]*==[ \t]*CoreOperationKind::Install[ \t]*$' `
+        -Description "Persistent external-install arbitration"
+    if ($null -ne $externalInstallConflict) {
+        $externalInstallConflictBody = $externalInstallConflict.CodeBody -replace '\s', ''
+        if (
+            $externalInstallConflictBody -notmatch 'drop\(claim\);self\.store_persistent_snapshot\(existing\.clone\(\)\)\.await;ifoperation==CoreOperationKind::Install\{returnOk\(existing\);\}returnErr\(CoreOperationError::OperationInProgress\);'
+        ) {
+            Add-ContractFailure `
+                -Message "An active external install lease must coalesce install and reject update work without replacing its journal."
+        }
+    }
+}
+
+$helperTimeoutFence = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^fn[ \t]+fence_helper_timeout[ \t]*\(' `
+    -Description "Helper readiness timeout operation-lease fence" `
+    -TopLevel `
+    -CodeView $coreOperationCodeView
+if ($null -ne $helperTimeoutFence) {
+    $helperTimeoutFenceBody = $helperTimeoutFence.CodeBody -replace '\s', ''
+    if (
+        $helperTimeoutFenceBody -notmatch 'matchjournal\.try_operation_lease\(\)\?\{' -or
+        $helperTimeoutFenceBody -notmatch 'LeaseAttempt::Busy=>\{letcurrent=journal\.read\(\)\?\.ok_or\(CoreOperationError::InvalidProgress\)\?;ifcurrent\.operation_id!=expected\.operation_id\|\|current\.operation!=expected\.operation\{returnErr\(CoreOperationError::InvalidProgress\);\}Ok\(HelperTimeoutResolution::Active\(current\)\)\}' -or
+        $helperTimeoutFenceBody -notmatch 'LeaseAttempt::Acquired\(fence\)=>\{letcurrent=journal\.read\(\)\?\.ok_or\(CoreOperationError::InvalidProgress\)\?;ifcurrent\.operation_id!=expected\.operation_id\|\|current\.operation!=expected\.operation\{returnErr\(CoreOperationError::InvalidProgress\);\}ifcurrent!=\*expected\{drop\(fence\);returnOk\(HelperTimeoutResolution::Active\(current\)\);\}Ok\(HelperTimeoutResolution::Fenced\(fence\)\)\}'
+    ) {
+        Add-ContractFailure `
+            -Message "Helper readiness timeout must atomically attach to the bound lease owner or hold the operation lease as a terminal-recovery fence."
+    }
+}
+
+$reconcilePersistentOperation = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+reconcile_locked[ \t]*\(' `
+    -Description "Persistent core operation recovery" `
+    -CodeView $coreOperationCodeView
+if ($null -ne $reconcilePersistentOperation) {
+    $reconcilePersistentOperationBody = (
+        $coreOperationCodeView.CommentStripped.Substring(
+            $reconcilePersistentOperation.OpeningBraceIndex + 1,
+            $reconcilePersistentOperation.ClosingBraceIndex -
+                $reconcilePersistentOperation.OpeningBraceIndex -
+                1
+        ) -replace '\s', ''
+    )
+    if (
+        $reconcilePersistentOperationBody -notmatch 'ifsnapshot\.state==CoreOperationState::Running&&!journal\.operation_lease_active\(\)\?&&snapshot\.sequence==0&&letSome\(current\)=self\.restart_initial_handoff\(journal,&snapshot\)\.await\?\{snapshot=current;\}' -or
+        $reconcilePersistentOperationBody -notmatch 'ifsnapshot\.state==CoreOperationState::Running&&!journal\.operation_lease_active\(\)\?\{letrecovery_lease=matchjournal\.try_operation_lease\(\)\?\{LeaseAttempt::Busy=>\{returnjournal\.read\(\)\?\.ok_or\(CoreOperationError::InvalidProgress\);\}LeaseAttempt::Acquired\(lease\)=>lease,\};.*letrecovered=self\.recover_from_runtime\(&current\)\.await;journal\.write\(&recovered\)\?;drop\(recovery_lease\);returnOk\(recovered\);\}'
+    ) {
+        Add-ContractFailure `
+            -Message "Released running operations must restart an unready same-id handoff and fence terminal recovery with the operation lease."
+    }
+    if (
+        $reconcilePersistentOperationBody -notmatch 'ifsnapshot\.operation==CoreOperationKind::Install&&snapshot\.state==CoreOperationState::Failed&&snapshot\.error_code\.as_deref\(\)==Some\("install_in_progress"\)\{letprobe=self\.recovery_probe\.as_ref\(\)\.ok_or\(CoreOperationError::Initialization\)\?;ifprobe\.install_lease_active\(\)\?\{returnOk\(snapshot\);\}letrecovered=self\.recover_from_runtime\(&snapshot\)\.await;journal\.write\(&recovered\)\?;returnOk\(recovered\);\}'
+    ) {
+        Add-ContractFailure `
+            -Message "External install recovery must poll while its lease is active, then reconcile trusted runtime state and persist a retryable terminal snapshot."
+    }
+}
+
+$restartInitialHandoff = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+restart_initial_handoff[ \t]*\(' `
+    -Description "Initial helper handoff recovery" `
+    -CodeView $coreOperationCodeView
+if ($null -ne $restartInitialHandoff) {
+    $restartInitialHandoffBody = $restartInitialHandoff.CodeBody -replace '\s', ''
+    if (
+        $restartInitialHandoffBody -notmatch 'launcher\.launch\(snapshot\.operation_id,snapshot\.operation\)' -or
+        $restartInitialHandoffBody -notmatch 'tokio::time::timeout\(Duration::from_secs\(3\),async\{' -or
+        $restartInitialHandoffBody -notmatch 'current\.state!=CoreOperationState::Running\|\|current\.sequence!=0\|\|journal\.operation_lease_active\(\)\?' -or
+        $restartInitialHandoffBody -notmatch 'helper\.try_wait\(\)' -or
+        $restartInitialHandoffBody -notmatch 'fence_helper_timeout\(journal,snapshot\)' -or
+        $restartInitialHandoffBody -notmatch 'HelperTimeoutResolution::Active\(current\)=>\{reap_helper\(helper\);Ok\(Some\(current\)\)\}' -or
+        $restartInitialHandoffBody -notmatch 'HelperTimeoutResolution::Fenced\(fence\)=>\{let_=helper\.kill\(\)\.await;let_=helper\.wait\(\)\.await;drop\(fence\);Ok\(None\)\}'
+    ) {
+        Add-ContractFailure `
+            -Message "Initial helper handoff recovery must relaunch the same operation id and wait on lease, journal, or child-exit conditions within a bounded window."
+    }
+}
+
+$recoverPersistentOperation = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+recover_from_runtime[ \t]*\(' `
+    -Description "Trusted runtime terminal recovery" `
+    -CodeView $coreOperationCodeView
+if ($null -ne $recoverPersistentOperation) {
+    $recoverPersistentOperationBody = (
+        $coreOperationCodeView.CommentStripped.Substring(
+            $recoverPersistentOperation.OpeningBraceIndex + 1,
+            $recoverPersistentOperation.ClosingBraceIndex -
+                $recoverPersistentOperation.OpeningBraceIndex -
+                1
+        ) -replace '\s', ''
+    )
+    if (
+        $recoverPersistentOperationBody -notmatch 'RecoveryRuntimeState::Ready\{version\}=>\{.*state:CoreOperationState::Succeeded,phase:CoreOperationPhase::Completed,.*error_code:None,\}' -or
+        $recoverPersistentOperationBody -notmatch 'ifsnapshot\.operation==CoreOperationKind::Update&&!update_matches_target\{returnCoreOperationSnapshot::failed\(snapshot\.operation_id,sequence,snapshot\.operation,"update_install_failed",\);\}' -or
+        $recoverPersistentOperationBody -notmatch 'RecoveryRuntimeState::Missing\|RecoveryRuntimeState::Unavailable=>\{CoreOperationSnapshot::failed\(snapshot\.operation_id,sequence,snapshot\.operation,matchsnapshot\.operation\{CoreOperationKind::Install=>"install_failed",CoreOperationKind::Update=>"update_install_failed",\},\)\}'
+    ) {
+        Add-ContractFailure `
+            -Message "Trusted runtime recovery must require the exact update target and map Missing or unavailable runtime to the stable install/update failure code."
+    }
+}
+
+$processFixtureRunner = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*impl[ \t]+OperationRunner[ \t]+for[ \t]+ProcessFixtureRunner[ \t]*' `
+    -Description "Cross-platform process fixture runner" `
+    -CodeView $coreOperationCodeView
+if (
+    $null -ne $processFixtureRunner -and
+    $processFixtureRunner.Body -match '(?i)powershell(?:\.exe)?'
+) {
+    Add-ContractFailure `
+        -Message "The real helper process fixture must not depend on a Windows-only shell."
+}
+
+$installSpec = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*fn[ \t]+install[ \t]*\([ \t]*program[ \t]*:[ \t]*PathBuf[ \t]*\)[ \t]*->[^{]+' `
+    -Description "Core operation structured install command" `
+    -CodeView $coreOperationCodeView
+if (
+    $null -ne $installSpec -and
+    ($installSpec.Body -replace '\s', '') -ne
+    'Self::raw(program,["start","--json","--progress-jsonl"])'
+) {
+    Add-ContractFailure `
+        -Message "Core operation structured WokRouter start arguments must remain exactly start --json --progress-jsonl."
+}
+
+$updateInstallSpec = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*fn[ \t]+update_install[ \t]*\([ \t]*program[ \t]*:[ \t]*PathBuf[ \t]*\)[ \t]*->[^{]+' `
+    -Description "Core operation structured update-install command" `
+    -CodeView $coreOperationCodeView
+if (
+    $null -ne $updateInstallSpec -and
+    ($updateInstallSpec.Body -replace '\s', '') -ne
+    'Self::raw(program,["update","--install","--json","--progress-jsonl"],)'
+) {
+    Add-ContractFailure `
+        -Message "Core operation structured WokCore update-install arguments must remain exactly update --install --json --progress-jsonl."
+}
+
+$systemOperationRunner = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^impl[ \t]+OperationRunner[ \t]+for[ \t]+SystemOperationRunner[ \t]*' `
+    -Description "System operation runner implementation" `
+    -TopLevel `
+    -CodeView $coreOperationCodeView
+$systemOperationRun = if ($null -ne $systemOperationRunner) {
+    Get-UniqueBracedItem `
+        -Source $systemOperationRunner.Body `
+        -SignaturePattern '(?m)^[ \t]*fn[ \t]+run[ \t]*\(' `
+        -Description "System operation runner run method" `
+        -TopLevel
+}
+else {
+    $null
+}
+$systemOperationRequestMatch = if ($null -ne $systemOperationRun) {
+    Get-UniqueBracedItem `
+        -Source $systemOperationRun.Body `
+        -SignaturePattern '(?m)^[ \t]*let[ \t]+\([ \t]*operation[ \t]*,[ \t]*spec[ \t]*\)[ \t]*=[ \t]*match[ \t]+request[ \t]*' `
+        -Description "System operation runner request dispatch"
+}
+else {
+    $null
+}
+if ($null -ne $systemOperationRequestMatch) {
+    $systemOperationRequestCode = (
+        Get-RustCodeView `
+            -Source $systemOperationRequestMatch.Body `
+            -Description "System operation runner request dispatch body"
+    ).Code
+    $systemInstallWiring = [regex]::Matches(
+        $systemOperationRequestCode,
+        '(?ms)OperationRequest::Install[ \t\r\n]*=>[ \t\r\n]*\([ \t\r\n]*CoreOperationKind::Install[ \t]*,[ \t\r\n]*CommandSpec::install\([ \t\r\n]*bundled_wokrouter_executable\(\)\?[ \t\r\n]*\)[ \t]*,[ \t\r\n]*\)[ \t]*,'
+    )
+    if ($systemInstallWiring.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "System operation runner install wiring must dispatch Install through CommandSpec::install."
+    }
+    $systemUpdateWiring = [regex]::Matches(
+        $systemOperationRequestCode,
+        '(?ms)OperationRequest::Update[ \t\r\n]*\{[ \t\r\n]*executable[ \t\r\n]*\}[ \t\r\n]*=>[ \t\r\n]*\([ \t\r\n]*CoreOperationKind::Update[ \t]*,[ \t\r\n]*CommandSpec::update_install\([ \t\r\n]*executable[ \t\r\n]*\)[ \t]*,[ \t\r\n]*\)[ \t]*,'
+    )
+    if ($systemUpdateWiring.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "System operation runner update wiring must dispatch Update through CommandSpec::update_install."
+    }
+}
+
+$spawnChild = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^fn[ \t]+spawn_child[ \t]*\(' `
+    -Description "Core operation child spawn function" `
+    -TopLevel `
+    -CodeView $coreOperationCodeView
+if ($null -ne $spawnChild) {
+    $null = Get-UniqueDirectStatementIndex `
+        -Source $spawnChild.Body `
+        -Pattern '(?m)^[ \t]*#\[cfg\(windows\)\][ \t]*\r?\n[ \t]*command\.creation_flags\(policy\.creation_flags\)[ \t]*;' `
+        -Description "Core operation child spawn must directly apply CREATE_NO_WINDOW through the Windows policy"
+    if (
+        $spawnChild.CodeBody -notmatch
+        '\.kill_on_drop\([ \t\r\n]*policy\.kill_on_drop[ \t\r\n]*\)'
+    ) {
+        Add-ContractFailure `
+            -Message "Core operation child spawn must apply the detached kill-on-drop policy."
+    }
+}
+
+$childPolicy = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^fn[ \t]+child_process_policy[ \t]*\(' `
+    -Description "Core operation long-child policy" `
+    -TopLevel `
+    -CodeView $coreOperationCodeView
+$childPolicyBody = if ($null -ne $childPolicy) {
+    $coreOperationCodeView.CommentStripped.Substring(
+        $childPolicy.OpeningBraceIndex + 1,
+        $childPolicy.ClosingBraceIndex - $childPolicy.OpeningBraceIndex - 1
+    )
+}
+else {
+    ""
+}
+if (
+    $null -ne $childPolicy -and
+    $childPolicyBody -notmatch
+    '(?ms)ChildProcessPolicy[ \t\r\n]*\{[ \t\r\n]*kill_on_drop:[ \t]*false,[ \t\r\n]*#\[cfg\(windows\)\][ \t\r\n]*creation_flags:[ \t]*0x0800_0000,[ \t\r\n]*\}'
+) {
+    Add-ContractFailure `
+        -Message "Core operation long-child CREATE_NO_WINDOW policy must remain 0x08000000 with kill_on_drop false."
+}
+
+if (
+    $null -ne $coreOperationCodeView -and
+    $coreOperationCodeView.Code -match
+    '\.kill_on_drop\([ \t\r\n]*true[ \t\r\n]*\)'
+) {
+    Add-ContractFailure `
+        -Message "Core operation coordinator must reject kill_on_drop(true) for transactional children."
+}
+
+$operationEventSink = Get-UniqueBracedItem `
+    -Source $desktopLib `
+    -SignaturePattern '(?m)^impl[ \t]+OperationEventSink[ \t]+for[ \t]+TauriOperationEventSink[ \t]*' `
+    -Description "Desktop operation event sink implementation" `
+    -TopLevel `
+    -CodeView $desktopLibCodeView
+$operationEventEmit = if ($null -ne $operationEventSink) {
+    Get-UniqueBracedItem `
+        -Source $operationEventSink.Body `
+        -SignaturePattern "(?m)^[ \t]*fn[ \t]+emit[ \t]*<'a>[ \t]*\(" `
+        -Description "Desktop operation event sink emit method" `
+        -TopLevel
+}
+else {
+    $null
+}
+$operationEventEmitBody = if ($null -ne $operationEventEmit) {
+    (
+        Get-RustCodeView `
+            -Source $operationEventEmit.Body `
+            -Description "Desktop operation event sink emit body"
+    ).CommentStripped -replace '\s', ''
+}
+else {
+    ""
+}
+if (
+    $null -ne $operationEventEmit -and
+    $operationEventEmitBody -cne
+    'Box::pin(asyncmove{let_=self.app.emit("core-operation-progress",snapshot);})'
+) {
+    Add-ContractFailure `
+        -Message "Desktop operation sink must emit exactly one core-operation-progress event."
+}
+
+$coreOperationStatusFor = Get-UniqueBracedItem `
+    -Source $desktopLib `
+    -SignaturePattern '(?m)^async[ \t]+fn[ \t]+core_operation_status_for[ \t]*\(' `
+    -Description "Desktop operation status recovery wiring" `
+    -TopLevel `
+    -CodeView $desktopLibCodeView
+$coreOperationStatusForBody = if ($null -ne $coreOperationStatusFor) {
+    (
+        Get-RustCodeView `
+            -Source $coreOperationStatusFor.Body `
+            -Description "Desktop operation status recovery wiring body"
+    ).CommentStripped -replace '\s', ''
+}
+else {
+    ""
+}
+if (
+    $null -ne $coreOperationStatusFor -and
+    $coreOperationStatusForBody -cne
+    'state.core_operations.status_with_sink(sink).await.map_err(|error|error.to_string())'
+) {
+    Add-ContractFailure `
+        -Message "Desktop operation status must attach reopened coordinators to the Tauri progress event sink."
+}
+
+$installAndStartCoreFor = Get-UniqueBracedItem `
+    -Source $desktopLib `
+    -SignaturePattern '(?m)^async[ \t]+fn[ \t]+install_and_start_core_for[ \t]*\(' `
+    -Description "Desktop install command event wiring" `
+    -TopLevel `
+    -CodeView $desktopLibCodeView
+$installAndStartCoreForBody = if ($null -ne $installAndStartCoreFor) {
+    (
+        Get-RustCodeView `
+            -Source $installAndStartCoreFor.Body `
+            -Description "Desktop install command event wiring body"
+    ).CommentStripped -replace '\s', ''
+}
+else {
+    ""
+}
+if (
+    $null -ne $installAndStartCoreFor -and
+    $installAndStartCoreForBody -cne
+    'state.core_operations.install_and_start(Arc::new(TauriOperationEventSink{app})).await.map_err(|error|error.to_string())'
+) {
+    Add-ContractFailure `
+        -Message "Desktop install command Tauri operation event sink wiring must pass TauriOperationEventSink { app }."
+}
+
+$installCoreUpdateFor = Get-UniqueBracedItem `
+    -Source $desktopLib `
+    -SignaturePattern '(?m)^async[ \t]+fn[ \t]+install_core_update_for[ \t]*\(' `
+    -Description "Desktop update command event wiring" `
+    -TopLevel `
+    -CodeView $desktopLibCodeView
+$installCoreUpdateForBody = if ($null -ne $installCoreUpdateFor) {
+    (
+        Get-RustCodeView `
+            -Source $installCoreUpdateFor.Body `
+            -Description "Desktop update command event wiring body"
+    ).CommentStripped -replace '\s', ''
+}
+else {
+    ""
+}
+if (
+    $null -ne $installCoreUpdateFor -and
+    $installCoreUpdateForBody -cne
+    'state.core_operations.install_update(&expected_version,Arc::new(TauriOperationEventSink{app})).await.map_err(|error|error.to_string())'
+) {
+    Add-ContractFailure `
+        -Message "Desktop update command Tauri operation event sink wiring must pass TauriOperationEventSink { app }."
+}
+
+$coreOperationError = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^pub\(crate\)[ \t]+enum[ \t]+CoreOperationError[ \t]*' `
+    -Description "CoreOperationError enum" `
+    -TopLevel `
+    -CodeView $coreOperationCodeView
+$coreOperationErrorBody = if ($null -ne $coreOperationError) {
+    $coreOperationCodeView.CommentStripped.Substring(
+        $coreOperationError.OpeningBraceIndex + 1,
+        $coreOperationError.ClosingBraceIndex -
+            $coreOperationError.OpeningBraceIndex -
+            1
+    )
+}
+else {
+    ""
+}
+if ($null -ne $coreOperationError) {
+    $operationConflictMatches = [regex]::Matches(
+        $coreOperationErrorBody,
+        '(?m)^[ \t]*#\[error\("operation_in_progress"\)\][ \t]*\r?\n[ \t]*OperationInProgress[ \t]*,[ \t]*$'
+    )
+    if ($operationConflictMatches.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "CoreOperationError must retain the exact operation_in_progress conflict code."
+    }
+    $developmentManagedMatches = [regex]::Matches(
+        $coreOperationErrorBody,
+        '(?m)^[ \t]*#\[error\("development_runtime_managed_by_ide"\)\][ \t]*\r?\n[ \t]*DevelopmentRuntimeManagedByIde[ \t]*,[ \t]*$'
+    )
+    if ($developmentManagedMatches.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "CoreOperationError must retain development_runtime_managed_by_ide for the backend update gate."
+    }
+}
+
+$trustedProductionExecutable = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+trusted_production_executable[ \t]*\(' `
+    -Description "Core operation trusted production executable gate" `
+    -CodeView $coreOperationCodeView
+if (
+    $null -ne $trustedProductionExecutable -and
+    $trustedProductionExecutable.CodeBody -notmatch
+    '(?ms)if[ \t\r\n]+runtime\.channel\(\)[ \t\r\n]*==[ \t\r\n]*WokCoreRuntimeChannel::Development[ \t\r\n]*\{[ \t\r\n]*return[ \t\r\n]+Err\(CoreOperationError::DevelopmentRuntimeManagedByIde\)[ \t]*;[ \t\r\n]*\}'
+) {
+    Add-ContractFailure `
+        -Message "Backend development update gate must reject Development before trusted executable reuse or discovery."
+}
+if ($null -ne $trustedProductionExecutable) {
+    $trustedDevelopmentGate = Get-UniqueBracedItem `
+        -Source $trustedProductionExecutable.Body `
+        -SignaturePattern '(?m)^[ \t]*if[ \t]+runtime\.channel\(\)[ \t]*==[ \t]*WokCoreRuntimeChannel::Development[ \t]*' `
+        -Description "Backend development update gate" `
+        -DirectStatement
+    $trustedExecutableReuse = Get-UniqueBracedItem `
+        -Source $trustedProductionExecutable.Body `
+        -SignaturePattern '(?m)^[ \t]*if[ \t]+let[ \t]+Some\(executable\)[ \t]*=[ \t]*runtime\.executable\(\)[ \t]*' `
+        -Description "Backend trusted executable reuse" `
+        -DirectStatement
+    $trustedAuthorityDiscoveryIndex = Get-UniqueDirectStatementIndex `
+        -Source $trustedProductionExecutable.Body `
+        -Pattern '(?m)^[ \t]*self\.authority[ \t\r\n]*\.[ \t\r\n]*discover\(\)\?' `
+        -Description "Backend trusted authority discovery"
+    if ($null -ne $trustedDevelopmentGate) {
+        $null = Get-UniqueDirectStatementIndex `
+            -Source $trustedDevelopmentGate.Body `
+            -Pattern '(?m)^[ \t]*return[ \t]+Err\(CoreOperationError::DevelopmentRuntimeManagedByIde\)[ \t]*;' `
+            -Description "Backend development update gate return"
+    }
+    if (
+        $null -ne $trustedDevelopmentGate -and
+        $null -ne $trustedExecutableReuse -and
+        (
+            $trustedDevelopmentGate.ClosingBraceIndex -ge
+            $trustedExecutableReuse.SignatureIndex -or
+            (
+                $trustedAuthorityDiscoveryIndex -ge 0 -and
+                $trustedDevelopmentGate.ClosingBraceIndex -ge
+                $trustedAuthorityDiscoveryIndex
+            )
+        )
+    ) {
+        Add-ContractFailure `
+            -Message "Backend development update gate must dominate executable reuse and trusted discovery."
+    }
+}
+
+$checkUpdate = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*pub\(crate\)[ \t]+async[ \t]+fn[ \t]+check_update[ \t]*\(' `
+    -Description "Core operation update check" `
+    -CodeView $coreOperationCodeView
+if ($null -ne $checkUpdate) {
+    $checkUpdateConflict = Get-UniqueBracedItem `
+        -Source $checkUpdate.Body `
+        -SignaturePattern '(?m)^[ \t]*if[ \t]+self\.operation_is_active\(\)\.await\?[ \t]*' `
+        -Description "check_update active-operation conflict branch" `
+        -DirectStatement `
+        -CodeView (Get-RustCodeView -Source $checkUpdate.Body -Description "check_update body")
+    if ($null -ne $checkUpdateConflict) {
+        $null = Get-UniqueDirectStatementIndex `
+            -Source $checkUpdateConflict.Body `
+            -Pattern '(?m)^[ \t]*return[ \t]+Err\(CoreOperationError::OperationInProgress\)[ \t]*;' `
+            -Description "check_update operation_in_progress return"
+    }
+    $null = Get-UniqueDirectStatementIndex `
+        -Source $checkUpdate.Body `
+        -Pattern '(?m)^[ \t]*let[ \t]+executable[ \t]*=[ \t]*self\.trusted_production_executable\(\)\.await\?[ \t]*;' `
+        -Description "check_update must obtain a production-gated trusted executable"
+}
+
+$installUpdate = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*pub\(crate\)[ \t]+async[ \t]+fn[ \t]+install_update[ \t]*\(' `
+    -Description "Core operation update install" `
+    -CodeView $coreOperationCodeView
+if ($null -ne $installUpdate) {
+    $developmentGateIndex = Get-UniqueDirectStatementIndex `
+        -Source $installUpdate.Body `
+        -Pattern '(?m)^[ \t]*self\.require_production_channel\(\)\.await\?[ \t]*;' `
+        -Description "install_update must reject Development before validation or child work"
+    $versionValidationIndex = Get-UniqueDirectStatementIndex `
+        -Source $installUpdate.Body `
+        -Pattern '(?m)^[ \t]*Version::parse\(expected_version\)\.map_err\(\|_\|[ \t]*CoreOperationError::InvalidProgress\)\?[ \t]*;' `
+        -Description "install_update expected-version validation"
+    if (
+        $developmentGateIndex -ge 0 -and
+        $versionValidationIndex -ge 0 -and
+        $developmentGateIndex -ge $versionValidationIndex
+    ) {
+        Add-ContractFailure `
+            -Message "install_update must reject Development before validation or child work."
+    }
+    $installUpdateConflict = Get-UniqueBracedItem `
+        -Source $installUpdate.Body `
+        -SignaturePattern '(?m)^[ \t]*if[ \t]+self\.operation_is_active\(\)\.await\?[ \t]*' `
+        -Description "install_update active-operation conflict branch" `
+        -DirectStatement `
+        -CodeView (Get-RustCodeView -Source $installUpdate.Body -Description "install_update body")
+    if ($null -ne $installUpdateConflict) {
+        $null = Get-UniqueDirectStatementIndex `
+            -Source $installUpdateConflict.Body `
+            -Pattern '(?m)^[ \t]*return[ \t]+Err\(CoreOperationError::OperationInProgress\)[ \t]*;' `
+            -Description "install_update operation_in_progress return"
+    }
+}
+
+$startOperation = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+start_operation[ \t]*\(' `
+    -Description "Core operation start arbitration" `
+    -CodeView $coreOperationCodeView
+if ($null -ne $startOperation) {
+    if (
+        ($startOperation.CodeBody -replace '\s', '') -cne
+        'ifself.persistent_operations{returnself.start_persistent_operation(operation,sink).await;}self.start_legacy_operation(operation,request,sink).await'
+    ) {
+        Add-ContractFailure `
+            -Message "Core operation start must route persistent production coordination before the test-only legacy coordinator."
+    }
+}
+
+$operationIsActive = Get-UniqueBracedItem `
+    -Source $coreOperation `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+operation_is_active[ \t]*\(' `
+    -Description "Cross-process active operation check" `
+    -CodeView $coreOperationCodeView
+if ($null -ne $operationIsActive) {
+    $operationIsActiveBody = (
+        $coreOperationCodeView.CommentStripped.Substring(
+            $operationIsActive.OpeningBraceIndex + 1,
+            $operationIsActive.ClosingBraceIndex -
+                $operationIsActive.OpeningBraceIndex -
+                1
+        ) -replace '\s', ''
+    )
+    if (
+        $operationIsActiveBody -notmatch 'persistent_status\(\)\.await\?\.is_some_and\(\|snapshot\|\{' -or
+        $operationIsActiveBody -notmatch 'snapshot\.state==CoreOperationState::Running' -or
+        $operationIsActiveBody -notmatch 'snapshot\.operation==CoreOperationKind::Install&&snapshot\.state==CoreOperationState::Failed&&snapshot\.error_code\.as_deref\(\)==Some\("install_in_progress"\)' -or
+        $operationIsActiveBody -notmatch 'Ok\(self\.state\.lock\(\)\.await\.active\.is_some\(\)\)'
+    ) {
+        Add-ContractFailure `
+            -Message "Production update checks and installs must treat running work and an active external install lease as persistent cross-process conflicts."
+    }
+}
+
+$frontendEligibility = Get-UniqueBracedItem `
+    -Source $coreUpdateEligibility `
+    -SignaturePattern '(?m)^export[ \t]+function[ \t]+isCoreUpdateEligible[ \t]*\(' `
+    -Description "Frontend core update eligibility" `
+    -TopLevel
+if (
+    $null -ne $frontendEligibility -and
+    ($frontendEligibility.Body -replace '\s', '') -ne
+    'return(status?.runtime_channel==="production"&&eligibleUpdateStates.has(status.state));'
+) {
+    Add-ContractFailure `
+        -Message "Frontend update eligibility must require the production runtime channel and an eligible state."
+}
+
+$coreLifecycleCodeView = Get-RustCodeView `
+    -Source $coreLifecycle `
+    -Description "Core lifecycle frontend source"
+if ($null -ne $coreLifecycleCodeView) {
+    $externalInstallWaitGates = @([regex]::Matches(
+            $coreLifecycleCodeView.Code,
+            '(?m)^[ \t]*if[ \t]*\([ \t]*!waitsForAnotherProcess[ \t]*\)[ \t]*\{'
+        ))
+    $externalInstallEffectEnds = @([regex]::Matches(
+            $coreLifecycleCodeView.Code,
+            '(?m)^[ \t]*\},[ \t]*\[[^\]\r\n]*waitsForAnotherProcess[^\]\r\n]*\]\);'
+        ))
+    $effectStarts = @([regex]::Matches(
+            $coreLifecycleCodeView.Code,
+            '(?m)^[ \t]*useEffect\(\(\)[ \t]*=>[ \t]*\{'
+        ))
+    $externalInstallEffectStart = $null
+    if ($externalInstallWaitGates.Count -eq 1) {
+        $precedingEffectStarts = @($effectStarts | Where-Object {
+                $_.Index -lt $externalInstallWaitGates[0].Index
+            })
+        if ($precedingEffectStarts.Count -gt 0) {
+            $externalInstallEffectStart =
+                $precedingEffectStarts[$precedingEffectStarts.Count - 1]
+        }
+    }
+    if (
+        $externalInstallWaitGates.Count -ne 1 -or
+        $externalInstallEffectEnds.Count -ne 1 -or
+        $null -eq $externalInstallEffectStart -or
+        $externalInstallWaitGates[0].Index -ge $externalInstallEffectEnds[0].Index
+    ) {
+        Add-ContractFailure `
+            -Message "The waitsForAnotherProcess effect must remain uniquely identifiable."
+    }
+    else {
+        $externalInstallEffectLength = (
+            $externalInstallEffectEnds[0].Index +
+            $externalInstallEffectEnds[0].Length -
+            $externalInstallEffectStart.Index
+        )
+        $externalInstallEffect = $coreLifecycle.Substring(
+            $externalInstallEffectStart.Index,
+            $externalInstallEffectLength
+        )
+        $externalInstallEffectCodeView = Get-RustCodeView `
+            -Source $externalInstallEffect `
+            -Description "External install waitsForAnotherProcess effect"
+        $externalInstallPollStarts = @([regex]::Matches(
+                $externalInstallEffectCodeView.Code,
+                '(?m)^[ \t]*const[ \t]+poll[ \t]*=[ \t]*window\.setInterval\(\(\)[ \t]*=>[ \t]*\{'
+            ))
+        $externalInstallPollEnds = @([regex]::Matches(
+                $externalInstallEffectCodeView.Code,
+                '(?m)^[ \t]*\},[ \t]*1_000\);'
+            ))
+        if (
+            $externalInstallPollStarts.Count -ne 1 -or
+            $externalInstallPollEnds.Count -ne 1 -or
+            $externalInstallPollStarts[0].Index -ge $externalInstallPollEnds[0].Index
+        ) {
+            Add-ContractFailure `
+                -Message "The waitsForAnotherProcess effect must contain one bounded external install poll."
+        }
+        else {
+        $externalInstallPollOpeningBrace = (
+            $externalInstallPollStarts[0].Index +
+            $externalInstallPollStarts[0].Length -
+            1
+        )
+        $externalInstallPollBodyLength = (
+            $externalInstallPollEnds[0].Index -
+            $externalInstallPollOpeningBrace -
+            1
+        )
+        $externalInstallPollBody = $externalInstallEffect.Substring(
+            $externalInstallPollOpeningBrace + 1,
+            $externalInstallPollBodyLength
+        )
+        $externalInstallPollCodeView = Get-RustCodeView `
+            -Source $externalInstallPollBody `
+            -Description "External install cross-process poll body"
+        $externalInstallPollCode = (
+            $externalInstallPollCodeView.CommentStripped -replace '\s', ''
+        )
+        $externalInstallRefreshIndex = Get-UniqueDirectStatementIndex `
+            -Source $externalInstallPollBody `
+            -Pattern '(?m)^[ \t]*void[ \t]+Promise\.allSettled\([ \t]*\[[ \t]*getCoreOperation\(\)[ \t]*,[ \t]*status\.refetch\(\)[ \t]*\]' `
+            -Description "External install operation and core refresh"
+        if (
+            $externalInstallRefreshIndex -lt 0 -or
+            $externalInstallPollCode -notmatch 'Promise\.allSettled\(\[getCoreOperation\(\),status\.refetch\(\)\]\)\.then\(\(\[operationResult,statusResult\]\)=>\{' -or
+            $externalInstallPollCode -notmatch 'if\(operationResult\.status==="fulfilled"&&operationResult\.value\)\{acceptOperation\(operationResult\.value\);\}' -or
+            $externalInstallPollCode -notmatch 'if\(statusResult\.status==="fulfilled"&&statusResult\.value\.data&&statusResult\.value\.data\.state!=="missing"\)\{setOperation\(undefined\);\}'
+        ) {
+            Add-ContractFailure `
+                -Message "External install recovery must poll both the operation journal and trusted core status until the released lease becomes terminal or ready."
+        }
+        }
+    }
+
+    $eligibilityCalls = [regex]::Matches(
+        $coreLifecycleCodeView.Code,
+        '(?<![A-Za-z0-9_])isCoreUpdateEligible[ \t\r\n]*\('
+    )
+    if ($eligibilityCalls.Count -ne 9) {
+        Add-ContractFailure `
+            -Message "Core lifecycle must retain all nine active shared update eligibility checks."
+    }
+    foreach ($requiredGate in @(
+            @{
+                Pattern = '(?s)operation[ \t]*!==[ \t]*undefined[ \t\r\n]*\|\|[ \t\r\n]*!isCoreUpdateEligible\([ \t]*status\.data[ \t]*\)'
+                Message = "Automatic update check must use the shared eligibility gate."
+            },
+            @{
+                Pattern = '(?s)activeUpdateCheckRequestId\.current[ \t]*!==[ \t]*undefined[ \t\r\n]*\|\|[ \t\r\n]*!latestBridgeReady\.current[ \t\r\n]*\|\|[ \t\r\n]*blocksUpdateInteraction\(latestOperation\.current\)[ \t\r\n]*\|\|[ \t\r\n]*!isCoreUpdateEligible\(latestStatus\.current\)'
+                Message = "Manual update check must use the shared eligibility gate."
+            },
+            @{
+                Pattern = '(?s)const[ \t]+requestUpdate[ \t]*=[ \t]*useCallback\([ \t\r\n]*\(trigger\?:[ \t]*HTMLButtonElement\)[ \t]*=>[ \t]*\{[ \t\r\n]*if[ \t]*\([ \t\r\n]*!latestBridgeReady\.current[ \t\r\n]*\|\|[ \t\r\n]*blocksUpdateInteraction\(latestOperation\.current\)[ \t\r\n]*\|\|[ \t\r\n]*!isCoreUpdateEligible\(latestStatus\.current\)[ \t\r\n]*\|\|[ \t\r\n]*updateCheck\?\.code[ \t]*!==[ \t]*'
+                Message = "Update prompt must use the shared eligibility gate."
+            },
+            @{
+                Pattern = '(?s)const[ \t]+confirmUpdate[ \t]*=[ \t]*useCallback\(\(\)[ \t]*=>[ \t]*\{[ \t\r\n]*const[ \t]+targetVersion[ \t]*=[ \t]*updateCheck\?\.targetVersion[ \t]*;[ \t\r\n]*if[ \t]*\([ \t\r\n]*updateRequested\.current[ \t\r\n]*\|\|[ \t\r\n]*!latestBridgeReady\.current[ \t\r\n]*\|\|[ \t\r\n]*blocksUpdateInteraction\(latestOperation\.current\)[ \t\r\n]*\|\|[ \t\r\n]*!isCoreUpdateEligible\(latestStatus\.current\)[ \t\r\n]*\|\|[ \t\r\n]*updateCheck\?\.code[ \t]*!==[ \t]*'
+                Message = "Update confirmation must use the shared eligibility gate."
+            }
+        )) {
+        if ($coreLifecycleCodeView.Code -notmatch $requiredGate.Pattern) {
+            Add-ContractFailure -Message $requiredGate.Message
+        }
+    }
+
+    $manualUpdateCheck = Get-UniqueBracedItem `
+        -Source $coreLifecycle `
+        -SignaturePattern '(?m)^[ \t]*\(openConfirmation:[ \t]*boolean,[ \t]*trigger\?:[ \t]*HTMLButtonElement\)[ \t]*=>[ \t]*' `
+        -Description "Manual update check callback" `
+        -CodeView $coreLifecycleCodeView
+    if ($null -ne $manualUpdateCheck) {
+        $manualUpdateGate = Get-UniqueBracedItem `
+            -Source $manualUpdateCheck.Body `
+            -SignaturePattern '(?m)^[ \t]*if[ \t]*\(' `
+            -Description "Manual update eligibility gate" `
+            -DirectStatement
+        $manualUpdateSideEffectIndex = Get-UniqueDirectStatementIndex `
+            -Source $manualUpdateCheck.Body `
+            -Pattern '(?m)^[ \t]*void[ \t]+retryCoreUpdateCheck\(\)' `
+            -Description "Manual retryCoreUpdateCheck side effect"
+        $manualRetryCalls = [regex]::Matches(
+            $manualUpdateCheck.CodeBody,
+            '(?<![A-Za-z0-9_])retryCoreUpdateCheck[ \t\r\n]*\('
+        )
+        if (
+            $null -eq $manualUpdateGate -or
+            $manualUpdateSideEffectIndex -lt 0 -or
+            $manualRetryCalls.Count -ne 1 -or
+            $manualUpdateGate.ClosingBraceIndex -ge
+            $manualUpdateSideEffectIndex
+        ) {
+            Add-ContractFailure `
+                -Message "Manual update gate must dominate retryCoreUpdateCheck and every update-check side effect."
+        }
+    }
+
+    if (
+        $coreLifecycleCodeView.Code -notmatch
+        '(?ms)^[ \t]*useEffect\(\(\)[ \t]*=>[ \t]*\{[ \t\r\n]*if[ \t]*\([ \t\r\n]*!bridgeReady[ \t\r\n]*\|\|[ \t\r\n]*startupCheckConsumed\.current'
+    ) {
+        Add-ContractFailure `
+            -Message "Automatic update check must require bridgeReady before every side effect."
+    }
+    if (
+        $coreLifecycleCodeView.Code -notmatch
+        '(?ms)^[ \t]*useEffect\(\(\)[ \t]*=>[ \t]*\{[ \t\r\n]*if[ \t]*\([ \t\r\n]*!bridgeReady[ \t\r\n]*\|\|[ \t\r\n]*installRequested\.current'
+    ) {
+        Add-ContractFailure `
+            -Message "Automatic install must require bridgeReady before every side effect."
+    }
+
+    $confirmUpdateStart = Get-UniquePatternIndex `
+        -Source $coreLifecycleCodeView.Code `
+        -Pattern '(?m)^[ \t]*const[ \t]+confirmUpdate[ \t]*=[ \t]*useCallback' `
+        -Description "Update confirmation callback"
+    $confirmationDialogStart = Get-UniquePatternIndex `
+        -Source $coreLifecycleCodeView.Code `
+        -Pattern '(?m)^[ \t]*const[ \t]+updateConfirmationDialog[ \t]*=' `
+        -Description "Update confirmation dialog"
+    if (
+        $confirmUpdateStart -ge 0 -and
+        $confirmationDialogStart -gt $confirmUpdateStart
+    ) {
+        $confirmUpdateLength = $confirmationDialogStart - $confirmUpdateStart
+        $confirmUpdateCode = $coreLifecycleCodeView.Code.Substring(
+            $confirmUpdateStart,
+            $confirmUpdateLength
+        )
+        $confirmUpdateCommentStripped = (
+            $coreLifecycleCodeView.CommentStripped.Substring(
+                $confirmUpdateStart,
+                $confirmUpdateLength
+            )
+        )
+        $allInstallCoreUpdateCalls = [regex]::Matches(
+            $coreLifecycleCodeView.Code,
+            '(?<![A-Za-z0-9_])installCoreUpdate[ \t\r\n]*\('
+        )
+        $confirmationInstallCoreUpdateCalls = [regex]::Matches(
+            $confirmUpdateCode,
+            '(?<![A-Za-z0-9_])installCoreUpdate[ \t\r\n]*\('
+        )
+        if (
+            $allInstallCoreUpdateCalls.Count -ne 1 -or
+            $confirmationInstallCoreUpdateCalls.Count -ne 1
+        ) {
+            Add-ContractFailure `
+                -Message "Core lifecycle must retain confirmation-only installCoreUpdate ownership."
+        }
+        $completeConfirmationGuard = (
+            '(?s)const[ \t]+targetVersion[ \t]*=[ \t]*' +
+            'updateCheck\?\.targetVersion[ \t]*;[ \t\r\n]*' +
+            'if[ \t]*\([ \t\r\n]*' +
+            'updateRequested\.current[ \t\r\n]*\|\|[ \t\r\n]*' +
+            '!latestBridgeReady\.current[ \t\r\n]*\|\|[ \t\r\n]*' +
+            'blocksUpdateInteraction\(latestOperation\.current\)[ \t\r\n]*\|\|[ \t\r\n]*' +
+            '!isCoreUpdateEligible\(latestStatus\.current\)[ \t\r\n]*\|\|[ \t\r\n]*' +
+            'updateCheck\?\.code[ \t]*!==[ \t]*"update_available"[ \t\r\n]*\|\|[ \t\r\n]*' +
+            'targetVersion[ \t]*===[ \t]*undefined[ \t\r\n]*' +
+            '\)[ \t\r\n]*\{[ \t\r\n]*return[ \t]*;[ \t\r\n]*\}' +
+            '(?:(?!installCoreUpdate).)*' +
+            'void[ \t]+installCoreUpdate\([ \t]*targetVersion[ \t]*\)'
+        )
+        if ($confirmUpdateCommentStripped -notmatch $completeConfirmationGuard) {
+            Add-ContractFailure `
+                -Message "installCoreUpdate must run only after the complete confirmation guard."
+        }
+    }
+}
+
+$runtimeCodeView = Get-RustCodeView `
+    -Source $runtimeSelector `
+    -Description "WokCore runtime selector source"
+if ($null -ne $runtimeCodeView) {
+    $environmentLiteralMatches = [regex]::Matches(
+        $runtimeCodeView.CommentStripped,
+        '"WOKROUTER_DEV_WOKCORE_EXECUTABLE"'
+    )
+    if ($environmentLiteralMatches.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "WokCore runtime selector environment literal must occur exactly once outside comments."
+    }
+}
+$developmentModule = Get-UniqueBracedItem `
+    -Source $runtimeSelector `
+    -SignaturePattern '(?ms)(?<attributes>(?:(?:^[ \t]*#\[[^\r\n]*\][ \t]*\r?\n)|(?:^[ \t]*\r?\n))*)^[ \t]*mod[ \t]+development[ \t]*' `
+    -Description "Development module" `
+    -TopLevel
+if ($null -ne $developmentModule) {
+    if (
+        $developmentModule.CodeAttributes -notmatch
+        '(?m)^[ \t]*#\[cfg\([ \t]*debug_assertions[ \t]*\)\][ \t]*$'
+    ) {
+        Add-ContractFailure `
+            -Message "Development module must remain behind debug_assertions."
+    }
+
+    $developmentBody = Get-TopLevelRustBody -Body $developmentModule.Body
+    $environmentConstants = [regex]::Matches(
+        $developmentBody,
+        '(?m)^[ \t]*pub\(super\)[ \t]+const[ \t]+EXECUTABLE_ENV[ \t]*:[ \t]*&str[ \t]*=[ \t]+;'
+    )
+    if ($environmentConstants.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "Development module must define its executable environment constant exactly once."
+    }
+    else {
+        $environmentConstant = $developmentModule.Body.Substring(
+            $environmentConstants[0].Index,
+            $environmentConstants[0].Length
+        )
+        if (
+            $environmentConstant -notmatch
+            '(?m)^[ \t]*pub\(super\)[ \t]+const[ \t]+EXECUTABLE_ENV[ \t]*:[ \t]*&str[ \t]*=[ \t]*"WOKROUTER_DEV_WOKCORE_EXECUTABLE"[ \t]*;[ \t]*$'
+        ) {
+            Add-ContractFailure `
+                -Message "Development module executable environment constant must retain its exact value."
+        }
+    }
+
+    $candidateFromEnvironment = Get-UniqueBracedItem `
+        -Source $developmentModule.Body `
+        -SignaturePattern '(?m)^[ \t]*pub\(super\)[ \t]+fn[ \t]+candidate_from_environment[ \t]*\([^)]*\)[ \t]*->[^{]+' `
+        -Description "Development environment candidate function" `
+        -TopLevel
+    if ($null -ne $candidateFromEnvironment) {
+        $candidateTopLevel = Get-TopLevelRustBody `
+            -Body $candidateFromEnvironment.Body
+        if (
+            ($candidateTopLevel -replace '\s', '') -ne
+            'candidate_from_value(std::env::var_os(EXECUTABLE_ENV))'
+        ) {
+            Add-ContractFailure `
+                -Message "Development module environment lookup must remain the active top-level candidate expression."
+        }
+    }
+}
+
+$selectOnceSignaturePattern = (
+    '(?m)^[ \t]*async[ \t]+fn[ \t]+select_once\b'
+)
+$selectOnceMatches = @(Get-RustOwnedPatternMatches `
+    -Source $runtimeSelector `
+    -Pattern $selectOnceSignaturePattern `
+    -Description "Top-level select_once functions")
+$debugSelectOnce = $null
+$releaseSelectOnce = $null
+if ($selectOnceMatches.Count -ne 2) {
+    Add-ContractFailure `
+        -Message "WokCore runtime selector must contain exactly two top-level select_once functions; found $($selectOnceMatches.Count)."
+}
+else {
+    for ($ordinal = 0; $ordinal -lt $selectOnceMatches.Count; $ordinal += 1) {
+        $selectOnce = Get-UniqueBracedItem `
+            -Source $runtimeSelector `
+            -SignaturePattern $selectOnceSignaturePattern `
+            -Description "Top-level select_once function $ordinal" `
+            -TopLevel `
+            -MatchOrdinal $ordinal
+        if ($null -eq $selectOnce) {
+            continue
+        }
+        $attributes = Get-RustOuterAttributesBeforeItem `
+            -Source $runtimeSelector `
+            -ItemStart $selectOnce.SignatureIndex `
+            -Description "Top-level select_once selector attributes"
+        if ($null -eq $attributes) {
+            continue
+        }
+
+        $selectorCfgAttributes = @()
+        foreach ($attribute in $attributes.Items) {
+            if (
+                $attribute.Code -match
+                '(?<![A-Za-z0-9_])(?:cfg|cfg_attr)(?![A-Za-z0-9_])'
+            ) {
+                $selectorCfgAttributes += $attribute
+            }
+        }
+        if ($selectorCfgAttributes.Count -ne 1) {
+            Add-ContractFailure `
+                -Message "Each select_once selector attributes set must contain exactly one cfg and no cfg_attr."
+            continue
+        }
+        $normalizedCfg = $selectorCfgAttributes[0].Code -replace '\s', ''
+        if ($normalizedCfg -eq '#[cfg(debug_assertions)]') {
+            if ($null -ne $debugSelectOnce) {
+                Add-ContractFailure `
+                    -Message "Debug select_once selector attributes must identify exactly one function."
+            }
+            else {
+                $debugSelectOnce = $selectOnce
+            }
+        }
+        elseif ($normalizedCfg -eq '#[cfg(not(debug_assertions))]') {
+            if ($null -ne $releaseSelectOnce) {
+                Add-ContractFailure `
+                    -Message "Release select_once selector attributes must identify exactly one function."
+            }
+            else {
+                $releaseSelectOnce = $selectOnce
+            }
+        }
+        else {
+            Add-ContractFailure `
+                -Message "select_once selector attributes must be exactly cfg(debug_assertions) or cfg(not(debug_assertions))."
+        }
+    }
+}
+if ($null -eq $debugSelectOnce) {
+    Add-ContractFailure `
+        -Message "Debug select_once selector attributes must identify exactly one function."
+}
+else {
+    $null = Get-UniqueDirectStatementIndex `
+        -Source $debugSelectOnce.Body `
+        -Pattern '(?m)^[ \t]*let[ \t]+candidate[ \t]*=[ \t]*development::candidate_from_environment\(\)[ \t]*;' `
+        -Description "Debug select_once development candidate call"
+    $debugSelectOnceCandidateFlow = $debugSelectOnce.CodeBody -replace '\s', ''
+    if (
+        $debugSelectOnceCandidateFlow -ne
+        'letcandidate=development::candidate_from_environment();select_with_dependencies(paths,candidate,Arc::new(crate::system::process_executable_matches),&probe_connection,Arc::new(discover_wokcore_executable),).await'
+    ) {
+        Add-ContractFailure `
+            -Message "Debug select_once candidate flow must pass the environment candidate unchanged into select_with_dependencies."
+    }
+}
+if ($null -eq $releaseSelectOnce) {
+    Add-ContractFailure `
+        -Message "Release select_once selector attributes must identify exactly one function."
+}
+else {
+    $releaseSelectOnceTopLevel = Get-TopLevelRustBody `
+        -Body $releaseSelectOnce.Body
+    if (
+        ($releaseSelectOnceTopLevel -replace '\s', '') -ne
+        'select_production(paths,Arc::new(crate::system::process_executable_matches),Arc::new(discover_wokcore_executable),)'
+    ) {
+        Add-ContractFailure `
+            -Message "Release select_once must directly call select_production with production discovery."
+    }
+    if (
+        $releaseSelectOnce.CodeBody -match
+        '(?:\bstd::env\b|\benv[ \t\r\n]*::|\bvar_os[ \t\r\n]*\(|\bdevelopment[ \t\r\n]*::|\bcandidate_from_environment[ \t\r\n]*\()'
+    ) {
+        Add-ContractFailure `
+            -Message "Release select_once must not read environment variables or access development candidates."
+    }
+}
+
+$dependencySelector = Get-UniqueBracedItem `
+    -Source $runtimeSelector `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+select_with_dependencies[ \t]*\(' `
+    -Description "select_with_dependencies" `
+    -TopLevel
+if ($null -ne $dependencySelector) {
+    $timeoutConstants = @(Get-RustOwnedPatternMatches `
+        -Source $dependencySelector.Body `
+        -Pattern '(?m)^[ \t]*const[ \t]+DEVELOPMENT_TIMEOUT[ \t]*:[ \t]*Duration[ \t]*=[ \t]*Duration::from_secs\([ \t]*5[ \t]*\)[ \t]*;' `
+        -Description "select_with_dependencies five-second deadline constant" `
+        -RequireStatementStart)
+    if ($timeoutConstants.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "select_with_dependencies named constants must define the five-second deadline exactly once."
+    }
+    $retryConstants = @(Get-RustOwnedPatternMatches `
+        -Source $dependencySelector.Body `
+        -Pattern '(?m)^[ \t]*const[ \t]+DEVELOPMENT_RETRY_DELAY[ \t]*:[ \t]*Duration[ \t]*=[ \t]*Duration::from_millis\([ \t]*50[ \t]*\)[ \t]*;' `
+        -Description "select_with_dependencies retry interval constant" `
+        -RequireStatementStart)
+    if ($retryConstants.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "select_with_dependencies named constants must define the 50-ms retry interval exactly once."
+    }
+    $deadlineReferences = @(Get-RustOwnedPatternMatches `
+        -Source $dependencySelector.Body `
+        -Pattern '(?m)^[ \t]*let[ \t]+deadline[ \t]*=[ \t]*Instant::now\(\)[ \t]*\+[ \t]*DEVELOPMENT_TIMEOUT[ \t]*;' `
+        -Description "select_with_dependencies deadline constant use" `
+        -RequireStatementStart)
+    if ($deadlineReferences.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "select_with_dependencies constant references must use DEVELOPMENT_TIMEOUT for the deadline."
+    }
+    $candidateBindings = @(Get-RustOwnedPatternMatches `
+        -Source $dependencySelector.Body `
+        -Pattern '(?m)^[ \t]*let[ \t]+Some\(candidate\)[ \t]*=[ \t]*candidate[ \t]+else[ \t]*' `
+        -Description "select_with_dependencies candidate binding" `
+        -RequireStatementStart)
+    if ($candidateBindings.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "select_with_dependencies candidate must be bound on the active top-level path."
+    }
+
+    $selectionLoop = Get-UniqueBracedItem `
+        -Source $dependencySelector.Body `
+        -SignaturePattern '(?m)^[ \t]*loop[ \t]*' `
+        -Description "select_with_dependencies selection loop" `
+        -DirectStatement
+    if ($null -ne $selectionLoop) {
+        $null = Get-UniqueDirectStatementIndex `
+            -Source $selectionLoop.Body `
+            -Pattern '(?m)^[ \t]*tokio::time::sleep\([ \t]*DEVELOPMENT_RETRY_DELAY\.min\([ \t]*deadline[ \t]*-[ \t]*now[ \t]*\)[ \t]*\)\.await[ \t]*;' `
+            -Description "select_with_dependencies constant references must use DEVELOPMENT_RETRY_DELAY for sleep"
+
+        $selectionIf = Get-UniqueBracedItem `
+            -Source $selectionLoop.Body `
+            -SignaturePattern '(?ms)^[ \t]*if[ \t]+let[ \t]+Some\(identity\)[ \t]*=[ \t]*client\.discovered_runtime_identity\(\)[ \t\r\n]*&&[ \t\r\n]*process_matches\([ \t]*identity\.process_id\(\)[ \t]*,[ \t]*&candidate[ \t]*\)[ \t]*' `
+            -Description "select_with_dependencies selection loop initial process identity check" `
+            -DirectStatement
+        if ($null -ne $selectionIf) {
+            $boundClientIndex = Get-UniqueDirectStatementIndex `
+                -Source $selectionIf.Body `
+                -Pattern '(?s)let[ \t]+bound[ \t]*=[ \t]*client\.bound_to_runtime\([ \t\r\n]*identity[ \t]*,[ \t\r\n]*Arc::new\([ \t]*move[ \t]*\|process_id\|[ \t]*\{[ \t\r\n]*matcher_for_validator\([ \t]*process_id[ \t]*,[ \t]*&candidate_for_validator[ \t]*\)[ \t\r\n]*\}[ \t]*\)[ \t]*,[ \t\r\n]*\)[ \t]*;' `
+                -Description "select_with_dependencies selection loop in order runtime-bound client"
+            $connectionIndex = Get-UniqueDirectStatementIndex `
+                -Source $selectionIf.Body `
+                -Pattern '(?s)let[ \t]+Ok\(connection\)[ \t\r\n]*=[ \t\r\n]*tokio::time::timeout_at\([ \t\r\n]*deadline[ \t\r\n]*,[ \t\r\n]*connection_probe\([ \t\r\n]*bound\.clone\(\)[ \t\r\n]*\)[ \t\r\n]*\)\.await' `
+                -Description "select_with_dependencies selection loop in order deadline-bound connection probe"
+            $secondIdentityIndex = Get-UniqueDirectStatementIndex `
+                -Source $selectionIf.Body `
+                -Pattern '(?s)let[ \t]+still_matches[ \t]*=[ \t]*client\.discovered_runtime_identity\(\)[ \t]*==[ \t]*Some\(identity\)[ \t\r\n]*&&[ \t\r\n]*process_matches\([ \t]*identity\.process_id\(\)[ \t]*,[ \t]*&candidate[ \t]*\)[ \t]*;' `
+                -Description "select_with_dependencies selection loop in order post-connection process identity check"
+
+            if (
+                @(
+                    $boundClientIndex,
+                    $connectionIndex,
+                    $secondIdentityIndex
+                ) -notcontains -1 -and
+                -not (
+                    $boundClientIndex -lt $connectionIndex -and
+                    $connectionIndex -lt $secondIdentityIndex
+                )
+            ) {
+                Add-ContractFailure `
+                    -Message "select_with_dependencies selection loop must bind PID plus instance identity, probe before the deadline, then recheck identity in order."
+            }
+        }
+    }
+}
+
+$runtimeIdentity = Get-UniqueBracedItem `
+    -Source $wokcoreClient `
+    -SignaturePattern '(?m)^[ \t]*pub[ \t]+struct[ \t]+WokCoreRuntimeIdentity[ \t]*' `
+    -Description "WokCore runtime identity" `
+    -TopLevel
+if ($null -ne $runtimeIdentity) {
+    if (
+        ($runtimeIdentity.CodeBody -replace '\s', '') -ne
+        'process_id:NonZeroU32,instance_id:Uuid,'
+    ) {
+        Add-ContractFailure `
+            -Message "WokCore runtime identity must bind exactly the process ID and instance ID."
+    }
+    $identityAttributes = Get-RustOuterAttributesBeforeItem `
+        -Source $wokcoreClient `
+        -ItemStart $runtimeIdentity.SignatureIndex `
+        -Description "WokCore runtime identity attributes"
+    if (
+        $null -ne $identityAttributes -and
+        ($identityAttributes.Code -match '(?<![A-Za-z0-9_])(?:Serialize|Deserialize)(?![A-Za-z0-9_])')
+    ) {
+        Add-ContractFailure `
+            -Message "WokCore runtime identity must not be serializable to frontend contracts."
+    }
+}
+
+$runtimeAuthorization = Get-UniqueBracedItem `
+    -Source $wokcoreClient `
+    -SignaturePattern '(?m)^[ \t]*pub\(crate\)[ \t]+fn[ \t]+runtime_authorized[ \t]*\(' `
+    -Description "WokCore runtime authorization"
+if ($null -ne $runtimeAuthorization) {
+    $authorizationFlow = $runtimeAuthorization.CodeBody -replace '\s', ''
+    if (
+        $authorizationFlow -notmatch
+        'identity\.process_id==record\.process_id&&identity\.instance_id==record\.instance_id&&validator\(record\.process_id\)'
+    ) {
+        Add-ContractFailure `
+            -Message "Development runtime authorization must jointly recheck PID, instance ID, and executable identity."
+    }
+    if (
+        $authorizationFlow -notmatch
+        'RuntimePolicy::PendingTrustedExecutable\(validator\)=>validator\.get\(\)\.is_some_and\(\|validator\|validator\(record\.process_id\)\)'
+    ) {
+        Add-ContractFailure `
+            -Message "Production runtime authorization must validate every discovered PID against the trusted executable."
+    }
+}
+
+$productionSelector = Get-UniqueBracedItem `
+    -Source $runtimeSelector `
+    -SignaturePattern '(?m)^[ \t]*fn[ \t]+select_production[ \t]*\(' `
+    -Description "production WokCore selector" `
+    -TopLevel
+if ($null -ne $productionSelector) {
+    $productionFlow = $productionSelector.CodeBody -replace '\s', ''
+    if (
+        $productionFlow -notmatch
+        'let\(bound_client,runtime_binder\)=probe_client\.pending_trusted_executable_runtime\(\);.*ifletSome\(executable\)=executable\{.*bind_trusted_executable\(&runtime_binder,Arc::clone\(&process_matches\),executable,?\);.*client:bound_client,.*production_authority:Some\('
+    ) {
+        Add-ContractFailure `
+            -Message "Production selection must keep Missing pending and bind only a trusted executable authority."
+    }
+}
+
+$productionBinding = Get-UniqueBracedItem `
+    -Source $runtimeSelector `
+    -SignaturePattern '(?m)^[ \t]*pub[ \t]+fn[ \t]+establish_production_binding[ \t]*\(' `
+    -Description "production WokCore binding"
+if ($null -ne $productionBinding) {
+    $bindingFlow = $productionBinding.CodeBody -replace '\s', ''
+    if (
+        $bindingFlow -notmatch
+        'letSome\(identity\)=self\.probe_client\.discovered_runtime_identity\(\)else\{returnfalse;\};if!\(self\.process_matches\)\(identity\.process_id\(\),executable\)\{returnfalse;\}bind_trusted_executable\('
+    ) {
+        Add-ContractFailure `
+            -Message "Production binding must verify the current discovery PID against the trusted executable before atomic authorization."
+    }
+}
+
+$startReadiness = Get-UniqueBracedItem `
+    -Source $cliStart `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+wait_until_running[ \t]*\(' `
+    -Description "production start readiness" `
+    -TopLevel
+if ($null -ne $startReadiness) {
+    $startReadinessFlow = $startReadiness.CodeBody -replace '\s', ''
+    if (
+        $startReadinessFlow -notmatch
+        'letconnection=ifruntime\.establish_production_binding\(executable\)\{dependencies\.service\.connection\(runtime\.client\(\)\)\.await\}else\{Ok\(CoreConnection::Missing\)\};matchconnection\{'
+    ) {
+        Add-ContractFailure `
+            -Message "Production start must establish trusted runtime binding before readiness requests."
+    }
+}
+
+$desktopErrorEnum = Get-UniqueBracedItem `
+    -Source $desktopControl `
+    -SignaturePattern '(?m)^[ \t]*pub\(crate\)[ \t]+enum[ \t]+DesktopControlError[ \t]*' `
+    -Description "DesktopControlError enum"
+if ($null -ne $desktopErrorEnum) {
+    $desktopErrorMatches = [regex]::Matches(
+        $desktopErrorEnum.CodeBody,
+        '(?m)^[ \t]*#\[error\([ \t]+\)\][ \t]*\r?\n[ \t]*DevelopmentRuntimeManagedByIde[ \t]*,[ \t]*$'
+    )
+    if ($desktopErrorMatches.Count -ne 1) {
+        Add-ContractFailure `
+            -Message "DesktopControlError IDE-managed variant must occur exactly once."
+    }
+    else {
+        $desktopErrorSource = $desktopErrorEnum.Body.Substring(
+            $desktopErrorMatches[0].Index,
+            $desktopErrorMatches[0].Length
+        )
+        if (
+            $desktopErrorSource -notmatch
+            '(?m)^[ \t]*#\[error\("development_runtime_managed_by_ide"\)\][ \t]*\r?\n[ \t]*DevelopmentRuntimeManagedByIde[ \t]*,[ \t]*$'
+        ) {
+            Add-ContractFailure `
+                -Message "DesktopControlError IDE-managed variant must retain its exact error value."
+        }
+    }
+}
+
+$noSwitchTest = Get-UniqueBracedItem `
+    -Source $runtimeSelectorTests `
+    -SignaturePattern '(?m)^[ \t]*async[ \t]+fn[ \t]+a_selected_development_session_never_switches_to_production[ \t]*\([^)]*\)[ \t]*' `
+    -Description "Development no-switch regression test" `
+    -TopLevel
+if ($null -ne $noSwitchTest) {
+    $noSwitchAttributes = Get-RustOuterAttributesBeforeItem `
+        -Source $runtimeSelectorTests `
+        -ItemStart $noSwitchTest.SignatureIndex `
+        -Description "Development no-switch regression test attributes"
+    if ($null -ne $noSwitchAttributes) {
+        $tokioTestAttributeCount = 0
+        $executionChangingAttributeCount = 0
+        foreach ($attribute in $noSwitchAttributes.Items) {
+            if (
+                $attribute.Code -match
+                '(?s)^[ \t\r\n]*#[ \t\r\n]*\[[ \t\r\n]*tokio[ \t\r\n]*::[ \t\r\n]*test\b.*\][ \t\r\n]*$'
+            ) {
+                $tokioTestAttributeCount += 1
+            }
+            if (
+                $attribute.Code -match
+                '(?<![A-Za-z0-9_])(?:cfg|cfg_attr|ignore|should_panic)(?![A-Za-z0-9_])'
+            ) {
+                $executionChangingAttributeCount += 1
+            }
+        }
+        if ($tokioTestAttributeCount -ne 1) {
+            Add-ContractFailure `
+                -Message "Development no-switch regression test must contain exactly one Tokio test attribute."
+        }
+        if ($executionChangingAttributeCount -gt 0) {
+            Add-ContractFailure `
+                -Message "Development no-switch regression test must not be ignored or use execution-changing attributes."
+        }
+    }
+
+    $noSwitchBody = Get-TopLevelRustBody -Body $noSwitchTest.Body
+    $null = Get-UniquePatternIndex `
+        -Source $noSwitchBody `
+        -Pattern 'assert_eq!\([ \t\r\n]*selected\.channel\(\)[ \t\r\n]*,[ \t\r\n]*WokCoreRuntimeChannel::Development[ \t\r\n]*\)[ \t]*;' `
+        -Description "Development no-switch test development channel assertion"
+    $null = Get-UniquePatternIndex `
+        -Source $noSwitchBody `
+        -Pattern 'assert_eq!\([ \t\r\n]*selected\.executable\(\)[ \t\r\n]*,[ \t\r\n]*Some\(development\.as_path\(\)\)[ \t\r\n]*\)[ \t]*;' `
+        -Description "Development no-switch test selected executable assertion"
+    $null = Get-UniquePatternIndex `
+        -Source $noSwitchBody `
+        -Pattern 'assert_eq!\([ \t\r\n]*selected\.connection\(\)\.await[ \t\r\n]*,[ \t\r\n]*CoreConnection::Stopped[ \t\r\n]*\)[ \t]*;' `
+        -Description "Development no-switch test stopped retained connection assertion"
+    $null = Get-UniquePatternIndex `
+        -Source $noSwitchBody `
+        -Pattern 'assert!\([ \t\r\n]*replacement\.received_requests\(\)\.await\.unwrap\(\)\.is_empty\(\)[ \t\r\n]*\)[ \t]*;' `
+        -Description "Development no-switch test replacement zero requests assertion"
+    $null = Get-UniquePatternIndex `
+        -Source $noSwitchBody `
+        -Pattern 'assert_eq!\([ \t\r\n]*discoveries\.load\(Ordering::SeqCst\)[ \t\r\n]*,[ \t\r\n]*0[ \t\r\n]*\)[ \t]*;' `
+        -Description "Development no-switch test production discovery zero calls assertion"
+}
+
+$rustStatusMatch = [regex]::Match(
+    $commandModel,
+    '(?s)pub struct CoreStatus\s*\{(?<body>.*?)\r?\n\}'
+)
+if (-not $rustStatusMatch.Success) {
+    Add-ContractFailure -Message "Rust runtime status model must remain identifiable."
+}
+else {
+    $rustStatus = $rustStatusMatch.Groups["body"].Value
+    if ($rustStatus -notmatch '(?m)^\s*pub runtime_channel\s*:') {
+        Add-ContractFailure -Message "Rust runtime status must expose runtime_channel."
+    }
+    if ($rustStatus -match '(?m)^\s*pub (pid|path|executable)\s*:') {
+        Add-ContractFailure `
+            -Message "Rust runtime status must not expose a private runtime field."
+    }
+}
+
+$frontendStatusMatch = [regex]::Match(
+    $frontendControl,
+    '(?s)const coreStatusSchema\s*=\s*z\s*\.object\(\{(?<body>.*?)\}\)\s*\.strict\(\);'
+)
+if (-not $frontendStatusMatch.Success) {
+    Add-ContractFailure -Message "Frontend runtime status model must remain identifiable."
+}
+else {
+    $frontendStatus = $frontendStatusMatch.Groups["body"].Value
+    if ($frontendStatus -notmatch '(?m)^\s*runtime_channel\s*:') {
+        Add-ContractFailure -Message "Frontend runtime status must expose runtime_channel."
+    }
+    if ($frontendStatus -match '(?m)^\s*(pid|path|executable)\s*:') {
+        Add-ContractFailure `
+            -Message "Frontend runtime status must not expose a private runtime field."
+    }
 }
 
 if ($failures.Count -gt 0) {

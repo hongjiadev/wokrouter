@@ -13,6 +13,7 @@ describe("desktop control bridge", () => {
   it("accepts a valid WokCore status DTO", async () => {
     vi.mocked(invoke).mockResolvedValue({
       state: "running",
+      runtime_channel: "development",
       version: "0.1.0",
       management_api_major: 1,
       capabilities: ["service.status"],
@@ -22,6 +23,7 @@ describe("desktop control bridge", () => {
 
     await expect(getCoreStatus()).resolves.toEqual({
       state: "running",
+      runtime_channel: "development",
       version: "0.1.0",
       management_api_major: 1,
       capabilities: ["service.status"],
@@ -34,7 +36,36 @@ describe("desktop control bridge", () => {
   it("rejects a malformed WokCore status DTO", async () => {
     vi.mocked(invoke).mockResolvedValue({
       state: "healthy",
+      runtime_channel: "production",
       capabilities: "service.status",
+    });
+
+    await expect(getCoreStatus()).rejects.toThrow("Invalid WokCore status");
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["unknown", "preview"],
+  ])("rejects a %s runtime channel", async (_case, runtimeChannel) => {
+    vi.mocked(invoke).mockResolvedValue({
+      state: "stopped",
+      runtime_channel: runtimeChannel,
+      capabilities: [],
+    });
+
+    await expect(getCoreStatus()).rejects.toThrow("Invalid WokCore status");
+  });
+
+  it.each([
+    ["pid", 41],
+    ["path", "C:\\private\\wokcore.exe"],
+    ["executable", "C:\\private\\wokcore.exe"],
+  ])("rejects a status DTO exposing %s", async (field, value) => {
+    vi.mocked(invoke).mockResolvedValue({
+      state: "stopped",
+      runtime_channel: "production",
+      capabilities: [],
+      [field]: value,
     });
 
     await expect(getCoreStatus()).rejects.toThrow("Invalid WokCore status");

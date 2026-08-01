@@ -15,10 +15,16 @@ const INSTALL_RECORD_SCHEMA_VERSION: u32 = 1;
 pub fn discover_wokcore_executable(
     install_record: &Path,
 ) -> Result<Option<PathBuf>, PlatformError> {
-    match read_install_record(install_record)? {
+    match discover_recorded_wokcore_executable(install_record)? {
         Some(executable) => Ok(Some(executable)),
         None => Ok(search_path()),
     }
+}
+
+pub fn discover_recorded_wokcore_executable(
+    install_record: &Path,
+) -> Result<Option<PathBuf>, PlatformError> {
+    read_install_record(install_record)
 }
 
 fn read_install_record(path: &Path) -> Result<Option<PathBuf>, PlatformError> {

@@ -155,6 +155,9 @@ export function cargoBuildArguments(targetTriple) {
     supportedTargetTriple(targetTriple),
     "-p",
     "wokrouter-cli",
+    "--bin",
+    "wokrouter",
+    "--no-default-features",
   ];
 }
 

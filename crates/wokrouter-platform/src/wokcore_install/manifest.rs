@@ -101,8 +101,8 @@ pub(super) fn verify_manifest(
     validate_document(document, &key_id, target)
 }
 
-pub(super) fn validate_public_key(public_key: &str) -> Result<(), WokCoreInstallError> {
-    public_key_id(public_key).map(|_| ())
+pub(super) fn validate_public_key(public_key: &str) -> Result<String, WokCoreInstallError> {
+    public_key_id(public_key)
 }
 
 pub(super) fn is_release_file(version: &str, file: &str) -> bool {

@@ -17,6 +17,14 @@ pub fn detect_system_context(ui: &UiConfig) -> SystemContext {
     context_from_candidates(ui, system_locale.as_deref(), system_timezone.as_deref())
 }
 
+pub fn detect_system_locale() -> Option<String> {
+    locale_from_candidate(sys_locale::get_locale().as_deref())
+}
+
+fn locale_from_candidate(candidate: Option<&str>) -> Option<String> {
+    candidate.and_then(normalize_locale)
+}
+
 fn context_from_candidates(
     ui: &UiConfig,
     system_locale: Option<&str>,
@@ -202,6 +210,14 @@ fn system_timezone() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_locale_candidate_preserves_absence_for_browser_fallback() {
+        assert_eq!(locale_from_candidate(Some("zh_CN")), Some("zh-CN".into()));
+        assert_eq!(locale_from_candidate(Some("en-us")), Some("en-US".into()));
+        assert_eq!(locale_from_candidate(Some("not a locale")), None);
+        assert_eq!(locale_from_candidate(None), None);
+    }
 
     #[test]
     fn unavailable_system_values_fall_back_to_english_and_utc() {
