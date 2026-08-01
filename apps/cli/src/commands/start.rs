@@ -5,6 +5,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(feature = "packaged-acceptance")]
+use std::{env, fs};
+
 use async_trait::async_trait;
 use secrecy::SecretString;
 use tokio::time::Instant;
@@ -12,6 +15,8 @@ use wokrouter_platform::{
     AppPaths, PlatformError, SelectedWokCoreRuntime, WokCoreInstallError, WokCoreInstallOutcome,
     WokCoreInstallSource, WokCoreRuntimeChannel, install_missing_wokcore_with_progress,
 };
+#[cfg(feature = "packaged-acceptance")]
+use wokrouter_wokcore_client::WokCoreAuthorizer;
 use wokrouter_wokcore_client::{
     CoreConnection, ServiceError, ServicePhase, ServiceStatus, WokCoreClient,
 };
@@ -24,6 +29,12 @@ use progress::StartProgressReporter;
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_DELAY: Duration = Duration::from_millis(50);
+#[cfg(feature = "packaged-acceptance")]
+const ACCEPTANCE_ORIGIN_ENV: &str = "WOKROUTER_PACKAGED_ACCEPTANCE_ORIGIN";
+#[cfg(feature = "packaged-acceptance")]
+const ACCEPTANCE_PUBLIC_KEY_ENV: &str = "WOKROUTER_PACKAGED_ACCEPTANCE_PUBLIC_KEY";
+#[cfg(feature = "packaged-acceptance")]
+const MAX_ACCEPTANCE_PUBLIC_KEY_BYTES: u64 = 4 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StartOptions {
@@ -32,8 +43,7 @@ pub struct StartOptions {
 }
 
 pub async fn execute(runtime: &SelectedWokCoreRuntime) -> Result<u8, CommandError> {
-    let install_source =
-        WokCoreInstallSource::production().map_err(|_| CommandError::CoreControl)?;
+    let install_source = production_install_source().map_err(|_| CommandError::CoreControl)?;
     let mut output = StandardStartCommandOutput;
     execute_with_runtime_paths(
         None,
@@ -195,7 +205,7 @@ pub async fn execute_with_options(
     output: &mut dyn StartCommandOutput,
 ) -> Result<u8, CommandError> {
     let structured = validate_options(options)?;
-    let install_source = match WokCoreInstallSource::production() {
+    let install_source = match production_install_source() {
         Ok(source) => source,
         Err(error) if structured => {
             let code = install_error_code(error);
@@ -217,6 +227,127 @@ pub async fn execute_with_options(
         },
     )
     .await
+}
+
+fn production_install_source() -> Result<WokCoreInstallSource, WokCoreInstallError> {
+    WokCoreInstallSource::production()
+}
+
+#[cfg(feature = "packaged-acceptance")]
+pub async fn execute_packaged_acceptance_with_options(
+    paths: &AppPaths,
+    runtime: &SelectedWokCoreRuntime,
+    options: StartOptions,
+    output: &mut dyn StartCommandOutput,
+) -> Result<u8, CommandError> {
+    let structured = validate_options(options)?;
+    let install_source = match packaged_acceptance_install_source() {
+        Ok(source) => source,
+        Err(error) if structured => {
+            let code = install_error_code(error);
+            let mut reporter = StartProgressReporter::new(output, true);
+            reporter.failed("checking_release", code);
+            reporter.stdout_code(code);
+            return Ok(1);
+        }
+        Err(_) => return Err(CommandError::CoreControl),
+    };
+    execute_with_dependencies(
+        paths,
+        runtime,
+        options,
+        output,
+        &StartDependencies {
+            install_source,
+            service: Box::new(PackagedAcceptanceStartService),
+        },
+    )
+    .await
+}
+
+#[cfg(feature = "packaged-acceptance")]
+fn packaged_acceptance_install_source() -> Result<WokCoreInstallSource, WokCoreInstallError> {
+    let origin = env::var(ACCEPTANCE_ORIGIN_ENV).map_err(|_| WokCoreInstallError::InvalidSource)?;
+    let public_key_path =
+        env::var_os(ACCEPTANCE_PUBLIC_KEY_ENV).ok_or(WokCoreInstallError::InvalidSource)?;
+    let metadata =
+        fs::symlink_metadata(&public_key_path).map_err(|_| WokCoreInstallError::InvalidSource)?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > MAX_ACCEPTANCE_PUBLIC_KEY_BYTES
+    {
+        return Err(WokCoreInstallError::InvalidSource);
+    }
+    let public_key = fs::read(public_key_path).map_err(|_| WokCoreInstallError::InvalidSource)?;
+    build_packaged_acceptance_install_source(&origin, &public_key)
+}
+
+#[cfg(any(test, feature = "packaged-acceptance"))]
+fn build_packaged_acceptance_install_source(
+    origin: &str,
+    public_key: &[u8],
+) -> Result<WokCoreInstallSource, WokCoreInstallError> {
+    let origin = origin
+        .parse()
+        .map_err(|_| WokCoreInstallError::InvalidSource)?;
+    let public_key = std::str::from_utf8(public_key)
+        .map_err(|_| WokCoreInstallError::InvalidSource)?
+        .to_owned();
+    WokCoreInstallSource::loopback(origin, public_key)
+}
+
+#[cfg(feature = "packaged-acceptance")]
+struct PackagedAcceptanceStartService;
+
+#[cfg(feature = "packaged-acceptance")]
+#[async_trait]
+impl StartService for PackagedAcceptanceStartService {
+    async fn connection(&self, client: &WokCoreClient) -> Result<CoreConnection, CommandError> {
+        Ok(client.connection().await)
+    }
+
+    fn spawn(&self, executable: &Path) -> Result<Box<dyn StartedCore>, CommandError> {
+        Ok(Box::new(SystemStartedCore(spawn_core(executable)?)))
+    }
+
+    async fn authorize(
+        &self,
+        _client: &WokCoreClient,
+        executable: &Path,
+    ) -> Result<SecretString, CommandError> {
+        WokCoreAuthorizer::new(executable.to_path_buf())
+            .authorize()
+            .await
+            .map_err(CommandError::from)
+    }
+
+    async fn reauthorize(
+        &self,
+        _client: &WokCoreClient,
+        executable: &Path,
+    ) -> Result<SecretString, CommandError> {
+        WokCoreAuthorizer::new(executable.to_path_buf())
+            .authorize()
+            .await
+            .map_err(CommandError::from)
+    }
+
+    async fn authorization_status(
+        &self,
+        client: &WokCoreClient,
+        token: &SecretString,
+    ) -> Result<ServiceStatus, ServiceError> {
+        client.service_status(token).await
+    }
+
+    async fn authenticated_status(
+        &self,
+        client: &WokCoreClient,
+        token: &SecretString,
+    ) -> Result<ServiceStatus, ServiceError> {
+        client.service_status(token).await
+    }
 }
 
 async fn execute_with_dependencies(

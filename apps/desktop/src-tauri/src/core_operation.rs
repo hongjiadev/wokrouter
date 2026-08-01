@@ -12,7 +12,7 @@ use serde_json::Value;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
-    sync::{Mutex, mpsc},
+    sync::{Mutex, mpsc, watch},
 };
 use uuid::Uuid;
 use wokrouter_cli::commands::{CoreUiState, status::snapshot_selected};
@@ -1487,10 +1487,17 @@ async fn run_progress_child(
     let mut child = spawn_child(&spec)?;
     let stdout = child.stdout.take().ok_or(RunnerError::Spawn)?;
     let stderr = child.stderr.take().ok_or(RunnerError::Spawn)?;
+    let (child_exited, exit_status) = watch::channel(false);
+    let stdout_exit_status = exit_status.clone();
+    let wait = async move {
+        let status = child.wait().await;
+        child_exited.send_replace(true);
+        status
+    };
     let (status, stdout, parsed) = tokio::join!(
-        child.wait(),
-        read_bounded(stdout),
-        read_progress(stderr, operation, progress),
+        wait,
+        read_bounded_until_child_exit(stdout, stdout_exit_status),
+        read_progress_until_child_exit(stderr, operation, progress, exit_status),
     );
     let status = status.map_err(|_| RunnerError::Wait)?;
     let stdout = stdout?;
@@ -1507,8 +1514,18 @@ async fn run_check_child(spec: CommandSpec) -> Result<CheckCompletion, RunnerErr
     let mut child = spawn_child(&spec)?;
     let stdout = child.stdout.take().ok_or(RunnerError::Spawn)?;
     let stderr = child.stderr.take().ok_or(RunnerError::Spawn)?;
-    let (status, stdout, stderr) =
-        tokio::join!(child.wait(), read_bounded(stdout), read_bounded(stderr),);
+    let (child_exited, exit_status) = watch::channel(false);
+    let stdout_exit_status = exit_status.clone();
+    let wait = async move {
+        let status = child.wait().await;
+        child_exited.send_replace(true);
+        status
+    };
+    let (status, stdout, stderr) = tokio::join!(
+        wait,
+        read_bounded_until_child_exit(stdout, stdout_exit_status),
+        read_bounded_until_child_exit(stderr, exit_status),
+    );
     let status = status.map_err(|_| RunnerError::Wait)?;
     let stdout = stdout?;
     let _stderr = stderr?;
@@ -1547,15 +1564,38 @@ fn child_process_policy() -> ChildProcessPolicy {
     }
 }
 
+#[cfg(test)]
 async fn read_bounded(mut stream: impl AsyncRead + Unpin) -> Result<Vec<u8>, RunnerError> {
+    let (_child_running, exit_status) = watch::channel(false);
+    read_bounded_until_child_exit(&mut stream, exit_status).await
+}
+
+async fn read_bounded_until_child_exit(
+    mut stream: impl AsyncRead + Unpin,
+    mut exit_status: watch::Receiver<bool>,
+) -> Result<Vec<u8>, RunnerError> {
     let mut output = Vec::new();
     let mut overflow = false;
     let mut chunk = [0_u8; 8 * 1024];
+    let mut child_exited = *exit_status.borrow();
     loop {
-        let read = stream
-            .read(&mut chunk)
-            .await
-            .map_err(|_| RunnerError::Read)?;
+        let read = if child_exited {
+            match tokio::time::timeout(Duration::from_millis(100), stream.read(&mut chunk)).await {
+                Ok(read) => read.map_err(|_| RunnerError::Read)?,
+                Err(_) => break,
+            }
+        } else {
+            tokio::select! {
+                biased;
+                read = stream.read(&mut chunk) => read.map_err(|_| RunnerError::Read)?,
+                changed = exit_status.changed() => {
+                    if changed.is_err() || *exit_status.borrow() {
+                        child_exited = true;
+                    }
+                    continue;
+                }
+            }
+        };
         if read == 0 {
             break;
         }
@@ -1572,20 +1612,45 @@ async fn read_bounded(mut stream: impl AsyncRead + Unpin) -> Result<Vec<u8>, Run
     }
 }
 
+#[cfg(test)]
 async fn read_progress(
     mut stream: impl AsyncRead + Unpin,
     operation: CoreOperationKind,
     progress: mpsc::Sender<ChildProgress>,
 ) -> Result<(bool, Option<ChildProgress>), RunnerError> {
+    let (_child_running, exit_status) = watch::channel(false);
+    read_progress_until_child_exit(&mut stream, operation, progress, exit_status).await
+}
+
+async fn read_progress_until_child_exit(
+    mut stream: impl AsyncRead + Unpin,
+    operation: CoreOperationKind,
+    progress: mpsc::Sender<ChildProgress>,
+    mut exit_status: watch::Receiver<bool>,
+) -> Result<(bool, Option<ChildProgress>), RunnerError> {
     let mut parser = ProgressParser::new(operation);
     let mut valid = true;
     let mut last = None;
     let mut chunk = [0_u8; 8 * 1024];
+    let mut child_exited = *exit_status.borrow();
     loop {
-        let read = stream
-            .read(&mut chunk)
-            .await
-            .map_err(|_| RunnerError::Read)?;
+        let read = if child_exited {
+            match tokio::time::timeout(Duration::from_millis(100), stream.read(&mut chunk)).await {
+                Ok(read) => read.map_err(|_| RunnerError::Read)?,
+                Err(_) => break,
+            }
+        } else {
+            tokio::select! {
+                biased;
+                read = stream.read(&mut chunk) => read.map_err(|_| RunnerError::Read)?,
+                changed = exit_status.changed() => {
+                    if changed.is_err() || *exit_status.borrow() {
+                        child_exited = true;
+                    }
+                    continue;
+                }
+            }
+        };
         if read == 0 {
             break;
         }
@@ -1818,6 +1883,73 @@ mod tests {
         assert_eq!(
             completion.stdout,
             br#"{"code":"current","current_version":"0.1.23"}"#
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn exited_child_is_not_held_open_by_a_long_lived_pipe_inheriting_descendant() {
+        let script = concat!(
+            "$childScript='Start-Sleep -Seconds 10'; ",
+            "Start-Process -FilePath powershell.exe -ArgumentList @(",
+            "'-NoProfile','-NonInteractive','-Command',$childScript",
+            ") ",
+            "-NoNewWindow | Out-Null; ",
+            "[Console]::Out.Write('{\"code\":\"current\",",
+            "\"current_version\":\"0.1.23\"}')"
+        );
+        let spec = super::CommandSpec::raw(
+            PathBuf::from("powershell.exe"),
+            ["-NoProfile", "-NonInteractive", "-Command", script],
+        );
+
+        let completion = tokio::time::timeout(Duration::from_secs(2), super::run_check_child(spec))
+            .await
+            .expect("pipe-inheriting descendant must not hold the exited child open")
+            .unwrap();
+
+        assert!(completion.exit_success);
+        assert_eq!(
+            completion.stdout,
+            br#"{"code":"current","current_version":"0.1.23"}"#
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn exited_child_flushes_terminal_progress_before_ignoring_an_inherited_pipe() {
+        let running = r#"{"schema_version":1,"sequence":0,"operation":"update","state":"running","phase":"rolling_back"}"#;
+        let terminal = r#"{"schema_version":1,"sequence":1,"operation":"update","state":"failed","phase":"rolling_back","error_code":"rolled_back"}"#;
+        let script = format!(
+            "$childScript='Start-Sleep -Seconds 10'; Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-Command',$childScript) -NoNewWindow | Out-Null; [Console]::Error.WriteLine('{running}'); [Console]::Error.WriteLine('{terminal}'); exit 72"
+        );
+        let spec = super::CommandSpec::raw(
+            PathBuf::from("powershell.exe"),
+            ["-NoProfile", "-NonInteractive", "-Command", &script],
+        );
+        let (sender, mut receiver) = mpsc::channel(4);
+
+        let completion = tokio::time::timeout(
+            Duration::from_secs(2),
+            super::run_progress_child(spec, CoreOperationKind::Update, sender),
+        )
+        .await
+        .expect("pipe-inheriting descendant must not hold terminal progress open")
+        .unwrap();
+        let observed = [
+            receiver.recv().await.unwrap(),
+            receiver.recv().await.unwrap(),
+        ];
+
+        assert!(!completion.exit_success);
+        assert!(completion.progress_valid);
+        assert_eq!(completion.last_progress, observed.last().cloned());
+        assert_eq!(
+            completion
+                .last_progress
+                .as_ref()
+                .and_then(|event| event.error_code.as_deref()),
+            Some("rolled_back")
         );
     }
 

@@ -263,7 +263,7 @@ function Assert-NoForbiddenNames {
     param([Parameter(Mandatory)][string[]] $Names)
 
     $forbidden = [regex]::new(
-        "(?i)(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen)"
+        "(?i)(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen|packaged[-_]?acceptance)"
     )
     if (@($Names | Where-Object { $forbidden.IsMatch($_) }).Count -gt 0) {
         throw "Windows package contains a forbidden payload."

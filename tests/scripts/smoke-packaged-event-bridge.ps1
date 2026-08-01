@@ -19,15 +19,19 @@ $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
 $applicationRoot = Join-Path $temporaryRoot "app"
 $roamingRoot = Join-Path $temporaryRoot "roaming"
 $localRoot = Join-Path $temporaryRoot "local"
+$webViewDataRoot = Join-Path $temporaryRoot "webview-user-data"
 $fakeSource = Join-Path $temporaryRoot "fake-wokrouter.rs"
 $fakeSidecar = Join-Path $applicationRoot "wokrouter.exe"
 $desktopCopy = Join-Path $applicationRoot "wokrouter-desktop.exe"
 $sidecarMarker = Join-Path $temporaryRoot "sidecar-started"
 $process = $null
 $socket = $null
+$webViewProcesses = @()
+$port = 0
 $previousAppData = $env:APPDATA
 $previousLocalAppData = $env:LOCALAPPDATA
 $previousWebViewArguments = $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+$previousWebViewDataRoot = $env:WEBVIEW2_USER_DATA_FOLDER
 $previousSmokeMarker = $env:WOKROUTER_EVENT_SMOKE_MARKER
 
 function Get-FreeLoopbackPort {
@@ -105,10 +109,133 @@ function Invoke-DevToolsExpression {
     return $response.result.result.value
 }
 
+function Get-OwnedWebViewProcesses {
+    param(
+        [Parameter(Mandatory)][int]$DesktopProcessId,
+        [Parameter(Mandatory)][string]$UserDataRoot,
+        [Parameter(Mandatory)][int]$RemoteDebuggingPort
+    )
+
+    $processes = @(Get-CimInstance -ClassName Win32_Process)
+    $descendantIds = [Collections.Generic.HashSet[int]]::new()
+    $null = $descendantIds.Add($DesktopProcessId)
+    do {
+        $added = $false
+        foreach ($candidate in $processes) {
+            if (
+                $descendantIds.Contains([int]$candidate.ParentProcessId) -and
+                $descendantIds.Add([int]$candidate.ProcessId)
+            ) {
+                $added = $true
+            }
+        }
+    } while ($added)
+    $canonicalRoot = [IO.Path]::GetFullPath($UserDataRoot)
+    return @($processes | Where-Object {
+            $_.Name -ieq "msedgewebview2.exe" -and
+            $descendantIds.Contains([int]$_.ProcessId) -and
+            ([string]$_.CommandLine).IndexOf(
+                $canonicalRoot,
+                [StringComparison]::OrdinalIgnoreCase
+            ) -ge 0 -and
+            ([string]$_.CommandLine) -like
+                "*--remote-debugging-port=$RemoteDebuggingPort*"
+        } | ForEach-Object {
+            [pscustomobject]@{
+                ProcessId = [int]$_.ProcessId
+                ExecutablePath = [string]$_.ExecutablePath
+                CommandLine = [string]$_.CommandLine
+            }
+        })
+}
+
+function Stop-OwnedWebViewProcesses {
+    param(
+        [Parameter(Mandatory)][object[]]$Processes,
+        [Parameter(Mandatory)][string]$UserDataRoot,
+        [Parameter(Mandatory)][int]$RemoteDebuggingPort
+    )
+
+    $canonicalRoot = [IO.Path]::GetFullPath($UserDataRoot)
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+        $remaining = @($Processes | Where-Object {
+                $null -ne (Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue)
+            })
+        if ($remaining.Count -eq 0) {
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    foreach ($record in $remaining) {
+        $current = Get-CimInstance `
+            -ClassName Win32_Process `
+            -Filter "ProcessId = $($record.ProcessId)" `
+            -ErrorAction SilentlyContinue
+        if ($null -eq $current) {
+            continue
+        }
+        $commandLine = [string]$current.CommandLine
+        if (
+            $current.Name -ine "msedgewebview2.exe" -or
+            [string]$current.ExecutablePath -ine $record.ExecutablePath -or
+            $commandLine -cne $record.CommandLine -or
+            $commandLine.IndexOf(
+                $canonicalRoot,
+                [StringComparison]::OrdinalIgnoreCase
+            ) -lt 0 -or
+            $commandLine -notlike "*--remote-debugging-port=$RemoteDebuggingPort*"
+        ) {
+            throw "Refusing to stop a WebView2 process without its exact smoke identity."
+        }
+        Stop-Process -Id $record.ProcessId -Force
+        $ownedProcess = Get-Process -Id $record.ProcessId -ErrorAction SilentlyContinue
+        if ($null -ne $ownedProcess) {
+            if (-not $ownedProcess.WaitForExit(5000)) {
+                throw "An exact smoke WebView2 process did not exit after it was stopped."
+            }
+            $ownedProcess.Dispose()
+        }
+    }
+}
+
+function Remove-SmokeRoot {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $canonical = [IO.Path]::GetFullPath($Path)
+    $temporary = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar
+    )
+    if (
+        [IO.Path]::GetDirectoryName($canonical).TrimEnd(
+            [IO.Path]::DirectorySeparatorChar,
+            [IO.Path]::AltDirectorySeparatorChar
+        ) -cne $temporary -or
+        [IO.Path]::GetFileName($canonical) -cnotmatch
+            '^wokrouter-event-smoke-[0-9a-f]{32}$'
+    ) {
+        throw "Refusing to remove an unexpected packaged event smoke root."
+    }
+    foreach ($attempt in 1..50) {
+        try {
+            Remove-Item -LiteralPath $canonical -Recurse -Force -ErrorAction Stop
+            return
+        }
+        catch [IO.IOException], [UnauthorizedAccessException] {
+            if ($attempt -eq 50) {
+                throw
+            }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
+
 try {
     $null = New-Item -ItemType Directory -Path $applicationRoot -Force
     $null = New-Item -ItemType Directory -Path $roamingRoot -Force
     $null = New-Item -ItemType Directory -Path $localRoot -Force
+    $null = New-Item -ItemType Directory -Path $webViewDataRoot -Force
     [IO.File]::Copy($desktop, $desktopCopy)
 
     $fakeProgram = @'
@@ -144,6 +271,7 @@ fn main() {
     $env:APPDATA = $roamingRoot
     $env:LOCALAPPDATA = $localRoot
     $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$port"
+    $env:WEBVIEW2_USER_DATA_FOLDER = $webViewDataRoot
     $env:WOKROUTER_EVENT_SMOKE_MARKER = $sidecarMarker
     $process = Start-Process -FilePath $desktopCopy -PassThru
 
@@ -173,6 +301,13 @@ fn main() {
         [Uri]$target[0].webSocketDebuggerUrl,
         [Threading.CancellationToken]::None
     ).GetAwaiter().GetResult()
+    $webViewProcesses = @(Get-OwnedWebViewProcesses `
+            -DesktopProcessId $process.Id `
+            -UserDataRoot $webViewDataRoot `
+            -RemoteDebuggingPort $port)
+    if ($webViewProcesses.Count -eq 0) {
+        throw "The packaged desktop smoke did not own an isolated WebView2 process."
+    }
 
     $requestId = 0
     $progressVisible = $false
@@ -207,9 +342,18 @@ finally {
     if ($null -ne $socket) {
         $socket.Dispose()
     }
-    if ($null -ne $process -and -not $process.HasExited) {
-        Stop-Process -Id $process.Id -Force
+    if ($null -ne $process) {
+        if (-not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force
+        }
         $process.WaitForExit()
+        $process.Dispose()
+    }
+    if ($webViewProcesses.Count -gt 0 -and $port -gt 0) {
+        Stop-OwnedWebViewProcesses `
+            -Processes @($webViewProcesses) `
+            -UserDataRoot $webViewDataRoot `
+            -RemoteDebuggingPort $port
     }
     if (Test-Path -LiteralPath $sidecarMarker -PathType Leaf) {
         $sidecarProcessId = 0
@@ -232,8 +376,9 @@ finally {
     $env:APPDATA = $previousAppData
     $env:LOCALAPPDATA = $previousLocalAppData
     $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = $previousWebViewArguments
+    $env:WEBVIEW2_USER_DATA_FOLDER = $previousWebViewDataRoot
     $env:WOKROUTER_EVENT_SMOKE_MARKER = $previousSmokeMarker
     if (Test-Path -LiteralPath $temporaryRoot) {
-        Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
+        Remove-SmokeRoot -Path $temporaryRoot
     }
 }

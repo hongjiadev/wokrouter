@@ -25,7 +25,8 @@ use wokrouter_wokcore_client::{
 
 use super::{
     StartCommandOutput, StartDependencies, StartOptions, StartService, StartedCore,
-    execute_with_dependencies, install_error_code, render_structured_platform_error, spawn_command,
+    build_packaged_acceptance_install_source, execute_with_dependencies, execute_with_options,
+    install_error_code, production_install_source, render_structured_platform_error, spawn_command,
 };
 use crate::commands::{CommandError, CommandRuntime};
 
@@ -40,6 +41,74 @@ const V2_SIGNATURE: &[u8] = include_bytes!(
 );
 const STORED_TEST_TOKEN: &str = "opaque-stored-test-token";
 const REAUTHORIZED_TEST_TOKEN: &str = "opaque-reauthorized-test-token";
+
+#[test]
+fn packaged_acceptance_source_accepts_only_signed_ipv4_loopback_configuration() {
+    let source = build_packaged_acceptance_install_source(
+        "http://127.0.0.1:43123/releases/",
+        PUBLIC_KEY.as_bytes(),
+    )
+    .unwrap();
+
+    assert_eq!(source.origin().as_str(), "http://127.0.0.1:43123/releases/");
+    assert_eq!(source.public_key_id(), "7E411BA469CB14B6");
+    assert!(
+        build_packaged_acceptance_install_source(
+            "https://github.com/hongjiadev/wokcore/releases/latest/download/",
+            PUBLIC_KEY.as_bytes(),
+        )
+        .is_err()
+    );
+    assert!(
+        build_packaged_acceptance_install_source(
+            "http://127.0.0.1:43123/releases/",
+            b"not a Minisign public key",
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn normal_cli_install_source_remains_production_with_all_features() {
+    let source = production_install_source().unwrap();
+
+    assert_eq!(
+        source.origin().as_str(),
+        "https://github.com/hongjiadev/wokcore/releases/latest/download/"
+    );
+    assert_eq!(source.public_key_id(), "7EF262CD8E9FE136");
+}
+
+#[cfg(feature = "packaged-acceptance")]
+#[tokio::test]
+async fn normal_cli_entrypoint_ignores_acceptance_source_with_all_features() {
+    use wokrouter_platform::test_support::RuntimeSelectorHarness;
+
+    assert!(std::env::var_os("WOKROUTER_PACKAGED_ACCEPTANCE_ORIGIN").is_none());
+    assert!(std::env::var_os("WOKROUTER_PACKAGED_ACCEPTANCE_PUBLIC_KEY").is_none());
+
+    let fixture = tempfile::tempdir().unwrap();
+    let paths = app_paths(&fixture);
+    let executable = fixture
+        .path()
+        .join(format!("wokcore{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&executable, b"not an executable").unwrap();
+    let discovered = executable.clone();
+    let selector = RuntimeSelectorHarness::new(
+        None,
+        |_process_id, _candidate| false,
+        move |_record| Ok(Some(discovered.clone())),
+    );
+    let runtime = selector.select(&paths).await.unwrap();
+    let mut output = CapturedOutput::default();
+
+    assert_eq!(
+        execute_with_options(&paths, &runtime, structured_options(), &mut output).await,
+        Ok(1)
+    );
+    assert_eq!(output.stdout_text(), "{\"code\":\"start_failed\"}\n");
+    assert!(!output.stdout_text().contains("invalid_source"));
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ObservedCall {

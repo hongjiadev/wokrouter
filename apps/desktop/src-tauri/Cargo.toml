@@ -14,6 +14,10 @@ path = "src/lib.rs"
 name = "wokrouter-desktop"
 path = "src/main.rs"
 
+[features]
+default = []
+packaged-acceptance = ["wokrouter-cli/packaged-acceptance", "tauri/custom-protocol"]
+
 [dependencies]
 fs4.workspace = true
 secrecy.workspace = true

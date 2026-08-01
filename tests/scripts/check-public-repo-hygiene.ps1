@@ -85,6 +85,10 @@ $allowedFixturePublicKey = (
     "crates/wokrouter-platform/tests/fixtures/" +
     "wokcore-install/minisign.pub"
 )
+$allowedProductPublicKey = (
+    "crates/wokrouter-platform/src/wokcore_install/" +
+    "wokcore-minisign.pub"
+)
 $allowedFixtureSignatures = @(
     (
         "crates/wokrouter-platform/tests/fixtures/" +
@@ -121,6 +125,7 @@ $violations = foreach ($line in $IndexLines) {
         (
             $path.EndsWith(".pub", [StringComparison]::OrdinalIgnoreCase) -and
             $path -cne "release/minisign.pub" -and
+            $path -cne $allowedProductPublicKey -and
             $path -cne $allowedFixturePublicKey
         ) -or
         (

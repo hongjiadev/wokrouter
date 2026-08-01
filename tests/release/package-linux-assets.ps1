@@ -330,7 +330,7 @@ function Get-ValidatedAppImageLinks {
         [StringComparer]::Ordinal
     )
     $forbidden = [regex]::new(
-        "(?i)(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen)"
+        "(?i)(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen|packaged[-_]?acceptance)"
     )
     foreach ($record in $inventory) {
         $properties = @($record.PSObject.Properties | ForEach-Object Name)
@@ -502,7 +502,7 @@ function Assert-NoForbiddenPayload {
     )
 
     $forbidden = [regex]::new(
-        "(?i)(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen)"
+        "(?i)(wokcore|wokrouterd|wokcore-provider-sim|wokcore-loadgen|packaged[-_]?acceptance)"
     )
     foreach ($item in $Items) {
         if ($forbidden.IsMatch($item.Name)) {

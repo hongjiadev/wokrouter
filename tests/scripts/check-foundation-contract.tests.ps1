@@ -123,6 +123,12 @@ function New-ContractFixture {
         -LiteralPath (Join-Path $repositoryRoot "tests/scripts/smoke-packaged-event-bridge.ps1") `
         -Destination (Join-Path $root "tests/scripts/smoke-packaged-event-bridge.ps1")
     Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "tests/scripts/packaged-gui-acceptance.ps1") `
+        -Destination (Join-Path $root "tests/scripts/packaged-gui-acceptance.ps1")
+    Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "tests/scripts/packaged-gui-acceptance.tests.ps1") `
+        -Destination (Join-Path $root "tests/scripts/packaged-gui-acceptance.tests.ps1")
+    Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "crates/wokrouter-platform/tests/wokcore_runtime.rs") `
         -Destination (Join-Path $root "crates/wokrouter-platform/tests/wokcore_runtime.rs")
     Copy-Item `
@@ -452,16 +458,8 @@ try {
         Edit-FixtureFile `
             -Root $root `
             -RelativePath "apps/desktop/src-tauri/src/lib.rs" `
-            -OldText @'
-fn system_locale() -> Option<String> {
-    wokrouter_platform::detect_system_locale()
-}
-'@ `
-            -NewText @'
-fn system_locale() -> String {
-    wokrouter_platform::detect_system_locale().unwrap_or_else(|| "en".into())
-}
-'@
+            -OldText 'wokrouter_platform::detect_system_locale()' `
+            -NewText 'Some("en".into())'
         Assert-ContractRejects `
             -Root $root `
             -ExpectedText "preserve the optional OS locale" `
@@ -515,6 +513,94 @@ fn system_locale() -> String {
             -Root $root `
             -ExpectedText "observe a started sidecar plus WebView progress" `
             -Scenario "packaged event smoke without sidecar marker assertion"
+    }
+
+    Invoke-Scenario -Name "packaged event smoke must isolate WebView2 user data" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/scripts/smoke-packaged-event-bridge.ps1" `
+            -OldText '$env:WEBVIEW2_USER_DATA_FOLDER = $webViewDataRoot' `
+            -NewText '$null = $webViewDataRoot'
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "isolate exact WebView ownership" `
+            -Scenario "packaged event smoke sharing WebView user data"
+    }
+
+    Invoke-Scenario -Name "packaged GUI acceptance self-test must execute the harness" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/scripts/packaged-gui-acceptance.tests.ps1" `
+            -OldText '& $harness -SelfTest -EvidenceRoot $evidenceRoot -TimeoutSeconds 10' `
+            -NewText '$null = $harness'
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "packaged GUI acceptance self-test" `
+            -Scenario "packaged GUI acceptance self-test bypass"
+    }
+
+    Invoke-Scenario -Name "packaged GUI live acceptance must preserve cold-start locale input" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/scripts/packaged-gui-acceptance.ps1" `
+            -OldText '"--remote-debugging-port=$cdpPort --lang=$($case.navigator_locale)"' `
+            -NewText '"--remote-debugging-port=$cdpPort"'
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "all six isolated scenarios" `
+            -Scenario "packaged GUI live acceptance without cold-start navigator locale"
+    }
+
+    Invoke-Scenario -Name "packaged GUI All dispatcher must invoke locale as active code" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/scripts/packaged-gui-acceptance.ps1" `
+            -OldText @'
+    Invoke-LocaleLive `
+        -Desktop $resolvedDesktop `
+        -OutputRoot (Join-Path $EvidenceRoot "Locale") `
+        -Timeout $TimeoutSeconds
+'@ `
+            -NewText @'
+    # Invoke-LocaleLive `
+    #     -Desktop $resolvedDesktop `
+    #     -OutputRoot (Join-Path $EvidenceRoot "Locale") `
+    #     -Timeout $TimeoutSeconds
+'@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "packaged GUI live harness" `
+            -Scenario "packaged GUI All dispatcher with a commented locale call"
+    }
+
+    Invoke-Scenario -Name "packaged GUI All dispatcher cannot exit before scenarios" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/scripts/packaged-gui-acceptance.ps1" `
+            -OldText 'if ($Scenario -ceq "All") {' `
+            -NewText "if (`$Scenario -ceq `"All`") {`n    exit 0"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "packaged GUI live harness" `
+            -Scenario "packaged GUI All dispatcher with an early exit"
+    }
+
+    Invoke-Scenario -Name "packaged GUI live functions cannot hide a nested early return" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/scripts/packaged-gui-acceptance.ps1" `
+            -OldText 'function Invoke-LocaleLive {' `
+            -NewText "function Invoke-LocaleLive {`n    if (`$true) { return }"
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "packaged GUI live harness" `
+            -Scenario "packaged GUI locale function with a nested early return"
     }
 
     Invoke-Scenario -Name "fixture mutations require one exact source occurrence" -Test {
@@ -905,13 +991,13 @@ export function ManagementPanel({
             -Root $root `
             -RelativePath "tests/release/package-windows-assets.ps1" `
             -OldText @"
-if ((Get-PeSubsystem -Path `$desktop) -ne 2) {
+if ((& `$peSubsystemCommand -Path `$desktop) -ne 2) {
     throw "Windows desktop executable must use the GUI subsystem."
 }
 "@ `
             -NewText @"
 if (`$false) {
-    if ((Get-PeSubsystem -Path `$desktop) -ne 2) {
+    if ((& `$peSubsystemCommand -Path `$desktop) -ne 2) {
         throw "Windows desktop executable must use the GUI subsystem."
     }
 }
@@ -928,13 +1014,13 @@ if (`$false) {
             -Root $root `
             -RelativePath "tests/release/package-windows-assets.ps1" `
             -OldText @"
-if ((Get-PeSubsystem -Path `$desktop) -ne 2) {
+if ((& `$peSubsystemCommand -Path `$desktop) -ne 2) {
     throw "Windows desktop executable must use the GUI subsystem."
 }
 "@ `
             -NewText @"
 return
-if ((Get-PeSubsystem -Path `$desktop) -ne 2) {
+if ((& `$peSubsystemCommand -Path `$desktop) -ne 2) {
     throw "Windows desktop executable must use the GUI subsystem."
 }
 "@
@@ -972,14 +1058,20 @@ if ((Get-PeSubsystem -Path `$desktop) -ne 2) {
             Name = "Minisign private key header is rejected"
             Path = "crates/wokrouter-platform/src/wokcore_install/wokcore-minisign.pub"
             Old = "untrusted comment: minisign public key 7EF262CD8E9FE136"
-            New = "untrusted comment: minisign secret key 7EF262CD8E9FE136"
+            New = (
+                "untrusted comment: minisign " +
+                "secret key 7EF262CD8E9FE136"
+            )
             Expected = "Minisign private or encrypted secret key header"
         },
         @{
             Name = "Minisign encrypted private key header is rejected"
             Path = "crates/wokrouter-platform/src/wokcore_install/wokcore-minisign.pub"
             Old = "untrusted comment: minisign public key 7EF262CD8E9FE136"
-            New = "untrusted comment: minisign encrypted secret key 7EF262CD8E9FE136"
+            New = (
+                "untrusted comment: minisign encrypted " +
+                "secret key 7EF262CD8E9FE136"
+            )
             Expected = "Minisign private or encrypted secret key header"
         },
         @{
@@ -1186,18 +1278,20 @@ OperationInProgress,
             Name = "persistent operation conflict must return operation_in_progress"
             Path = "apps/desktop/src-tauri/src/core_operation.rs"
             Old = @"
+                    self.ensure_persistent_monitor(existing.clone(), sink).await;
                     return Ok(existing);
                 }
                 return Err(CoreOperationError::OperationInProgress);
             }
-            if operation == CoreOperationKind::Install
+            if existing.operation == CoreOperationKind::Install
 "@
             New = @"
+                    self.ensure_persistent_monitor(existing.clone(), sink).await;
                     return Ok(existing);
                 }
                 return Err(CoreOperationError::InvalidProgress);
             }
-            if operation == CoreOperationKind::Install
+            if existing.operation == CoreOperationKind::Install
 "@
             Expected = "Persistent operation arbitration"
         },
@@ -1512,14 +1606,14 @@ fn fence_helper_timeout(
             Name = "backend check must use the production-gated trusted executable"
             Path = "apps/desktop/src-tauri/src/core_operation.rs"
             Old = @"
-        if self.state.lock().await.active.is_some() {
+        if self.operation_is_active().await? {
             return Err(CoreOperationError::OperationInProgress);
         }
         let executable = self.trusted_production_executable().await?;
         let completion = self
 "@
             New = @"
-        if self.state.lock().await.active.is_some() {
+        if self.operation_is_active().await? {
             return Err(CoreOperationError::OperationInProgress);
         }
         let executable = self
@@ -1880,7 +1974,10 @@ use std::{fs, path::Path, sync::mpsc};
             Add-FixtureTextFile `
                 -Root $root `
                 -RelativePath $secretFile.Path `
-                -Content "untrusted comment: minisign secret key 0000000000000000"
+                -Content (
+                    "untrusted comment: minisign " +
+                    "secret key 0000000000000000"
+                )
             Assert-ContractRejects `
                 -Root $root `
                 -ExpectedText "Minisign private or encrypted secret key header" `
@@ -1893,7 +1990,10 @@ use std::{fs, path::Path, sync::mpsc};
         Add-FixtureTextFile `
             -Root $root `
             -RelativePath "apps/desktop/target/generated-signing.key" `
-            -Content "untrusted comment: minisign secret key 0000000000000000"
+            -Content (
+                "untrusted comment: minisign " +
+                "secret key 0000000000000000"
+            )
         Assert-ContractPasses `
             -Root $root `
             -Scenario "generated private-key fixture exclusion"

@@ -36,6 +36,8 @@ $frontendLocalePath = Join-Path $rootPath "apps/desktop/src/locale.ts"
 $desktopI18nPath = Join-Path $rootPath "apps/desktop/src/i18n/index.ts"
 $systemLocalePath = Join-Path $rootPath "crates/wokrouter-platform/src/system/locale.rs"
 $packagedEventSmokePath = Join-Path $rootPath "tests/scripts/smoke-packaged-event-bridge.ps1"
+$packagedGuiAcceptancePath = Join-Path $rootPath "tests/scripts/packaged-gui-acceptance.ps1"
+$packagedGuiAcceptanceTestsPath = Join-Path $rootPath "tests/scripts/packaged-gui-acceptance.tests.ps1"
 $englishCatalogPath = Join-Path $rootPath "apps/desktop/src/i18n/locales/en.json"
 $simplifiedChineseCatalogPath = Join-Path $rootPath "apps/desktop/src/i18n/locales/zh-CN.json"
 $desktopMainPath = Join-Path $rootPath "apps/desktop/src-tauri/src/main.rs"
@@ -2254,6 +2256,14 @@ $frontendLocale = Get-Content -LiteralPath $frontendLocalePath -Raw -Encoding UT
 $desktopI18n = Get-Content -LiteralPath $desktopI18nPath -Raw -Encoding UTF8
 $systemLocale = Get-Content -LiteralPath $systemLocalePath -Raw -Encoding UTF8
 $packagedEventSmoke = Get-Content -LiteralPath $packagedEventSmokePath -Raw -Encoding UTF8
+$packagedGuiAcceptance = Get-Content `
+    -LiteralPath $packagedGuiAcceptancePath `
+    -Raw `
+    -Encoding UTF8
+$packagedGuiAcceptanceTests = Get-Content `
+    -LiteralPath $packagedGuiAcceptanceTestsPath `
+    -Raw `
+    -Encoding UTF8
 $desktopMain = Get-Content -LiteralPath $desktopMainPath -Raw -Encoding UTF8
 $windowsPackager = Get-Content -LiteralPath $windowsPackagerPath -Raw -Encoding UTF8
 $coreOperationParser = Get-Content -LiteralPath $coreOperationParserPath -Raw -Encoding UTF8
@@ -2365,8 +2375,8 @@ $systemLocaleCommand = Get-UniqueBracedItem `
     -CodeView $desktopLibCodeViewForLocale
 if (
     $null -eq $systemLocaleCommand -or
-    ($systemLocaleCommand.CodeBody -replace '\s', '') -cne
-    'wokrouter_platform::detect_system_locale()'
+    ($systemLocaleCommand.CodeBody -replace '\s', '') -notmatch
+    [regex]::Escape('wokrouter_platform::detect_system_locale()')
 ) {
     Add-ContractFailure `
         -Message "Desktop system_locale command must preserve the optional OS locale candidate."
@@ -2401,10 +2411,186 @@ if (
     $packagedEventSmoke -notmatch 'document\.querySelector\([^\r\n]*role="progressbar"' -or
     $packagedEventSmoke -notmatch
     '-not\s*\(\s*Test-Path\s+-LiteralPath\s+\$sidecarMarker\s+-PathType\s+Leaf\s*\)' -or
-    $packagedEventSmoke -notmatch 'WOKROUTER_EVENT_SMOKE_MARKER'
+    $packagedEventSmoke -notmatch 'WOKROUTER_EVENT_SMOKE_MARKER' -or
+    $packagedEventSmoke -notmatch
+    '(?m)^\s*\$env:WEBVIEW2_USER_DATA_FOLDER\s*=\s*\$webViewDataRoot\s*$' -or
+    $packagedEventSmoke -notmatch 'Get-OwnedWebViewProcesses' -or
+    $packagedEventSmoke -notmatch 'Stop-OwnedWebViewProcesses' -or
+    $packagedEventSmoke -notmatch 'exact smoke identity'
 ) {
     Add-ContractFailure `
-        -Message "Packaged desktop smoke must launch the real EXE and observe a started sidecar plus WebView progress."
+        -Message "Packaged desktop smoke must launch the real EXE, isolate exact WebView ownership, and observe a started sidecar plus WebView progress."
+}
+
+$packagedGuiAcceptanceTestsAst = Get-PowerShellAst `
+    -Source $packagedGuiAcceptanceTests `
+    -Description "Packaged GUI acceptance self-test"
+$packagedGuiSelfTestInvocations = @($packagedGuiAcceptanceTestsAst.FindAll({
+            param($node)
+            if (
+                $node -isnot [Management.Automation.Language.CommandAst] -or
+                $node.InvocationOperator -ne
+                [Management.Automation.Language.TokenKind]::Ampersand -or
+                $node.CommandElements.Count -lt 2 -or
+                $node.CommandElements[0] -isnot
+                [Management.Automation.Language.VariableExpressionAst] -or
+                $node.CommandElements[0].VariablePath.UserPath -cne "harness"
+            ) {
+                return $false
+            }
+            $parameters = @($node.CommandElements | Where-Object {
+                    $_ -is [Management.Automation.Language.CommandParameterAst]
+                } | ForEach-Object { $_.ParameterName })
+            return (
+                $parameters -contains "SelfTest" -and
+                $parameters -contains "EvidenceRoot" -and
+                $parameters -contains "TimeoutSeconds"
+            )
+        }, $true))
+if ($packagedGuiSelfTestInvocations.Count -ne 1) {
+    Add-ContractFailure `
+        -Message "The packaged GUI acceptance self-test must execute the harness exactly once with isolated evidence and a timeout."
+}
+
+$packagedGuiAcceptanceAst = Get-PowerShellAst `
+    -Source $packagedGuiAcceptance `
+    -Description "Packaged GUI live acceptance harness"
+$packagedGuiFunctionAsts = @($packagedGuiAcceptanceAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst]
+        }, $true))
+$packagedGuiFunctions = @($packagedGuiFunctionAsts | ForEach-Object Name)
+$requiredPackagedGuiFunctions = @(
+    "Build-LiveAcceptanceApplication",
+    "Add-AcceptanceDocumentScript",
+    "Invoke-MissingInstallLive",
+    "Invoke-PreinstalledUpdateLive",
+    "Invoke-LocaleLive"
+)
+$requiredPackagedGuiScenarios = @(
+    "MissingInstall",
+    "UpdateCancelConfirm",
+    "ActiveRequests",
+    "Rollback",
+    "CloseReopen",
+    "Locale"
+)
+$requiredAllLoopScenarios = @($requiredPackagedGuiScenarios | Select-Object -First 5)
+$requiredFunctionsHaveReachableBodies = $true
+foreach ($requiredFunction in $requiredPackagedGuiFunctions) {
+    $matches = @($packagedGuiFunctionAsts | Where-Object { $_.Name -ceq $requiredFunction })
+    if ($matches.Count -ne 1) {
+        $requiredFunctionsHaveReachableBodies = $false
+        continue
+    }
+    $functionTerminals = @($matches[0].Body.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.ReturnStatementAst] -or
+                $node -is [Management.Automation.Language.ExitStatementAst]
+            }, $true))
+    $allowedTerminalCount = if ($requiredFunction -ceq 'Build-LiveAcceptanceApplication') {
+        1
+    } else {
+        0
+    }
+    if ($functionTerminals.Count -ne $allowedTerminalCount) {
+        $requiredFunctionsHaveReachableBodies = $false
+    } elseif ($allowedTerminalCount -eq 1) {
+        $directStatements = @($matches[0].Body.EndBlock.Statements)
+        if (
+            $directStatements.Count -eq 0 -or
+            $functionTerminals[0] -ne $directStatements[-1]
+        ) {
+            $requiredFunctionsHaveReachableBodies = $false
+        }
+    }
+}
+
+$allDispatchers = @($packagedGuiAcceptanceAst.EndBlock.Statements | Where-Object {
+        $_ -is [Management.Automation.Language.IfStatementAst] -and
+        $_.Clauses.Count -eq 1 -and
+        $_.Clauses[0].Item1.Extent.Text.Trim() -ceq '$Scenario -ceq "All"'
+    })
+$allDispatcherValid = $false
+if ($allDispatchers.Count -eq 1) {
+    $allBody = $allDispatchers[0].Clauses[0].Item2
+    $allStatements = @($allBody.Statements)
+    $allStatementTypes = @($allStatements | ForEach-Object { $_.GetType().Name })
+    $allCommands = @($allBody.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.CommandAst]
+            }, $true) | ForEach-Object { $_.GetCommandName() })
+    $allLoops = @($allStatements | Where-Object {
+            $_ -is [Management.Automation.Language.ForEachStatementAst]
+        })
+    $allLoopScenarios = @()
+    if ($allLoops.Count -eq 1) {
+        $allLoopScenarios = @($allLoops[0].Condition.FindAll({
+                    param($node)
+                    $node -is [Management.Automation.Language.StringConstantExpressionAst]
+                }, $true) | ForEach-Object Value)
+    }
+    $allCompletionStrings = @($allBody.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+                $node.Value -ceq 'All packaged GUI acceptance scenarios passed.'
+            }, $true))
+    $allDispatcherValid = (
+        ($allStatementTypes -join ',') -ceq
+        'IfStatementAst,AssignmentStatementAst,ForEachStatementAst,PipelineAst,PipelineAst,ExitStatementAst' -and
+        $allStatements[-1].Extent.Text.Trim() -ceq 'exit 0' -and
+        @($allCommands | Where-Object { $_ -ceq 'Invoke-MissingInstallLive' }).Count -eq 1 -and
+        @($allCommands | Where-Object { $_ -ceq 'Invoke-PreinstalledUpdateLive' }).Count -eq 1 -and
+        @($allCommands | Where-Object { $_ -ceq 'Invoke-LocaleLive' }).Count -eq 1 -and
+        $allLoopScenarios.Count -eq $requiredAllLoopScenarios.Count -and
+        @($requiredAllLoopScenarios | Where-Object {
+                $allLoopScenarios -notcontains $_
+            }).Count -eq 0 -and
+        $allCompletionStrings.Count -eq 1
+    )
+}
+
+$documentScriptFunctions = @($packagedGuiFunctionAsts | Where-Object {
+        $_.Name -ceq 'Add-AcceptanceDocumentScript'
+    })
+$localeFunctions = @($packagedGuiFunctionAsts | Where-Object {
+        $_.Name -ceq 'Invoke-LocaleLive'
+    })
+$localeEvidenceValid = $false
+if ($documentScriptFunctions.Count -eq 1 -and $localeFunctions.Count -eq 1) {
+    $documentTraceStrings = @($documentScriptFunctions[0].Body.FindAll({
+                param($node)
+                ($node -is [Management.Automation.Language.StringConstantExpressionAst] -or
+                    $node -is [Management.Automation.Language.ExpandableStringExpressionAst]) -and
+                $node.Value.Contains('visibleFrames')
+            }, $true))
+    $localeFrameReads = @($localeFunctions[0].Body.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+                $node.Value -ceq 'window.__wokrouterAcceptance.visibleFrames'
+            }, $true))
+    $localeColdStarts = @($localeFunctions[0].Body.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.ExpandableStringExpressionAst] -and
+                $node.Value -ceq
+                '--remote-debugging-port=$cdpPort --lang=$($case.navigator_locale)'
+            }, $true))
+    $localeEvidenceValid = (
+        $documentTraceStrings.Count -eq 1 -and
+        $localeFrameReads.Count -eq 1 -and
+        $localeColdStarts.Count -eq 1
+    )
+}
+if (
+    @($requiredPackagedGuiFunctions | Where-Object {
+            $packagedGuiFunctions -notcontains $_
+        }).Count -gt 0 -or
+    -not $requiredFunctionsHaveReachableBodies -or
+    -not $allDispatcherValid -or
+    -not $localeEvidenceValid
+) {
+    Add-ContractFailure `
+        -Message "The packaged GUI live harness must execute all six isolated scenarios with cold-start navigator locale and first-frame evidence."
 }
 
 foreach ($catalog in @(
@@ -2757,7 +2943,7 @@ if ($null -ne $windowsPackagerAst) {
     $sourceDesktopGuards = @(
         Get-ExactPowerShellGuardAst `
             -Ast $windowsPackagerAst `
-            -Condition '(Get-PeSubsystem -Path $desktop) -ne 2' `
+            -Condition '(& $peSubsystemCommand -Path $desktop) -ne 2' `
             -ThrowStatement 'throw "Windows desktop executable must use the GUI subsystem."'
     )
     $sourceDesktopGuardIsInvalid = (

@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$ScenarioPattern = ""
+)
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
@@ -23,6 +25,10 @@ function New-ReleaseFixture {
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri/src") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/src-tauri/capabilities") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/desktop/scripts") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/cli/src/bin") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/cli/src/commands") -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $root "apps/cli/src/commands/start") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "docs/operations") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "tests/release") -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $root "release") -Force
@@ -31,7 +37,14 @@ function New-ReleaseFixture {
             ".github/workflows/release.yml",
             "Cargo.toml",
             "Cargo.lock",
+            "apps/cli/Cargo.toml",
+            "apps/cli/src/main.rs",
+            "apps/cli/src/bin/wokrouter-packaged-acceptance.rs",
+            "apps/cli/src/commands/start.rs",
+            "apps/cli/src/commands/start/tests.rs",
             "apps/desktop/package.json",
+            "apps/desktop/scripts/stage-sidecars.mjs",
+            "apps/desktop/src-tauri/Cargo.toml",
             "apps/desktop/src-tauri/src/main.rs",
             "apps/desktop/src-tauri/capabilities/main.json",
             "apps/desktop/src-tauri/tauri.conf.json",
@@ -179,6 +192,12 @@ function Assert-Rejects {
 function Invoke-Scenario {
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][scriptblock]$Test)
 
+    if (
+        $ScenarioPattern.Length -gt 0 -and
+        $Name -notmatch $ScenarioPattern
+    ) {
+        return
+    }
     $script:scenarioCount += 1
     try {
         & $Test
@@ -194,6 +213,392 @@ try {
     Invoke-Scenario -Name "real release workflow satisfies the contract" -Test {
         $root = New-ReleaseFixture
         Assert-Passes -Root $root -Scenario "real release fixture"
+    }
+
+    Invoke-Scenario -Name "acceptance CLI bin must remain required-feature gated" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/Cargo.toml" `
+            -OldText 'required-features = ["packaged-acceptance"]' `
+            -NewText 'required-features = []'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "required-feature gated" `
+            -Scenario "ungated acceptance CLI bin"
+    }
+
+    foreach ($manifestMutation in @(
+            @{
+                Name = "automatic binary discovery"
+                Old = "autobins = false"
+                New = "autobins = true"
+            },
+            @{
+                Name = "default acceptance feature"
+                Old = "default = []"
+                New = 'default = ["packaged-acceptance"]'
+            }
+        )) {
+        Invoke-Scenario -Name "CLI manifest rejects $($manifestMutation.Name)" -Test {
+            $root = New-ReleaseFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "apps/cli/Cargo.toml" `
+                -OldText $manifestMutation.Old `
+                -NewText $manifestMutation.New
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText "explicit non-default, required-feature gated bin" `
+                -Scenario $manifestMutation.Name
+        }
+    }
+
+    Invoke-Scenario -Name "normal CLI main cannot read acceptance environment" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/main.rs" `
+            -OldText 'async fn run() -> Result<u8, CommandError> {' `
+            -NewText @'
+async fn run() -> Result<u8, CommandError> {
+    let _ = std::env::var("WOKROUTER_PACKAGED_ACCEPTANCE_ORIGIN");
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "normal CLI must not reference packaged acceptance" `
+            -Scenario "normal CLI acceptance environment read"
+    }
+
+    foreach ($desktopManifestMutation in @(
+            @{
+                Name = "default desktop acceptance feature"
+                Old = "default = []"
+                New = 'default = ["packaged-acceptance"]'
+            },
+            @{
+                Name = "desktop seam detached from acceptance CLI"
+                Old = 'packaged-acceptance = ["wokrouter-cli/packaged-acceptance", "tauri/custom-protocol"]'
+                New = "packaged-acceptance = []"
+            }
+        )) {
+        Invoke-Scenario -Name "desktop manifest rejects $($desktopManifestMutation.Name)" -Test {
+            $root = New-ReleaseFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "apps/desktop/src-tauri/Cargo.toml" `
+                -OldText $desktopManifestMutation.Old `
+                -NewText $desktopManifestMutation.New
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText "desktop acceptance seam must be one exact non-default feature" `
+                -Scenario $desktopManifestMutation.Name
+        }
+    }
+
+    Invoke-Scenario -Name "normal CLI install source remains production under all features" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/commands/start.rs" `
+            -OldText @'
+fn production_install_source() -> Result<WokCoreInstallSource, WokCoreInstallError> {
+    WokCoreInstallSource::production()
+}
+'@ `
+            -NewText @'
+fn production_install_source() -> Result<WokCoreInstallSource, WokCoreInstallError> {
+    packaged_acceptance_install_source()
+}
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "normal CLI install source must remain production" `
+            -Scenario "all-features normal CLI acceptance source"
+    }
+
+    foreach ($normalCaller in @(
+            @{
+                Name = "unstructured start caller"
+                Old = 'let install_source = production_install_source().map_err'
+                New = 'let install_source = packaged_acceptance_install_source().map_err'
+            },
+            @{
+                Name = "structured start caller"
+                Old = 'let install_source = match production_install_source() {'
+                New = 'let install_source = match packaged_acceptance_install_source() {'
+            }
+        )) {
+        Invoke-Scenario -Name "$($normalCaller.Name) remains production" -Test {
+            $root = New-ReleaseFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "apps/cli/src/commands/start.rs" `
+                -OldText $normalCaller.Old `
+                -NewText $normalCaller.New
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText "normal CLI install source must remain production" `
+                -Scenario $normalCaller.Name
+        }
+    }
+
+    Invoke-Scenario -Name "commented production calls cannot mask an acceptance CLI caller" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/commands/start.rs" `
+            -OldText '    let install_source = production_install_source().map_err(|_| CommandError::CoreControl)?;' `
+            -NewText @'
+    // let install_source = production_install_source().map_err(|_| CommandError::CoreControl)?;
+    let install_source = packaged_acceptance_install_source()
+        .map_err(|_| CommandError::CoreControl)?;
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "normal CLI install source" `
+            -Scenario "acceptance CLI caller masked by a production comment"
+    }
+
+    Invoke-Scenario -Name "disabled production calls cannot mask an acceptance CLI caller" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/commands/start.rs" `
+            -OldText '    let install_source = production_install_source().map_err(|_| CommandError::CoreControl)?;' `
+            -NewText @'
+    #[cfg(any())]
+    let install_source = production_install_source().map_err(|_| CommandError::CoreControl)?;
+    #[cfg(not(any()))]
+    let install_source = packaged_acceptance_install_source()
+        .map_err(|_| CommandError::CoreControl)?;
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "normal CLI install source" `
+            -Scenario "acceptance CLI caller masked by disabled production code"
+    }
+
+    Invoke-Scenario -Name "all-features behavior test must exercise the normal entrypoint" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/commands/start/tests.rs" `
+            -OldText '        execute_with_options(' `
+            -NewText '        execute_packaged_acceptance_with_options('
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "all-features normal CLI behavior test" `
+            -Scenario "all-features behavior test bypass"
+    }
+
+    Invoke-Scenario -Name "all-features behavior test cannot be conditionally disabled" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/commands/start/tests.rs" `
+            -OldText '#[cfg(feature = "packaged-acceptance")]' `
+            -NewText '#[cfg(any())]'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "all-features normal CLI behavior test" `
+            -Scenario "disabled all-features behavior test"
+    }
+
+    Invoke-Scenario -Name "all-features behavior test requires the exact acceptance feature" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/commands/start/tests.rs" `
+            -OldText '#[cfg(feature = "packaged-acceptance")]' `
+            -NewText '#[cfg(feature = "disabled-acceptance")]'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "all-features normal CLI behavior test" `
+            -Scenario "all-features behavior test with an unknown equal-length feature"
+    }
+
+    Invoke-Scenario -Name "all-features behavior test cannot be ignored" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/cli/src/commands/start/tests.rs" `
+            -OldText @'
+#[cfg(feature = "packaged-acceptance")]
+#[tokio::test]
+async fn normal_cli_entrypoint_ignores_acceptance_source_with_all_features() {
+'@ `
+            -NewText @'
+#[ignore]
+#[cfg(feature = "packaged-acceptance")]
+#[tokio::test]
+async fn normal_cli_entrypoint_ignores_acceptance_source_with_all_features() {
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "all-features normal CLI behavior test" `
+            -Scenario "ignored all-features behavior test"
+    }
+
+    Invoke-Scenario -Name "commented sidecar staging cannot mask active release arguments" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/scripts/stage-sidecars.mjs" `
+            -OldText @'
+export function cargoBuildArguments(targetTriple) {
+  return [
+    "build",
+    "--locked",
+    "--release",
+    "--target",
+    supportedTargetTriple(targetTriple),
+    "-p",
+    "wokrouter-cli",
+    "--bin",
+    "wokrouter",
+    "--no-default-features",
+  ];
+}
+'@ `
+            -NewText @'
+/*
+export function cargoBuildArguments(targetTriple) {
+  return [
+    "build",
+    "--locked",
+    "--release",
+    "--target",
+    supportedTargetTriple(targetTriple),
+    "-p",
+    "wokrouter-cli",
+    "--bin",
+    "wokrouter",
+    "--no-default-features",
+  ];
+}
+*/
+export function cargoBuildArguments(targetTriple) {
+  return [
+    "build",
+    "--locked",
+    "--release",
+    "--target",
+    supportedTargetTriple(targetTriple),
+    "-p",
+    "wokrouter-cli",
+    "--bin",
+    "wokrouter",
+  ];
+}
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "Release sidecar staging" `
+            -Scenario "active sidecar arguments masked by a commented release function"
+    }
+
+    Invoke-Scenario -Name "sidecar staging must execute with exact release arguments" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/scripts/stage-sidecars.mjs" `
+            -OldText '    "wokrouter",' `
+            -NewText '    "badrouter",'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "Release sidecar staging" `
+            -Scenario "same-length wrong sidecar binary name"
+    }
+
+    Invoke-Scenario -Name "release workflow cannot enable packaged acceptance" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText '            --config ../../target/wokrouter-release-config.json' `
+            -NewText @'
+            --config ../../target/wokrouter-release-config.json `
+            -- --features packaged-acceptance
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "must not enable or package packaged acceptance" `
+            -Scenario "release acceptance feature"
+    }
+
+    Invoke-Scenario -Name "release staging builds only the normal CLI target" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/scripts/stage-sidecars.mjs" `
+            -OldText '    "wokrouter",' `
+            -NewText '    "wokrouter-packaged-acceptance",'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "normal CLI target with no default features" `
+            -Scenario "acceptance sidecar staging"
+    }
+
+    Invoke-Scenario -Name "release staging cannot enable default features" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/scripts/stage-sidecars.mjs" `
+            -OldText '    "--no-default-features",' `
+            -NewText @'
+    "--features",
+    "packaged-acceptance",
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "normal CLI target with no default features" `
+            -Scenario "acceptance staging feature"
+    }
+
+    Invoke-Scenario -Name "Tauri external binaries exclude acceptance" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src-tauri/tauri.conf.json" `
+            -OldText '"externalBin": ["binaries/wokrouter"]' `
+            -NewText '"externalBin": ["binaries/wokrouter", "binaries/wokrouter-packaged-acceptance"]'
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "exactly one production sidecar" `
+            -Scenario "acceptance Tauri external binary"
+    }
+
+    foreach ($packager in @("windows", "linux", "macos")) {
+        Invoke-Scenario -Name "$packager packager forbids acceptance payload names" -Test {
+            $root = New-ReleaseFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "tests/release/package-$packager-assets.ps1" `
+                -OldText '|packaged[-_]?acceptance' `
+                -NewText ''
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText "forbid packaged acceptance payload names" `
+                -Scenario "$packager packager acceptance name"
+        }
+    }
+
+    Invoke-Scenario -Name "release upload remains one exact allowlist" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath ".github/workflows/release.yml" `
+            -OldText '          path: target/wokrouter-public-${{ matrix.target }}/*' `
+            -NewText @'
+          path: |
+            target/wokrouter-public-${{ matrix.target }}/*
+            target/**/*
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "one exact normalized payload allowlist" `
+            -Scenario "broad release upload"
     }
 
     Invoke-Scenario -Name "release event capability cannot become empty" -Test {

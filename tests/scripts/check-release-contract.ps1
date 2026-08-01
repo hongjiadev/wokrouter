@@ -31,7 +31,16 @@ $verifierPath = Join-Path $rootPath "tests/release/verify-release-bundle.ps1"
 $publicKeyPath = Join-Path $rootPath "release/minisign.pub"
 $cargoManifestPath = Join-Path $rootPath "Cargo.toml"
 $cargoLockPath = Join-Path $rootPath "Cargo.lock"
+$cliManifestPath = Join-Path $rootPath "apps/cli/Cargo.toml"
+$cliMainPath = Join-Path $rootPath "apps/cli/src/main.rs"
+$cliAcceptanceMainPath = Join-Path `
+    $rootPath `
+    "apps/cli/src/bin/wokrouter-packaged-acceptance.rs"
+$cliStartPath = Join-Path $rootPath "apps/cli/src/commands/start.rs"
+$cliStartTestsPath = Join-Path $rootPath "apps/cli/src/commands/start/tests.rs"
 $packageManifestPath = Join-Path $rootPath "apps/desktop/package.json"
+$sidecarStagingPath = Join-Path $rootPath "apps/desktop/scripts/stage-sidecars.mjs"
+$desktopManifestPath = Join-Path $rootPath "apps/desktop/src-tauri/Cargo.toml"
 $desktopMainPath = Join-Path $rootPath "apps/desktop/src-tauri/src/main.rs"
 $tauriConfigurationPath = Join-Path `
     $rootPath `
@@ -540,7 +549,13 @@ foreach ($path in @(
         $publicKeyPath,
         $cargoManifestPath,
         $cargoLockPath,
+        $cliManifestPath,
+        $cliMainPath,
+        $cliAcceptanceMainPath,
+        $cliStartPath,
+        $cliStartTestsPath,
         $packageManifestPath,
+        $sidecarStagingPath,
         $desktopMainPath,
         $tauriConfigurationPath,
         $eventCapabilityPath
@@ -597,6 +612,236 @@ if ($failures.Count -eq 0) {
         )) {
         Add-Failure `
             -Message "Desktop main must begin with the exact release-only GUI subsystem attribute."
+    }
+
+    $cliManifest = Read-BoundedUtf8Text `
+        -Path $cliManifestPath `
+        -MaximumBytes 131072
+    $normalBinBlock = @'
+[[bin]]
+name = "wokrouter"
+path = "src/main.rs"
+
+[[bin]]
+'@
+    $acceptanceBinBlock = @'
+[[bin]]
+name = "wokrouter-packaged-acceptance"
+path = "src/bin/wokrouter-packaged-acceptance.rs"
+required-features = ["packaged-acceptance"]
+'@
+    if (
+        @([regex]::Matches($cliManifest, '(?m)^autobins = false$')).Count -ne 1 -or
+        @([regex]::Matches($cliManifest, '(?m)^default = \[\]$')).Count -ne 1 -or
+        @([regex]::Matches(
+                $cliManifest,
+                '(?m)^packaged-acceptance = \["wokrouter-platform/test-support"\]$'
+            )).Count -ne 1 -or
+        @([regex]::Matches($cliManifest, '(?m)^\[\[bin\]\]$')).Count -ne 2 -or
+        -not (Test-ContainsExactBlock -Source $cliManifest -Block $normalBinBlock) -or
+        -not (Test-ContainsExactBlock -Source $cliManifest -Block $acceptanceBinBlock)
+    ) {
+        Add-Failure `
+            -Message "The packaged acceptance CLI must be one explicit non-default, required-feature gated bin beside the normal CLI."
+    }
+
+    $cliMain = Read-BoundedUtf8Text -Path $cliMainPath -MaximumBytes 131072
+    $cliMainCode = Get-RustCodeView -Source $cliMain
+    if (
+        $cliMainCode -match '(?i)packaged[-_]?acceptance' -or
+        $cliMain.Contains('WOKROUTER_PACKAGED_ACCEPTANCE_')
+    ) {
+        Add-Failure `
+            -Message "The normal CLI must not reference packaged acceptance features, entrypoints, or environment."
+    }
+
+    $cliStart = Read-BoundedUtf8Text -Path $cliStartPath -MaximumBytes 262144
+    $cliStartCode = Get-RustCodeView -Source $cliStart
+    $productionSourceBlock = @'
+fn production_install_source() -> Result<WokCoreInstallSource, WokCoreInstallError> {
+    WokCoreInstallSource::production()
+}
+'@
+    $productionSourceCode = Get-RustCodeView -Source $productionSourceBlock
+    if (
+        -not (Test-ContainsExactBlock -Source $cliStartCode -Block $productionSourceCode) -or
+        @([regex]::Matches($cliStartCode, '\bproduction_install_source\(\)')).Count -ne 3 -or
+        $cliStartCode.Contains('configured_install_source') -or
+        $cliStartCode -match '#\s*\[\s*cfg\s*\(\s*any\s*\(\s*\)\s*\)\s*\]'
+    ) {
+        Add-Failure `
+            -Message "The normal CLI install source must remain production under every Cargo feature combination."
+    }
+
+    $cliStartTests = Read-BoundedUtf8Text `
+        -Path $cliStartTestsPath `
+        -MaximumBytes 1048576
+    $cliStartTestsCode = Get-RustCodeView -Source $cliStartTests
+    $normalCliBehaviorTestHeader = @'
+#[cfg(feature = "packaged-acceptance")]
+#[tokio::test]
+async fn normal_cli_entrypoint_ignores_acceptance_source_with_all_features() {
+'@
+    $normalCliBehaviorTestHeaderCode = Get-RustCodeView `
+        -Source $normalCliBehaviorTestHeader
+    $normalCliBehaviorRawHeaders = @([regex]::Matches(
+            $cliStartTests,
+            [regex]::Escape($normalCliBehaviorTestHeader)
+        ))
+    $normalCliBehaviorCodeHeaders = @([regex]::Matches(
+            $cliStartTestsCode,
+            [regex]::Escape($normalCliBehaviorTestHeaderCode)
+        ))
+    if (
+        $normalCliBehaviorRawHeaders.Count -ne 1 -or
+        $normalCliBehaviorCodeHeaders.Count -ne 1 -or
+        $normalCliBehaviorRawHeaders[0].Index -ne $normalCliBehaviorCodeHeaders[0].Index -or
+        $cliStartTestsCode -match '#\s*\[\s*ignore(?:\s*\([^\]]*\))?\s*\]' -or
+        @([regex]::Matches(
+                $cliStartTestsCode,
+                '\bnormal_cli_entrypoint_ignores_acceptance_source_with_all_features\b'
+            )).Count -ne 1 -or
+        @([regex]::Matches(
+                $cliStartTestsCode,
+                '\bexecute_with_options\('
+            )).Count -ne 1 -or
+        @([regex]::Matches(
+                $cliStartTestsCode,
+                '\bRuntimeSelectorHarness::new\('
+            )).Count -ne 1 -or
+        $cliStartTests -notmatch
+        [regex]::Escape('"{\"code\":\"start_failed\"}\n"') -or
+        $cliStartTests -notmatch
+        [regex]::Escape('contains("invalid_source")')
+    ) {
+        Add-Failure `
+            -Message "The all-features normal CLI behavior test must execute the real entrypoint and reject acceptance-source routing."
+    }
+
+    $cliAcceptanceMain = Read-BoundedUtf8Text `
+        -Path $cliAcceptanceMainPath `
+        -MaximumBytes 131072
+    $cliAcceptanceMainCode = Get-RustCodeView -Source $cliAcceptanceMain
+    if (
+        @([regex]::Matches(
+                $cliAcceptanceMainCode,
+                '\bexecute_packaged_acceptance_with_options\('
+            )).Count -ne 1 -or
+        -not $cliAcceptanceMain.Contains(
+            '["start", "--json", "--progress-jsonl"]'
+        )
+    ) {
+        Add-Failure `
+            -Message "The packaged acceptance CLI must expose only the exact structured start command."
+    }
+
+    $desktopManifest = Read-BoundedUtf8Text `
+        -Path $desktopManifestPath `
+        -MaximumBytes 131072
+    $desktopAcceptanceFeatures = @'
+[features]
+default = []
+packaged-acceptance = ["wokrouter-cli/packaged-acceptance", "tauri/custom-protocol"]
+'@
+    if (
+        -not (Test-ContainsExactBlock `
+            -Source $desktopManifest `
+            -Block $desktopAcceptanceFeatures) -or
+        @([regex]::Matches(
+                $desktopManifest,
+                '(?m)^packaged-acceptance = \["wokrouter-cli/packaged-acceptance", "tauri/custom-protocol"\]$'
+            )).Count -ne 1
+    ) {
+        Add-Failure `
+            -Message "The desktop acceptance seam must be one exact non-default feature gated through the acceptance CLI."
+    }
+
+    $sidecarStaging = Read-BoundedUtf8Text `
+        -Path $sidecarStagingPath `
+        -MaximumBytes 262144
+    $sidecarStagingCode = Get-RustCodeView -Source $sidecarStaging
+    $cargoBuildArgumentsBlock = @'
+export function cargoBuildArguments(targetTriple) {
+  return [
+    "build",
+    "--locked",
+    "--release",
+    "--target",
+    supportedTargetTriple(targetTriple),
+    "-p",
+    "wokrouter-cli",
+    "--bin",
+    "wokrouter",
+    "--no-default-features",
+  ];
+}
+'@
+    $cargoBuildArgumentsCode = Get-RustCodeView -Source $cargoBuildArgumentsBlock
+    $sidecarArgumentsValid = $false
+    try {
+        $nodeCommand = Get-Command "node" -CommandType Application -ErrorAction Stop
+        $moduleUri = [Uri]::new($sidecarStagingPath).AbsoluteUri
+        $probe = @"
+import { cargoBuildArguments } from '$moduleUri';
+process.stdout.write(JSON.stringify(cargoBuildArguments('x86_64-pc-windows-msvc')));
+"@
+        $sidecarArgumentsJson = & $nodeCommand.Source `
+            --input-type=module `
+            --eval $probe
+        if ($LASTEXITCODE -ne 0) {
+            throw "Node exited with code $LASTEXITCODE"
+        }
+        $sidecarArguments = [string[]]($sidecarArgumentsJson | ConvertFrom-Json)
+        $expectedSidecarArguments = @(
+            "build",
+            "--locked",
+            "--release",
+            "--target",
+            "x86_64-pc-windows-msvc",
+            "-p",
+            "wokrouter-cli",
+            "--bin",
+            "wokrouter",
+            "--no-default-features"
+        )
+        $sidecarArgumentsValid = (
+            $sidecarArguments.Count -eq $expectedSidecarArguments.Count -and
+            -not (Compare-Object `
+                -ReferenceObject $expectedSidecarArguments `
+                -DifferenceObject $sidecarArguments `
+                -SyncWindow 0)
+        )
+    }
+    catch {
+        $sidecarArgumentsValid = $false
+    }
+    if (
+        -not (Test-ContainsExactBlock `
+            -Source $sidecarStagingCode `
+            -Block $cargoBuildArgumentsCode) -or
+        $sidecarStaging -match '(?i)packaged[-_]?acceptance' -or
+        -not $sidecarArgumentsValid
+    ) {
+        Add-Failure `
+            -Message "Release sidecar staging must build only the normal CLI target with no default features."
+    }
+
+    try {
+        $tauriConfiguration = Read-BoundedUtf8Text `
+            -Path $tauriConfigurationPath `
+            -MaximumBytes 262144 |
+            ConvertFrom-Json
+        $externalBins = @($tauriConfiguration.bundle.externalBin)
+        if (
+            $externalBins.Count -ne 1 -or
+            $externalBins[0] -cne 'binaries/wokrouter'
+        ) {
+            throw "unexpected external binaries"
+        }
+    }
+    catch {
+        Add-Failure `
+            -Message "Release Tauri bundles must contain exactly one production sidecar."
     }
 
     $desktopSubsystemAttributes = @(
@@ -1579,11 +1824,31 @@ $portableSidecarFiles = @(
             Add-Failure `
                 -Message "Release packagers must not contain Skip or Bypass production paths."
         }
+        $expectedAcceptanceGuards = switch ([IO.Path]::GetFileName($packagerPath)) {
+            "package-windows-assets.ps1" { 1 }
+            "package-linux-assets.ps1" { 2 }
+            "package-macos-assets.ps1" { 3 }
+            default { 0 }
+        }
+        if (
+            @([regex]::Matches(
+                    $packagerSource,
+                    [regex]::Escape('packaged[-_]?acceptance')
+                )).Count -ne $expectedAcceptanceGuards
+        ) {
+            Add-Failure `
+                -Message "All release packagers must forbid packaged acceptance payload names at every extracted-content boundary."
+        }
     }
 
     $release = (Get-Content -LiteralPath $releasePath -Raw -Encoding UTF8).Replace("`r`n", "`n")
     $ci = (Get-Content -LiteralPath $ciPath -Raw -Encoding UTF8).Replace("`r`n", "`n")
     $development = Get-Content -LiteralPath $developmentPath -Raw -Encoding UTF8
+
+    if ($release -match '(?i)packaged[-_]?acceptance') {
+        Add-Failure `
+            -Message "Release workflows must not enable or package packaged acceptance artifacts."
+    }
 
     if ($release -notmatch '(?m)^      - "v\*"$') {
         Add-Failure -Message "Release workflow must verify WokRouter v* tag pushes."
@@ -1704,6 +1969,23 @@ concurrency:
         if (-not $buildJob.Contains($requiredText)) {
             Add-Failure -Message "Release build is missing required boundary text '$requiredText'."
         }
+    }
+    $uploadPayloadBlock = @'
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wokrouter-payload-${{ matrix.target }}
+          path: target/wokrouter-public-${{ matrix.target }}/*
+          if-no-files-found: error
+'@
+    if (
+        @([regex]::Matches(
+                $buildJob,
+                '(?m)^      - uses: actions/upload-artifact@v6$'
+            )).Count -ne 1 -or
+        -not (Test-ContainsExactBlock -Source $buildJob -Block $uploadPayloadBlock)
+    ) {
+        Add-Failure `
+            -Message "Release build must upload one exact normalized payload allowlist."
     }
     $arm64ToolCondition = (
         "if: runner.os == 'Windows' && " +
