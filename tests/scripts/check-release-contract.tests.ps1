@@ -416,8 +416,18 @@ function Get-PeSubsystem {
             Path = "tests/release/package-windows-assets.ps1"
             Expected = "source desktop GUI subsystem check"
             Block = @'
-if ((Get-PeSubsystem -Path $desktop) -ne 2) {
+if ((& $peSubsystemCommand -Path $desktop) -ne 2) {
     throw "Windows desktop executable must use the GUI subsystem."
+}
+'@
+        },
+        @{
+            Name = "source sidecar console guard cannot be wrapped in dead code"
+            Path = "tests/release/package-windows-assets.ps1"
+            Expected = "source sidecar console subsystem check"
+            Block = @'
+if ((& $peSubsystemCommand -Path $sidecar) -ne 3) {
+    throw "Windows sidecar executable must use the console subsystem."
 }
 '@
         },
@@ -426,8 +436,18 @@ if ((Get-PeSubsystem -Path $desktop) -ne 2) {
             Path = "tests/release/package-windows-assets.ps1"
             Expected = "MSI desktop GUI subsystem check"
             Block = @'
-    if ((Get-PeSubsystem -Path $byName["wokrouter-desktop.exe"]) -ne 2) {
+    if ((& $peSubsystemCommand -Path $byName["wokrouter-desktop.exe"]) -ne 2) {
         throw "MSI desktop executable must use the GUI subsystem."
+    }
+'@
+        },
+        @{
+            Name = "MSI sidecar console guard cannot be wrapped in dead code"
+            Path = "tests/release/package-windows-assets.ps1"
+            Expected = "MSI sidecar console subsystem check"
+            Block = @'
+    if ((& $peSubsystemCommand -Path $byName["wokrouter.exe"]) -ne 3) {
+        throw "MSI sidecar executable must use the console subsystem."
     }
 '@
         },
@@ -436,8 +456,18 @@ if ((Get-PeSubsystem -Path $desktop) -ne 2) {
             Path = "tests/release/package-windows-assets.ps1"
             Expected = "Portable desktop GUI subsystem check"
             Block = @'
-    if ((Get-PeSubsystem -Path $portableDesktop) -ne 2) {
+    if ((& $peSubsystemCommand -Path $portableDesktop) -ne 2) {
         throw "Portable desktop executable must use the GUI subsystem."
+    }
+'@
+        },
+        @{
+            Name = "Portable sidecar console guard cannot be wrapped in dead code"
+            Path = "tests/release/package-windows-assets.ps1"
+            Expected = "Portable sidecar console subsystem check"
+            Block = @'
+    if ((& $peSubsystemCommand -Path $portableSidecar) -ne 3) {
+        throw "Portable sidecar executable must use the console subsystem."
     }
 '@
         }
@@ -613,6 +643,179 @@ function Get-PeSubsystem {
             -Scenario "helper with an active Begin block"
     }
 
+    Invoke-Scenario -Name "Windows packager cannot shadow the PE subsystem module helper" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+'@ `
+            -NewText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+function Get-PeSubsystem {
+    param([Parameter(Mandatory)][string] $Path)
+
+    if (-not [string]::IsNullOrWhiteSpace($ToolAdapterPath)) {
+        return WokRouter.ReleaseContract\Get-PeSubsystem -Path $Path
+    }
+    return [UInt16] 2
+}
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "owned PE subsystem FunctionInfo snapshot binding" `
+            -Scenario "packager-local PE subsystem shadow"
+    }
+
+    Invoke-Scenario -Name "Windows packager cannot define a qualified PE subsystem shadow" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+'@ `
+            -NewText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+function WokRouter.ReleaseContract\Get-PeSubsystem {
+    param([Parameter(Mandatory)][string] $Path)
+
+    if ([IO.Path]::GetFileName($Path) -ceq "wokrouter-desktop.exe") {
+        return [UInt16] 2
+    }
+    return [UInt16] 3
+}
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "owned PE subsystem FunctionInfo snapshot binding" `
+            -Scenario "qualified packager-local PE subsystem shadow"
+    }
+
+    Invoke-Scenario -Name "Windows packager cannot rewrite the owned PE subsystem command" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+'@ `
+            -NewText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+Set-Variable -Name peSubsystemCommand -Value {
+    param([string] $Path)
+
+    if ([IO.Path]::GetFileName($Path) -ceq "wokrouter-desktop.exe") {
+        return [UInt16] 2
+    }
+    return [UInt16] 3
+}
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "owned PE subsystem FunctionInfo snapshot binding" `
+            -Scenario "PE subsystem FunctionInfo rewritten through Set-Variable"
+    }
+
+    Invoke-Scenario -Name "Windows packager cannot rewrite the module PE subsystem function" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+'@ `
+            -NewText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+& $releaseContractModule {
+    Set-Item Function:Get-PeSubsystem {
+        param([string] $Path)
+
+        if ([IO.Path]::GetFileName($Path) -ceq "wokrouter-desktop.exe") {
+            return [UInt16] 2
+        }
+        return [UInt16] 3
+    }
+}
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "owned PE subsystem FunctionInfo snapshot binding" `
+            -Scenario "module PE subsystem function rewritten through Function provider"
+    }
+
+    $guiSidecarMutations = @(
+        @{
+            Old = @'
+if ((& $peSubsystemCommand -Path $sidecar) -ne 3) {
+    throw "Windows sidecar executable must use the console subsystem."
+}
+'@
+            New = @'
+if ((& $peSubsystemCommand -Path $sidecar) -ne 2) {
+    throw "Windows sidecar executable must use the console subsystem."
+}
+'@
+            Name = "source GUI CLI sidecar"
+            Expected = "source sidecar console subsystem check"
+        },
+        @{
+            Old = @'
+    if ((& $peSubsystemCommand -Path $byName["wokrouter.exe"]) -ne 3) {
+        throw "MSI sidecar executable must use the console subsystem."
+    }
+'@
+            New = @'
+    if ((& $peSubsystemCommand -Path $byName["wokrouter.exe"]) -ne 2) {
+        throw "MSI sidecar executable must use the console subsystem."
+    }
+'@
+            Name = "MSI GUI CLI sidecar"
+            Expected = "MSI sidecar console subsystem check"
+        },
+        @{
+            Old = @'
+    if ((& $peSubsystemCommand -Path $portableSidecar) -ne 3) {
+        throw "Portable sidecar executable must use the console subsystem."
+    }
+'@
+            New = @'
+    if ((& $peSubsystemCommand -Path $portableSidecar) -ne 2) {
+        throw "Portable sidecar executable must use the console subsystem."
+    }
+'@
+            Name = "Portable GUI CLI sidecar"
+            Expected = "Portable sidecar console subsystem check"
+        }
+    )
+    foreach ($mutation in $guiSidecarMutations) {
+        Invoke-Scenario -Name "$($mutation.Name) contract mutation fails" -Test {
+            $root = New-ReleaseFixture
+            Edit-FixtureFile `
+                -Root $root `
+                -RelativePath "tests/release/package-windows-assets.ps1" `
+                -OldText $mutation.Old `
+                -NewText $mutation.New
+            Assert-Rejects `
+                -Root $root `
+                -ExpectedText $mutation.Expected `
+                -Scenario $mutation.Name
+        }
+    }
+
     Invoke-Scenario -Name "Portable desktop query must come from the extracted archive" -Test {
         $root = New-ReleaseFixture
         Edit-FixtureFile `
@@ -683,6 +886,42 @@ function Get-PeSubsystem {
             -Scenario "Portable candidate reassigned from the source executable"
     }
 
+    Invoke-Scenario -Name "Portable sidecar query must come from the extracted archive" -Test {
+        $root = New-ReleaseFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "tests/release/package-windows-assets.ps1" `
+            -OldText @'
+    $portableSidecarFiles = @(
+        Get-ChildItem `
+            -LiteralPath $portableExtracted `
+            -Force `
+            -Recurse `
+            -File |
+            Where-Object Name -CEQ "wokrouter.exe"
+    )
+'@ `
+            -NewText @'
+    $portableSidecarFiles = @(
+        Get-Item -LiteralPath $sidecar
+    )
+    if ($false) {
+        $portableSidecarFiles = @(
+            Get-ChildItem `
+                -LiteralPath $portableExtracted `
+                -Force `
+                -Recurse `
+                -File |
+                Where-Object Name -CEQ "wokrouter.exe"
+        )
+    }
+'@
+        Assert-Rejects `
+            -Root $root `
+            -ExpectedText "Portable sidecar extraction provenance" `
+            -Scenario "Portable sidecar selected from the source executable"
+    }
+
     Invoke-Scenario -Name "Portable extracted root cannot be overwritten before validation" -Test {
         $root = New-ReleaseFixture
         Edit-FixtureFile `
@@ -748,15 +987,15 @@ function Get-PeSubsystem {
             -Root $root `
             -RelativePath "tests/release/package-windows-assets.ps1" `
             -OldText @'
-    if ((Get-PeSubsystem -Path $portableDesktop) -ne 2) {
-        throw "Portable desktop executable must use the GUI subsystem."
+    if ((& $peSubsystemCommand -Path $portableSidecar) -ne 3) {
+        throw "Portable sidecar executable must use the console subsystem."
     }
 
     Write-Output $zipOutput
 '@ `
             -NewText @'
-    if ((Get-PeSubsystem -Path $portableDesktop) -ne 2) {
-        throw "Portable desktop executable must use the GUI subsystem."
+    if ((& $peSubsystemCommand -Path $portableSidecar) -ne 3) {
+        throw "Portable sidecar executable must use the console subsystem."
     }
     $zipOutput = $publishedZipOutput
 
@@ -768,39 +1007,71 @@ function Get-PeSubsystem {
             -Scenario "Portable archive path reassigned to a source-only archive"
     }
 
-    Invoke-Scenario -Name "source MSI and Portable GUI checks cannot be removed" -Test {
+    Invoke-Scenario -Name "source MSI and Portable subsystem checks cannot be removed" -Test {
         foreach ($mutation in @(
                 @{
-                    Old = 'if ((Get-PeSubsystem -Path $desktop) -ne 2) {'
+                    Old = 'if ((& $peSubsystemCommand -Path $desktop) -ne 2) {'
                     New = (
                         'if ($false) { # ' +
-                        'if ((Get-PeSubsystem -Path $desktop) -ne 2) {'
+                        'if ((& $peSubsystemCommand -Path $desktop) -ne 2) {'
                     )
                     Expected = "source desktop GUI subsystem check"
                 },
                 @{
+                    Old = 'if ((& $peSubsystemCommand -Path $sidecar) -ne 3) {'
+                    New = (
+                        'if ($false) { # ' +
+                        'if ((& $peSubsystemCommand -Path $sidecar) -ne 3) {'
+                    )
+                    Expected = "source sidecar console subsystem check"
+                },
+                @{
                     Old = (
-                        'if ((Get-PeSubsystem -Path ' +
+                        'if ((& $peSubsystemCommand -Path ' +
                         '$byName["wokrouter-desktop.exe"]) -ne 2) {'
                     )
                     New = (
                         'if ($false) { # ' +
-                        'if ((Get-PeSubsystem -Path ' +
+                        'if ((& $peSubsystemCommand -Path ' +
                         '$byName["wokrouter-desktop.exe"]) -ne 2) {'
                     )
                     Expected = "MSI desktop GUI subsystem check"
                 },
                 @{
                     Old = (
-                        'if ((Get-PeSubsystem -Path ' +
+                        'if ((& $peSubsystemCommand -Path ' +
+                        '$byName["wokrouter.exe"]) -ne 3) {'
+                    )
+                    New = (
+                        'if ($false) { # ' +
+                        'if ((& $peSubsystemCommand -Path ' +
+                        '$byName["wokrouter.exe"]) -ne 3) {'
+                    )
+                    Expected = "MSI sidecar console subsystem check"
+                },
+                @{
+                    Old = (
+                        'if ((& $peSubsystemCommand -Path ' +
                         '$portableDesktop) -ne 2) {'
                     )
                     New = (
                         'if ($false) { # ' +
-                        'if ((Get-PeSubsystem -Path ' +
+                        'if ((& $peSubsystemCommand -Path ' +
                         '$portableDesktop) -ne 2) {'
                     )
                     Expected = "Portable desktop GUI subsystem check"
+                },
+                @{
+                    Old = (
+                        'if ((& $peSubsystemCommand -Path ' +
+                        '$portableSidecar) -ne 3) {'
+                    )
+                    New = (
+                        'if ($false) { # ' +
+                        'if ((& $peSubsystemCommand -Path ' +
+                        '$portableSidecar) -ne 3) {'
+                    )
+                    Expected = "Portable sidecar console subsystem check"
                 }
             )) {
             $root = New-ReleaseFixture

@@ -1,5 +1,10 @@
 [CmdletBinding()]
-param()
+param(
+    [string] $DebugDesktopExecutable,
+    [string] $DebugSidecarExecutable,
+    [string] $ReleaseDesktopExecutable,
+    [string] $ReleaseSidecarExecutable
+)
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
@@ -17,6 +22,19 @@ $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd(
     [IO.Path]::DirectorySeparatorChar,
     [IO.Path]::AltDirectorySeparatorChar
 )
+$actualArtifactPaths = @(
+    $DebugDesktopExecutable,
+    $DebugSidecarExecutable,
+    $ReleaseDesktopExecutable,
+    $ReleaseSidecarExecutable
+)
+$actualArtifactPathCount = @(
+    $actualArtifactPaths |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+).Count
+if ($actualArtifactPathCount -notin @(0, $actualArtifactPaths.Count)) {
+    throw "Provide either all four actual Windows artifact paths or none."
+}
 
 function New-FixtureRoot {
     $root = Join-Path $temporaryRoot (
@@ -208,6 +226,30 @@ switch ($Operation) {
     default { throw "Unexpected native tool operation '$Operation'." }
 }
 '@
+    return $path
+}
+
+function New-MutatedWindowsPackager {
+    param(
+        [Parameter(Mandatory)][string] $Root,
+        [Parameter(Mandatory)][string] $OldText,
+        [Parameter(Mandatory)][string] $NewText
+    )
+
+    $directory = Join-Path $Root "mutated-windows-packager"
+    [IO.Directory]::CreateDirectory($directory) | Out-Null
+    $path = Join-Path $directory "package-windows-assets.ps1"
+    $source = [IO.File]::ReadAllText($windowsScript).Replace("`r`n", "`n")
+    $old = $OldText.Replace("`r`n", "`n")
+    $new = $NewText.Replace("`r`n", "`n")
+    if ([regex]::Matches($source, [regex]::Escape($old)).Count -ne 1) {
+        throw "Windows packager mutation source must occur exactly once."
+    }
+    Write-Utf8File -Path $path -Content $source.Replace($old, $new)
+    [IO.File]::Copy(
+        $modulePath,
+        (Join-Path $directory "WokRouter.ReleaseContract.psm1")
+    )
     return $path
 }
 
@@ -534,7 +576,7 @@ function Assert-PeSubsystemRejects {
     )
 
     try {
-        $null = Get-PeSubsystem -Path $Path
+        $null = WokRouter.ReleaseContract\Get-PeSubsystem -Path $Path
     }
     catch {
         if ($_.Exception.Message -notmatch [regex]::Escape($ExpectedText)) {
@@ -543,6 +585,25 @@ function Assert-PeSubsystemRejects {
         return
     }
     throw "Expected PE subsystem inspection to reject '$ExpectedText'."
+}
+
+function Assert-ExactPeSubsystem {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][UInt16] $Expected,
+        [Parameter(Mandatory)][string] $Description
+    )
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer) {
+        throw "$Description must be a Windows executable."
+    }
+    $actual = [UInt16] (
+        WokRouter.ReleaseContract\Get-PeSubsystem -Path $item.FullName
+    )
+    if ($actual -ne $Expected) {
+        throw "$Description must use PE subsystem $Expected, got $actual."
+    }
 }
 
 function Invoke-Scenario {
@@ -579,10 +640,10 @@ try {
             -Architecture "x86_64" `
             -Marker "console" `
             -Subsystem "console"
-        if ([UInt16] (Get-PeSubsystem -Path $gui) -ne [UInt16] 2) {
+        if ([UInt16] (WokRouter.ReleaseContract\Get-PeSubsystem -Path $gui) -ne [UInt16] 2) {
             throw "GUI executable did not report subsystem 2."
         }
-        if ([UInt16] (Get-PeSubsystem -Path $console) -ne [UInt16] 3) {
+        if ([UInt16] (WokRouter.ReleaseContract\Get-PeSubsystem -Path $console) -ne [UInt16] 3) {
             throw "Console executable did not report subsystem 3."
         }
     }
@@ -596,7 +657,7 @@ try {
             -Marker "pe32-gui" `
             -Subsystem "gui" `
             -OptionalHeaderKind "pe32"
-        if ([UInt16] (Get-PeSubsystem -Path $gui) -ne [UInt16] 2) {
+        if ([UInt16] (WokRouter.ReleaseContract\Get-PeSubsystem -Path $gui) -ne [UInt16] 2) {
             throw "PE32 GUI executable did not report subsystem 2."
         }
     }
@@ -628,6 +689,30 @@ try {
         Assert-PeSubsystemRejects `
             -Path $unsupported `
             -ExpectedText "unsupported optional header"
+    }
+
+    if ($actualArtifactPathCount -eq $actualArtifactPaths.Count) {
+        Invoke-Scenario -Name "actual debug Windows artifacts remain console binaries" -Test {
+            Assert-ExactPeSubsystem `
+                -Path $DebugDesktopExecutable `
+                -Expected 3 `
+                -Description "Debug desktop executable"
+            Assert-ExactPeSubsystem `
+                -Path $DebugSidecarExecutable `
+                -Expected 3 `
+                -Description "Debug CLI sidecar"
+        }
+
+        Invoke-Scenario -Name "actual release Windows artifacts split GUI and console subsystems" -Test {
+            Assert-ExactPeSubsystem `
+                -Path $ReleaseDesktopExecutable `
+                -Expected 2 `
+                -Description "Release desktop executable"
+            Assert-ExactPeSubsystem `
+                -Path $ReleaseSidecarExecutable `
+                -Expected 3 `
+                -Description "Release CLI sidecar"
+        }
     }
 
     Invoke-Scenario -Name "contract returns exact ordinal 6/16 sequences" -Test {
@@ -2023,10 +2108,10 @@ try {
             $fixture = New-WindowsFixture `
                 -Root $root `
                 -Architecture $architecture
-            if ([UInt16] (Get-PeSubsystem -Path $fixture.Desktop) -ne 2) {
+            if ([UInt16] (WokRouter.ReleaseContract\Get-PeSubsystem -Path $fixture.Desktop) -ne 2) {
                 throw "Desktop fixture is not GUI subsystem 2."
             }
-            if ([UInt16] (Get-PeSubsystem -Path $fixture.Sidecar) -ne 3) {
+            if ([UInt16] (WokRouter.ReleaseContract\Get-PeSubsystem -Path $fixture.Sidecar) -ne 3) {
                 throw "Sidecar fixture is not console subsystem 3."
             }
             $adapter = New-ToolAdapter -Root $root
@@ -2086,6 +2171,187 @@ try {
         }
     }
 
+    Invoke-Scenario -Name "Windows PE checks ignore a packager-local subsystem alias" -Test {
+        $root = New-FixtureRoot
+        $fixture = New-WindowsFixture -Root $root
+        Write-MinimalPe `
+            -Path $fixture.Desktop `
+            -Architecture "x86_64" `
+            -Marker "aliased-desktop" `
+            -Subsystem "console"
+        $mutatedPackager = New-MutatedWindowsPackager `
+            -Root $root `
+            -OldText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+'@ `
+            -NewText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+function Get-FakePeSubsystem {
+    param([string] $Path)
+
+    if ([IO.Path]::GetFileName($Path) -ceq "wokrouter-desktop.exe") {
+        return [UInt16] 2
+    }
+    return [UInt16] 3
+}
+Set-Alias `
+    -Name 'WokRouter.ReleaseContract\Get-PeSubsystem' `
+    -Value Get-FakePeSubsystem
+'@
+        $adapter = New-ToolAdapter -Root $root
+        Assert-Rejects `
+            -Path $mutatedPackager `
+            -FixtureRoot $root `
+            -Arguments @{
+                BundleDirectory = $fixture.Bundle
+                DesktopExecutable = $fixture.Desktop
+                SidecarExecutable = $fixture.Sidecar
+                RepositoryRoot = $repositoryRoot
+                OutputDirectory = (Join-Path $root "output")
+                Version = $version
+                Target = "x86_64-pc-windows-msvc"
+                ToolAdapterPath = $adapter
+            } `
+            -ExpectedText "GUI subsystem"
+    }
+
+    Invoke-Scenario -Name "Windows PE checks ignore a packager-local qualified subsystem function" -Test {
+        $root = New-FixtureRoot
+        $fixture = New-WindowsFixture -Root $root
+        Write-MinimalPe `
+            -Path $fixture.Desktop `
+            -Architecture "x86_64" `
+            -Marker "qualified-function-desktop" `
+            -Subsystem "console"
+        $mutatedPackager = New-MutatedWindowsPackager `
+            -Root $root `
+            -OldText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+'@ `
+            -NewText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+function WokRouter.ReleaseContract\Get-PeSubsystem {
+    param([string] $Path)
+
+    if ([IO.Path]::GetFileName($Path) -ceq "wokrouter-desktop.exe") {
+        return [UInt16] 2
+    }
+    return [UInt16] 3
+}
+'@
+        $adapter = New-ToolAdapter -Root $root
+        Assert-Rejects `
+            -Path $mutatedPackager `
+            -FixtureRoot $root `
+            -Arguments @{
+                BundleDirectory = $fixture.Bundle
+                DesktopExecutable = $fixture.Desktop
+                SidecarExecutable = $fixture.Sidecar
+                RepositoryRoot = $repositoryRoot
+                OutputDirectory = (Join-Path $root "output")
+                Version = $version
+                Target = "x86_64-pc-windows-msvc"
+                ToolAdapterPath = $adapter
+            } `
+            -ExpectedText "GUI subsystem"
+    }
+
+    Invoke-Scenario -Name "Windows PE FunctionInfo binding cannot be rewritten" -Test {
+        $root = New-FixtureRoot
+        $fixture = New-WindowsFixture -Root $root
+        Write-MinimalPe `
+            -Path $fixture.Desktop `
+            -Architecture "x86_64" `
+            -Marker "rewritten-binding-desktop" `
+            -Subsystem "console"
+        $mutatedPackager = New-MutatedWindowsPackager `
+            -Root $root `
+            -OldText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+'@ `
+            -NewText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+Set-Variable -Name peSubsystemCommand -Value {
+    param([string] $Path)
+
+    if ([IO.Path]::GetFileName($Path) -ceq "wokrouter-desktop.exe") {
+        return [UInt16] 2
+    }
+    return [UInt16] 3
+}
+'@
+        $adapter = New-ToolAdapter -Root $root
+        Assert-Rejects `
+            -Path $mutatedPackager `
+            -FixtureRoot $root `
+            -Arguments @{
+                BundleDirectory = $fixture.Bundle
+                DesktopExecutable = $fixture.Desktop
+                SidecarExecutable = $fixture.Sidecar
+                RepositoryRoot = $repositoryRoot
+                OutputDirectory = (Join-Path $root "output")
+                Version = $version
+                Target = "x86_64-pc-windows-msvc"
+                ToolAdapterPath = $adapter
+            } `
+            -ExpectedText "read-only or constant"
+    }
+
+    Invoke-Scenario -Name "Windows PE checks ignore module function-table rewrites" -Test {
+        $root = New-FixtureRoot
+        $fixture = New-WindowsFixture -Root $root
+        Write-MinimalPe `
+            -Path $fixture.Desktop `
+            -Architecture "x86_64" `
+            -Marker "module-rewrite-desktop" `
+            -Subsystem "console"
+        $mutatedPackager = New-MutatedWindowsPackager `
+            -Root $root `
+            -OldText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+'@ `
+            -NewText @'
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+& $releaseContractModule {
+    Set-Item Function:Get-PeSubsystem {
+        param([string] $Path)
+
+        if ([IO.Path]::GetFileName($Path) -ceq "wokrouter-desktop.exe") {
+            return [UInt16] 2
+        }
+        return [UInt16] 3
+    }
+}
+'@
+        $adapter = New-ToolAdapter -Root $root
+        Assert-Rejects `
+            -Path $mutatedPackager `
+            -FixtureRoot $root `
+            -Arguments @{
+                BundleDirectory = $fixture.Bundle
+                DesktopExecutable = $fixture.Desktop
+                SidecarExecutable = $fixture.Sidecar
+                RepositoryRoot = $repositoryRoot
+                OutputDirectory = (Join-Path $root "output")
+                Version = $version
+                Target = "x86_64-pc-windows-msvc"
+                ToolAdapterPath = $adapter
+            } `
+            -ExpectedText "GUI subsystem"
+    }
+
     Invoke-Scenario -Name "Windows rejects a console desktop extracted from MSI" -Test {
         $root = New-FixtureRoot
         $fixture = New-WindowsFixture -Root $root
@@ -2109,6 +2375,147 @@ try {
                 ToolAdapterPath = $adapter
             } `
             -ExpectedText "GUI subsystem"
+    }
+
+    Invoke-Scenario -Name "Windows rejects a GUI source CLI sidecar" -Test {
+        $root = New-FixtureRoot
+        $fixture = New-WindowsFixture -Root $root
+        Write-MinimalPe `
+            -Path $fixture.Sidecar `
+            -Architecture "x86_64" `
+            -Marker "source-sidecar" `
+            -Subsystem "gui"
+        [IO.File]::Copy(
+            $fixture.Sidecar,
+            (Join-Path $root "msi-payload/wokrouter.exe"),
+            $true
+        )
+        $adapter = New-ToolAdapter -Root $root
+        Assert-Rejects `
+            -Path $windowsScript `
+            -FixtureRoot $root `
+            -Arguments @{
+                BundleDirectory = $fixture.Bundle
+                DesktopExecutable = $fixture.Desktop
+                SidecarExecutable = $fixture.Sidecar
+                RepositoryRoot = $repositoryRoot
+                OutputDirectory = (Join-Path $root "output")
+                Version = $version
+                Target = "x86_64-pc-windows-msvc"
+                ToolAdapterPath = $adapter
+            } `
+            -ExpectedText "console subsystem"
+    }
+
+    Invoke-Scenario -Name "Windows rejects a GUI CLI sidecar extracted from MSI" -Test {
+        $root = New-FixtureRoot
+        $fixture = New-WindowsFixture -Root $root
+        Write-MinimalPe `
+            -Path (Join-Path $root "msi-payload/wokrouter.exe") `
+            -Architecture "x86_64" `
+            -Marker "msi-sidecar" `
+            -Subsystem "gui"
+        $adapter = New-ToolAdapter -Root $root
+        Assert-Rejects `
+            -Path $windowsScript `
+            -FixtureRoot $root `
+            -Arguments @{
+                BundleDirectory = $fixture.Bundle
+                DesktopExecutable = $fixture.Desktop
+                SidecarExecutable = $fixture.Sidecar
+                RepositoryRoot = $repositoryRoot
+                OutputDirectory = (Join-Path $root "output")
+                Version = $version
+                Target = "x86_64-pc-windows-msvc"
+                ToolAdapterPath = $adapter
+            } `
+            -ExpectedText "console subsystem"
+    }
+
+    Invoke-Scenario -Name "Windows rejects a console desktop in the extracted Portable archive" -Test {
+        $root = New-FixtureRoot
+        $fixture = New-WindowsFixture -Root $root
+        Write-MinimalPe `
+            -Path (Join-Path $root "portable-console-desktop.exe") `
+            -Architecture "x86_64" `
+            -Marker "portable-desktop" `
+            -Subsystem "console"
+        $mutatedPackager = New-MutatedWindowsPackager `
+            -Root $root `
+            -OldText @'
+        $null = [IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+            $archive,
+            $desktop,
+            "wokrouter-desktop.exe",
+            [IO.Compression.CompressionLevel]::Optimal
+        )
+'@ `
+            -NewText @'
+        $null = [IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+            $archive,
+            (Join-Path $env:WOKROUTER_RELEASE_FIXTURE_ROOT "portable-console-desktop.exe"),
+            "wokrouter-desktop.exe",
+            [IO.Compression.CompressionLevel]::Optimal
+        )
+'@
+        $adapter = New-ToolAdapter -Root $root
+        Assert-Rejects `
+            -Path $mutatedPackager `
+            -FixtureRoot $root `
+            -Arguments @{
+                BundleDirectory = $fixture.Bundle
+                DesktopExecutable = $fixture.Desktop
+                SidecarExecutable = $fixture.Sidecar
+                RepositoryRoot = $repositoryRoot
+                OutputDirectory = (Join-Path $root "output")
+                Version = $version
+                Target = "x86_64-pc-windows-msvc"
+                ToolAdapterPath = $adapter
+            } `
+            -ExpectedText "Portable desktop executable must use the GUI subsystem."
+    }
+
+    Invoke-Scenario -Name "Windows rejects a GUI CLI sidecar in the extracted Portable archive" -Test {
+        $root = New-FixtureRoot
+        $fixture = New-WindowsFixture -Root $root
+        Write-MinimalPe `
+            -Path (Join-Path $root "portable-gui-sidecar.exe") `
+            -Architecture "x86_64" `
+            -Marker "portable-sidecar" `
+            -Subsystem "gui"
+        $mutatedPackager = New-MutatedWindowsPackager `
+            -Root $root `
+            -OldText @'
+        $null = [IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+            $archive,
+            $sidecar,
+            "wokrouter.exe",
+            [IO.Compression.CompressionLevel]::Optimal
+        )
+'@ `
+            -NewText @'
+        $null = [IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+            $archive,
+            (Join-Path $env:WOKROUTER_RELEASE_FIXTURE_ROOT "portable-gui-sidecar.exe"),
+            "wokrouter.exe",
+            [IO.Compression.CompressionLevel]::Optimal
+        )
+'@
+        $adapter = New-ToolAdapter -Root $root
+        Assert-Rejects `
+            -Path $mutatedPackager `
+            -FixtureRoot $root `
+            -Arguments @{
+                BundleDirectory = $fixture.Bundle
+                DesktopExecutable = $fixture.Desktop
+                SidecarExecutable = $fixture.Sidecar
+                RepositoryRoot = $repositoryRoot
+                OutputDirectory = (Join-Path $root "output")
+                Version = $version
+                Target = "x86_64-pc-windows-msvc"
+                ToolAdapterPath = $adapter
+            } `
+            -ExpectedText "console subsystem"
     }
 
     Invoke-Scenario -Name "Linux RPM extraction captures a direct exit status" -Test {

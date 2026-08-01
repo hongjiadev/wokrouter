@@ -750,27 +750,49 @@ function Get-PeSubsystem {
     }
 
     $sourceDesktopGuards = @()
+    $sourceSidecarGuards = @()
     $msiDesktopGuards = @()
+    $msiSidecarGuards = @()
     $portableDesktopCountGuards = @()
     $portableDesktopGuards = @()
+    $portableSidecarCountGuards = @()
+    $portableSidecarGuards = @()
     if ($null -ne $windowsPackagerAst) {
         $sourceDesktopGuards = @(
             Get-ExactGuardAst `
                 -Ast $windowsPackagerAst `
-                -Condition '(Get-PeSubsystem -Path $desktop) -ne 2' `
+                -Condition '(& $peSubsystemCommand -Path $desktop) -ne 2' `
                 -ThrowStatement 'throw "Windows desktop executable must use the GUI subsystem."'
+        )
+        $sourceSidecarGuards = @(
+            Get-ExactGuardAst `
+                -Ast $windowsPackagerAst `
+                -Condition '(& $peSubsystemCommand -Path $sidecar) -ne 3' `
+                -ThrowStatement 'throw "Windows sidecar executable must use the console subsystem."'
         )
         $msiDesktopGuards = @(
             Get-ExactGuardAst `
                 -Ast $windowsPackagerAst `
-                -Condition '(Get-PeSubsystem -Path $byName["wokrouter-desktop.exe"]) -ne 2' `
+                -Condition '(& $peSubsystemCommand -Path $byName["wokrouter-desktop.exe"]) -ne 2' `
                 -ThrowStatement 'throw "MSI desktop executable must use the GUI subsystem."'
+        )
+        $msiSidecarGuards = @(
+            Get-ExactGuardAst `
+                -Ast $windowsPackagerAst `
+                -Condition '(& $peSubsystemCommand -Path $byName["wokrouter.exe"]) -ne 3' `
+                -ThrowStatement 'throw "MSI sidecar executable must use the console subsystem."'
         )
         $portableDesktopGuards = @(
             Get-ExactGuardAst `
                 -Ast $windowsPackagerAst `
-                -Condition '(Get-PeSubsystem -Path $portableDesktop) -ne 2' `
+                -Condition '(& $peSubsystemCommand -Path $portableDesktop) -ne 2' `
                 -ThrowStatement 'throw "Portable desktop executable must use the GUI subsystem."'
+        )
+        $portableSidecarGuards = @(
+            Get-ExactGuardAst `
+                -Ast $windowsPackagerAst `
+                -Condition '(& $peSubsystemCommand -Path $portableSidecar) -ne 3' `
+                -ThrowStatement 'throw "Portable sidecar executable must use the console subsystem."'
         )
         $portableDesktopCountGuards = @(
             Get-ExactGuardAst `
@@ -778,6 +800,273 @@ function Get-PeSubsystem {
                 -Condition '$portableDesktopFiles.Count -ne 1' `
                 -ThrowStatement 'throw "Portable archive must contain one desktop executable."'
         )
+        $portableSidecarCountGuards = @(
+            Get-ExactGuardAst `
+                -Ast $windowsPackagerAst `
+                -Condition '$portableSidecarFiles.Count -ne 1' `
+                -ThrowStatement 'throw "Portable archive must contain one sidecar executable."'
+        )
+
+        $releaseContractModulePathStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $windowsPackagerAst.EndBlock `
+                -Statement '$releaseContractModulePath = Join-Path $PSScriptRoot "WokRouter.ReleaseContract.psm1"'
+        )
+        $releaseContractModuleStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $windowsPackagerAst.EndBlock `
+                -Statement '$releaseContractModule = Import-Module $releaseContractModulePath -Force -PassThru'
+        )
+        $peSubsystemFunctionStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $windowsPackagerAst.EndBlock `
+                -Statement @'
+$ExecutionContext.SessionState.PSVariable.Set(
+    [Management.Automation.PSVariable]::new(
+        "peSubsystemFunction",
+        $releaseContractModule.ExportedFunctions["Get-PeSubsystem"],
+        [Management.Automation.ScopedItemOptions]::Constant
+    )
+)
+'@
+        )
+        $releaseContractIdentityGuards = @(
+            Get-ExactDirectStatementAst `
+                -Block $windowsPackagerAst.EndBlock `
+                -Statement @'
+if (
+    $releaseContractModule.Name -cne "WokRouter.ReleaseContract" -or
+    -not [StringComparer]::OrdinalIgnoreCase.Equals(
+        [IO.Path]::GetFullPath($releaseContractModule.Path),
+        [IO.Path]::GetFullPath($releaseContractModulePath)
+    ) -or
+    $peSubsystemFunction -isnot [Management.Automation.FunctionInfo] -or
+    $peSubsystemFunction.Name -cne "Get-PeSubsystem" -or
+    $peSubsystemFunction.ModuleName -cne "WokRouter.ReleaseContract"
+) {
+    throw "Windows release contract PE subsystem helper is unavailable."
+}
+'@
+        )
+        $peSubsystemCommandStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $windowsPackagerAst.EndBlock `
+                -Statement @'
+$ExecutionContext.SessionState.PSVariable.Set(
+    [Management.Automation.PSVariable]::new(
+        "peSubsystemCommand",
+        $peSubsystemFunction.ScriptBlock,
+        [Management.Automation.ScopedItemOptions]::Constant
+    )
+)
+'@
+        )
+        $peSubsystemSnapshotGuards = @(
+            Get-ExactDirectStatementAst `
+                -Block $windowsPackagerAst.EndBlock `
+                -Statement @'
+if ($peSubsystemCommand -isnot [Management.Automation.ScriptBlock]) {
+    throw "Windows release contract PE subsystem helper is unavailable."
+}
+'@
+        )
+        $releaseContractModulePathAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $windowsPackagerAst `
+                -Name "releaseContractModulePath"
+        )
+        $releaseContractModuleAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $windowsPackagerAst `
+                -Name "releaseContractModule"
+        )
+        $peSubsystemCommandAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $windowsPackagerAst `
+                -Name "peSubsystemCommand"
+        )
+        $peSubsystemFunctionAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $windowsPackagerAst `
+                -Name "peSubsystemFunction"
+        )
+        $peSubsystemCommandNameLiterals = @(
+            $windowsPackagerAst.FindAll(
+                {
+                    param($node)
+
+                    return (
+                        $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+                        $node.Value -ieq "peSubsystemCommand"
+                    )
+                },
+                $true
+            )
+        )
+        $peSubsystemFunctionNameLiterals = @(
+            $windowsPackagerAst.FindAll(
+                {
+                    param($node)
+
+                    return (
+                        $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+                        $node.Value -ieq "peSubsystemFunction"
+                    )
+                },
+                $true
+            )
+        )
+        $peSubsystemVariableWriteCommands = @(
+            $windowsPackagerAst.FindAll(
+                {
+                    param($node)
+
+                    if ($node -isnot [Management.Automation.Language.CommandAst]) {
+                        return $false
+                    }
+                    $name = $node.GetCommandName()
+                    if ($null -eq $name) {
+                        return $false
+                    }
+                    $leaf = $name.Split("\")[-1]
+                    return (
+                        $leaf -iin @(
+                            "Set-Variable",
+                            "New-Variable",
+                            "Remove-Variable",
+                            "Clear-Variable",
+                            "Set-Item",
+                            "Remove-Item",
+                            "Clear-Item",
+                            "Rename-Item",
+                            "Move-Item"
+                        ) -and
+                        $node.Extent.Text -imatch (
+                            '(?:Variable:\s*)?peSubsystem(?:Command|Function)'
+                        )
+                    )
+                },
+                $true
+            )
+        )
+        $peSubsystemFunctionWriteCommands = @(
+            $windowsPackagerAst.FindAll(
+                {
+                    param($node)
+
+                    if ($node -isnot [Management.Automation.Language.CommandAst]) {
+                        return $false
+                    }
+                    $name = $node.GetCommandName()
+                    if ($null -eq $name) {
+                        return $false
+                    }
+                    $leaf = $name.Split("\")[-1]
+                    return (
+                        $leaf -iin @(
+                            "Set-Item",
+                            "Remove-Item",
+                            "Clear-Item",
+                            "Rename-Item",
+                            "Move-Item"
+                        ) -and
+                        $node.Extent.Text -imatch (
+                            'Function:\s*Get-PeSubsystem'
+                        )
+                    )
+                },
+                $true
+            )
+        )
+        $directPeSubsystemCommands = @(
+            $windowsPackagerAst.FindAll(
+                {
+                    param($node)
+
+                    if ($node -isnot [Management.Automation.Language.CommandAst]) {
+                        return $false
+                    }
+                    $name = $node.GetCommandName()
+                    return (
+                        $null -ne $name -and
+                        $name -cmatch '(^|\\)Get-PeSubsystem$'
+                    )
+                },
+                $true
+            )
+        )
+        $localPeSubsystemFunctions = @(
+            $windowsPackagerAst.FindAll(
+                {
+                    param($node)
+
+                    return (
+                        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                        $node.Name -cmatch '(^|\\)Get-PeSubsystem$'
+                    )
+                },
+                $true
+            )
+        )
+        $modulePathIndex = -1
+        $moduleIndex = -1
+        $functionIndex = -1
+        $identityIndex = -1
+        $commandIndex = -1
+        $snapshotGuardIndex = -1
+        if (
+            $releaseContractModulePathStatements.Count -eq 1 -and
+            $releaseContractModuleStatements.Count -eq 1 -and
+            $peSubsystemFunctionStatements.Count -eq 1 -and
+            $peSubsystemCommandStatements.Count -eq 1 -and
+            $releaseContractIdentityGuards.Count -eq 1 -and
+            $peSubsystemSnapshotGuards.Count -eq 1
+        ) {
+            $modulePathIndex = $windowsPackagerAst.EndBlock.Statements.IndexOf(
+                $releaseContractModulePathStatements[0]
+            )
+            $moduleIndex = $windowsPackagerAst.EndBlock.Statements.IndexOf(
+                $releaseContractModuleStatements[0]
+            )
+            $functionIndex = $windowsPackagerAst.EndBlock.Statements.IndexOf(
+                $peSubsystemFunctionStatements[0]
+            )
+            $identityIndex = $windowsPackagerAst.EndBlock.Statements.IndexOf(
+                $releaseContractIdentityGuards[0]
+            )
+            $commandIndex = $windowsPackagerAst.EndBlock.Statements.IndexOf(
+                $peSubsystemCommandStatements[0]
+            )
+            $snapshotGuardIndex = $windowsPackagerAst.EndBlock.Statements.IndexOf(
+                $peSubsystemSnapshotGuards[0]
+            )
+        }
+        $moduleImportIsOwned = (
+            $releaseContractModulePathAssignments.Count -eq 1 -and
+            $releaseContractModuleAssignments.Count -eq 1 -and
+            $peSubsystemCommandAssignments.Count -eq 0 -and
+            $peSubsystemFunctionAssignments.Count -eq 0 -and
+            $peSubsystemCommandNameLiterals.Count -eq 1 -and
+            $peSubsystemFunctionNameLiterals.Count -eq 1 -and
+            $peSubsystemVariableWriteCommands.Count -eq 0 -and
+            $peSubsystemFunctionWriteCommands.Count -eq 0 -and
+            $directPeSubsystemCommands.Count -eq 0 -and
+            $localPeSubsystemFunctions.Count -eq 0 -and
+            $modulePathIndex -ge 0 -and
+            $moduleIndex -eq ($modulePathIndex + 1) -and
+            $functionIndex -eq ($moduleIndex + 1) -and
+            $identityIndex -eq ($functionIndex + 1) -and
+            $commandIndex -eq ($identityIndex + 1) -and
+            $snapshotGuardIndex -eq ($commandIndex + 1) -and
+            $sourceDesktopGuards.Count -eq 1 -and
+            $snapshotGuardIndex -lt $windowsPackagerAst.EndBlock.Statements.IndexOf(
+                $sourceDesktopGuards[0]
+            )
+        )
+        if (-not $moduleImportIsOwned) {
+            Add-Failure `
+                -Message "Windows packager must retain the owned PE subsystem FunctionInfo snapshot binding."
+        }
     }
 
     $sourceDesktopGuardIsOwned = (
@@ -791,19 +1080,43 @@ function Get-PeSubsystem {
         Add-Failure `
             -Message "Windows packager must retain the active script-scope source desktop GUI subsystem check."
     }
+    $sourceSidecarGuardIsOwned = (
+        $sourceSidecarGuards.Count -eq 1 -and
+        [object]::ReferenceEquals(
+            $sourceSidecarGuards[0].Parent,
+            $windowsPackagerAst.EndBlock
+        ) -and
+        $sourceDesktopGuards.Count -eq 1 -and
+        $sourceDesktopGuards[0].Extent.StartOffset -lt
+        $sourceSidecarGuards[0].Extent.StartOffset
+    )
+    if (-not $sourceSidecarGuardIsOwned) {
+        Add-Failure `
+            -Message "Windows packager must retain the active script-scope source sidecar console subsystem check."
+    }
 
     $packageTry = $null
     if (
         $msiDesktopGuards.Count -eq 1 -and
-        $portableDesktopGuards.Count -eq 1
+        $msiSidecarGuards.Count -eq 1 -and
+        $portableDesktopGuards.Count -eq 1 -and
+        $portableSidecarGuards.Count -eq 1
     ) {
         $msiOwner = $msiDesktopGuards[0].Parent.Parent
+        $msiSidecarOwner = $msiSidecarGuards[0].Parent.Parent
         $portableOwner = $portableDesktopGuards[0].Parent.Parent
+        $portableSidecarOwner = $portableSidecarGuards[0].Parent.Parent
         if (
             $msiOwner -is [Management.Automation.Language.TryStatementAst] -and
+            [object]::ReferenceEquals($msiOwner, $msiSidecarOwner) -and
             [object]::ReferenceEquals($msiOwner, $portableOwner) -and
+            [object]::ReferenceEquals($msiOwner, $portableSidecarOwner) -and
             [object]::ReferenceEquals(
                 $msiDesktopGuards[0].Parent,
+                $msiOwner.Body
+            ) -and
+            [object]::ReferenceEquals(
+                $msiSidecarGuards[0].Parent,
                 $msiOwner.Body
             ) -and
             [object]::ReferenceEquals(
@@ -811,11 +1124,19 @@ function Get-PeSubsystem {
                 $msiOwner.Body
             ) -and
             [object]::ReferenceEquals(
+                $portableSidecarGuards[0].Parent,
+                $msiOwner.Body
+            ) -and
+            [object]::ReferenceEquals(
                 $msiOwner.Parent,
                 $windowsPackagerAst.EndBlock
             ) -and
             $msiDesktopGuards[0].Extent.StartOffset -lt
-            $portableDesktopGuards[0].Extent.StartOffset
+            $portableDesktopGuards[0].Extent.StartOffset -and
+            $msiSidecarGuards[0].Extent.StartOffset -lt
+            $portableDesktopGuards[0].Extent.StartOffset -and
+            $portableDesktopGuards[0].Extent.StartOffset -lt
+            $portableSidecarGuards[0].Extent.StartOffset
         ) {
             $packageTry = $msiOwner
         }
@@ -824,9 +1145,44 @@ function Get-PeSubsystem {
         Add-Failure `
             -Message "Windows packager must retain the active MSI desktop GUI subsystem check in the package try block."
         Add-Failure `
+            -Message "Windows packager must retain the active MSI sidecar console subsystem check in the package try block."
+        Add-Failure `
             -Message "Windows packager must retain the active Portable desktop GUI subsystem check in the package try block."
+        Add-Failure `
+            -Message "Windows packager must retain the active Portable sidecar console subsystem check in the package try block."
     }
+    $msiSidecarIdentityIsOwned = $false
+    if ($null -ne $packageTry) {
+        $msiSidecarIdentityStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement @'
+Assert-SameFile `
+        -Expected $sidecar `
+        -Actual $byName["wokrouter.exe"] `
+        -Description "MSI sidecar executable"
+'@
+        )
+        if ($msiSidecarIdentityStatements.Count -eq 1) {
+            $msiSidecarGuardIndex = $packageTry.Body.Statements.IndexOf(
+                $msiSidecarGuards[0]
+            )
+            $msiSidecarIdentityIndex = $packageTry.Body.Statements.IndexOf(
+                $msiSidecarIdentityStatements[0]
+            )
+            $msiSidecarIdentityIsOwned = (
+                $msiSidecarGuardIndex -ge 0 -and
+                $msiSidecarIdentityIndex -gt $msiSidecarGuardIndex
+            )
+        }
+    }
+    if (-not $msiSidecarIdentityIsOwned) {
+        Add-Failure `
+            -Message "Windows packager must validate the extracted MSI sidecar console subsystem before retaining exact byte identity."
+    }
+
     $portableProvenanceIsOwned = $false
+    $portableSidecarProvenanceIsOwned = $false
     if ($null -ne $packageTry) {
         $zipOutputStatements = @(
             Get-ExactDirectStatementAst `
@@ -891,6 +1247,25 @@ $portableDesktopFiles = @(
                 -Block $packageTry.Body `
                 -Statement '$portableDesktop = $portableDesktopFiles[0].FullName'
         )
+        $portableSidecarQueryStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement @'
+$portableSidecarFiles = @(
+        Get-ChildItem `
+            -LiteralPath $portableExtracted `
+            -Force `
+            -Recurse `
+            -File |
+            Where-Object Name -CEQ "wokrouter.exe"
+    )
+'@
+        )
+        $portableSidecarAssignmentStatements = @(
+            Get-ExactDirectStatementAst `
+                -Block $packageTry.Body `
+                -Statement '$portableSidecar = $portableSidecarFiles[0].FullName'
+        )
         $zipOutputAssignments = @(
             Get-VariableAssignmentAst -Ast $packageTry.Body -Name "zipOutput"
         )
@@ -909,6 +1284,16 @@ $portableDesktopFiles = @(
                 -Ast $packageTry.Body `
                 -Name "portableDesktop"
         )
+        $portableSidecarFileAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $packageTry.Body `
+                -Name "portableSidecarFiles"
+        )
+        $portableSidecarAssignments = @(
+            Get-VariableAssignmentAst `
+                -Ast $packageTry.Body `
+                -Name "portableSidecar"
+        )
         $zipOutputIndex = -1
         $archiveOpenIndex = -1
         $portableRootIndex = -1
@@ -919,6 +1304,10 @@ $portableDesktopFiles = @(
         $portableCountGuardIndex = -1
         $portableAssignmentIndex = -1
         $portableSubsystemGuardIndex = -1
+        $portableSidecarQueryIndex = -1
+        $portableSidecarCountGuardIndex = -1
+        $portableSidecarAssignmentIndex = -1
+        $portableSidecarSubsystemGuardIndex = -1
         $archiveTryIsOwned = $false
         if (
             $zipOutputStatements.Count -eq 1 -and
@@ -930,7 +1319,11 @@ $portableDesktopFiles = @(
             $portableQueryStatements.Count -eq 1 -and
             $portableDesktopCountGuards.Count -eq 1 -and
             $portableAssignmentStatements.Count -eq 1 -and
-            $portableDesktopGuards.Count -eq 1
+            $portableDesktopGuards.Count -eq 1 -and
+            $portableSidecarQueryStatements.Count -eq 1 -and
+            $portableSidecarCountGuards.Count -eq 1 -and
+            $portableSidecarAssignmentStatements.Count -eq 1 -and
+            $portableSidecarGuards.Count -eq 1
         ) {
             $zipOutputIndex = $packageTry.Body.Statements.IndexOf(
                 $zipOutputStatements[0]
@@ -961,6 +1354,18 @@ $portableDesktopFiles = @(
             )
             $portableSubsystemGuardIndex = $packageTry.Body.Statements.IndexOf(
                 $portableDesktopGuards[0]
+            )
+            $portableSidecarQueryIndex = $packageTry.Body.Statements.IndexOf(
+                $portableSidecarQueryStatements[0]
+            )
+            $portableSidecarCountGuardIndex = $packageTry.Body.Statements.IndexOf(
+                $portableSidecarCountGuards[0]
+            )
+            $portableSidecarAssignmentIndex = $packageTry.Body.Statements.IndexOf(
+                $portableSidecarAssignmentStatements[0]
+            )
+            $portableSidecarSubsystemGuardIndex = $packageTry.Body.Statements.IndexOf(
+                $portableSidecarGuards[0]
             )
             if (
                 $archiveOpenIndex + 1 -lt $packageTry.Body.Statements.Count
@@ -1031,10 +1436,41 @@ $portableDesktopFiles = @(
         ) {
             $portableProvenanceIsOwned = $true
         }
+        if (
+            $portableProvenanceIsOwned -and
+            $portableSidecarQueryStatements.Count -eq 1 -and
+            $portableSidecarCountGuards.Count -eq 1 -and
+            [object]::ReferenceEquals(
+                $portableSidecarCountGuards[0].Parent,
+                $packageTry.Body
+            ) -and
+            $portableSidecarAssignmentStatements.Count -eq 1 -and
+            $portableSidecarGuards.Count -eq 1 -and
+            $portableSidecarFileAssignments.Count -eq 1 -and
+            [object]::ReferenceEquals(
+                $portableSidecarFileAssignments[0],
+                $portableSidecarQueryStatements[0]
+            ) -and
+            $portableSidecarAssignments.Count -eq 1 -and
+            [object]::ReferenceEquals(
+                $portableSidecarAssignments[0],
+                $portableSidecarAssignmentStatements[0]
+            ) -and
+            $portableSidecarQueryIndex -eq $archiveOpenIndex + 10 -and
+            $portableSidecarCountGuardIndex -eq $archiveOpenIndex + 11 -and
+            $portableSidecarAssignmentIndex -eq $archiveOpenIndex + 12 -and
+            $portableSidecarSubsystemGuardIndex -eq $archiveOpenIndex + 13
+        ) {
+            $portableSidecarProvenanceIsOwned = $true
+        }
     }
     if (-not $portableProvenanceIsOwned) {
         Add-Failure `
             -Message "Windows packager must retain the active Portable desktop extraction provenance and GUI subsystem check."
+    }
+    if (-not $portableSidecarProvenanceIsOwned) {
+        Add-Failure `
+            -Message "Windows packager must retain the active Portable sidecar extraction provenance and console subsystem check."
     }
 
     try {

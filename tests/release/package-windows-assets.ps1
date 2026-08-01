@@ -13,7 +13,37 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-Import-Module (Join-Path $PSScriptRoot "WokRouter.ReleaseContract.psm1") -Force
+$releaseContractModulePath = Join-Path $PSScriptRoot "WokRouter.ReleaseContract.psm1"
+$releaseContractModule = Import-Module $releaseContractModulePath -Force -PassThru
+$ExecutionContext.SessionState.PSVariable.Set(
+    [Management.Automation.PSVariable]::new(
+        "peSubsystemFunction",
+        $releaseContractModule.ExportedFunctions["Get-PeSubsystem"],
+        [Management.Automation.ScopedItemOptions]::Constant
+    )
+)
+if (
+    $releaseContractModule.Name -cne "WokRouter.ReleaseContract" -or
+    -not [StringComparer]::OrdinalIgnoreCase.Equals(
+        [IO.Path]::GetFullPath($releaseContractModule.Path),
+        [IO.Path]::GetFullPath($releaseContractModulePath)
+    ) -or
+    $peSubsystemFunction -isnot [Management.Automation.FunctionInfo] -or
+    $peSubsystemFunction.Name -cne "Get-PeSubsystem" -or
+    $peSubsystemFunction.ModuleName -cne "WokRouter.ReleaseContract"
+) {
+    throw "Windows release contract PE subsystem helper is unavailable."
+}
+$ExecutionContext.SessionState.PSVariable.Set(
+    [Management.Automation.PSVariable]::new(
+        "peSubsystemCommand",
+        $peSubsystemFunction.ScriptBlock,
+        [Management.Automation.ScopedItemOptions]::Constant
+    )
+)
+if ($peSubsystemCommand -isnot [Management.Automation.ScriptBlock]) {
+    throw "Windows release contract PE subsystem helper is unavailable."
+}
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
@@ -304,8 +334,11 @@ foreach ($executable in @($desktop, $sidecar)) {
         throw "Windows executable architecture does not match '$architecture'."
     }
 }
-if ((Get-PeSubsystem -Path $desktop) -ne 2) {
+if ((& $peSubsystemCommand -Path $desktop) -ne 2) {
     throw "Windows desktop executable must use the GUI subsystem."
+}
+if ((& $peSubsystemCommand -Path $sidecar) -ne 3) {
+    throw "Windows sidecar executable must use the console subsystem."
 }
 
 $repository = (Assert-RegularPath `
@@ -401,6 +434,9 @@ try {
         }
         $byName[$file.Name] = $file.FullName
     }
+    if ((& $peSubsystemCommand -Path $byName["wokrouter.exe"]) -ne 3) {
+        throw "MSI sidecar executable must use the console subsystem."
+    }
     Assert-SameFile `
         -Expected $sidecar `
         -Actual $byName["wokrouter.exe"] `
@@ -416,7 +452,7 @@ try {
             throw "Extracted MSI executable architecture does not match."
         }
     }
-    if ((Get-PeSubsystem -Path $byName["wokrouter-desktop.exe"]) -ne 2) {
+    if ((& $peSubsystemCommand -Path $byName["wokrouter-desktop.exe"]) -ne 2) {
         throw "MSI desktop executable must use the GUI subsystem."
     }
 
@@ -488,8 +524,23 @@ try {
         throw "Portable archive must contain one desktop executable."
     }
     $portableDesktop = $portableDesktopFiles[0].FullName
-    if ((Get-PeSubsystem -Path $portableDesktop) -ne 2) {
+    if ((& $peSubsystemCommand -Path $portableDesktop) -ne 2) {
         throw "Portable desktop executable must use the GUI subsystem."
+    }
+    $portableSidecarFiles = @(
+        Get-ChildItem `
+            -LiteralPath $portableExtracted `
+            -Force `
+            -Recurse `
+            -File |
+            Where-Object Name -CEQ "wokrouter.exe"
+    )
+    if ($portableSidecarFiles.Count -ne 1) {
+        throw "Portable archive must contain one sidecar executable."
+    }
+    $portableSidecar = $portableSidecarFiles[0].FullName
+    if ((& $peSubsystemCommand -Path $portableSidecar) -ne 3) {
+        throw "Portable sidecar executable must use the console subsystem."
     }
 
     Write-Output $zipOutput
