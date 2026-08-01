@@ -682,6 +682,10 @@ fn production_install_source() -> Result<WokCoreInstallSource, WokCoreInstallErr
 #[tokio::test]
 async fn normal_cli_entrypoint_ignores_acceptance_source_with_all_features() {
 '@
+    $normalCliBehaviorTestHeader = $normalCliBehaviorTestHeader.Replace(
+        "`r`n",
+        "`n"
+    )
     $normalCliBehaviorTestHeaderCode = Get-RustCodeView `
         -Source $normalCliBehaviorTestHeader
     $normalCliBehaviorRawHeaders = @([regex]::Matches(

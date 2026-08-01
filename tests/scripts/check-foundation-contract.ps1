@@ -59,6 +59,18 @@ function Add-ContractFailure {
     }
 }
 
+function Read-NormalizedUtf8Text {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8).Replace(
+        "`r`n",
+        "`n"
+    ).Replace("`r", "`n")
+}
+
 function Get-PowerShellAst {
     param(
         [Parameter(Mandatory)]
@@ -2231,45 +2243,39 @@ function Assert-NestedValue {
 
 $workflowLines = @(Get-Content -LiteralPath $workflowPath -Encoding UTF8)
 $workflow = $workflowLines -join "`n"
-$deny = Get-Content -LiteralPath $denyPath -Raw -Encoding UTF8
-$development = Get-Content -LiteralPath $developmentPath -Raw -Encoding UTF8
-$runtimeSelector = Get-Content -LiteralPath $runtimeSelectorPath -Raw -Encoding UTF8
-$runtimeSelectorTests = Get-Content -LiteralPath $runtimeSelectorTestsPath -Raw -Encoding UTF8
-$wokcoreClient = Get-Content -LiteralPath $wokcoreClientPath -Raw -Encoding UTF8
-$wokcorePublicKey = Get-Content -LiteralPath $wokcorePublicKeyPath -Raw -Encoding UTF8
-$commandModel = Get-Content -LiteralPath $commandModelPath -Raw -Encoding UTF8
-$desktopControl = Get-Content -LiteralPath $desktopControlPath -Raw -Encoding UTF8
-$coreOperation = Get-Content -LiteralPath $coreOperationPath -Raw -Encoding UTF8
-$coreOperationHelper = Get-Content -LiteralPath $coreOperationHelperPath -Raw -Encoding UTF8
-$coreOperationJournal = Get-Content -LiteralPath $coreOperationJournalPath -Raw -Encoding UTF8
-$desktopLib = Get-Content -LiteralPath $desktopLibPath -Raw -Encoding UTF8
-$frontendControl = Get-Content -LiteralPath $frontendControlPath -Raw -Encoding UTF8
-$coreUpdateEligibility = Get-Content -LiteralPath $coreUpdateEligibilityPath -Raw -Encoding UTF8
-$coreLifecycle = Get-Content -LiteralPath $coreLifecyclePath -Raw -Encoding UTF8
-$coreLifecycleTests = Get-Content -LiteralPath $coreLifecycleTestsPath -Raw -Encoding UTF8
-$managementPanel = Get-Content -LiteralPath $managementPanelPath -Raw -Encoding UTF8
-$localeTests = Get-Content -LiteralPath $localeTestsPath -Raw -Encoding UTF8
-$desktopPackageSource = Get-Content -LiteralPath $desktopPackagePath -Raw -Encoding UTF8
-$eventCapabilitySource = Get-Content -LiteralPath $eventCapabilityPath -Raw -Encoding UTF8
-$desktopBootstrap = Get-Content -LiteralPath $desktopBootstrapPath -Raw -Encoding UTF8
-$frontendLocale = Get-Content -LiteralPath $frontendLocalePath -Raw -Encoding UTF8
-$desktopI18n = Get-Content -LiteralPath $desktopI18nPath -Raw -Encoding UTF8
-$systemLocale = Get-Content -LiteralPath $systemLocalePath -Raw -Encoding UTF8
-$packagedEventSmoke = Get-Content -LiteralPath $packagedEventSmokePath -Raw -Encoding UTF8
-$packagedGuiAcceptance = Get-Content `
-    -LiteralPath $packagedGuiAcceptancePath `
-    -Raw `
-    -Encoding UTF8
-$packagedGuiAcceptanceTests = Get-Content `
-    -LiteralPath $packagedGuiAcceptanceTestsPath `
-    -Raw `
-    -Encoding UTF8
-$desktopMain = Get-Content -LiteralPath $desktopMainPath -Raw -Encoding UTF8
-$windowsPackager = Get-Content -LiteralPath $windowsPackagerPath -Raw -Encoding UTF8
-$coreOperationParser = Get-Content -LiteralPath $coreOperationParserPath -Raw -Encoding UTF8
-$wokcoreInstallTests = Get-Content -LiteralPath $wokcoreInstallTestsPath -Raw -Encoding UTF8
-$cliStartTests = Get-Content -LiteralPath $cliStartTestsPath -Raw -Encoding UTF8
-$cliStart = Get-Content -LiteralPath $cliStartPath -Raw -Encoding UTF8
+$deny = Read-NormalizedUtf8Text -Path $denyPath
+$development = Read-NormalizedUtf8Text -Path $developmentPath
+$runtimeSelector = Read-NormalizedUtf8Text -Path $runtimeSelectorPath
+$runtimeSelectorTests = Read-NormalizedUtf8Text -Path $runtimeSelectorTestsPath
+$wokcoreClient = Read-NormalizedUtf8Text -Path $wokcoreClientPath
+$wokcorePublicKey = Read-NormalizedUtf8Text -Path $wokcorePublicKeyPath
+$commandModel = Read-NormalizedUtf8Text -Path $commandModelPath
+$desktopControl = Read-NormalizedUtf8Text -Path $desktopControlPath
+$coreOperation = Read-NormalizedUtf8Text -Path $coreOperationPath
+$coreOperationHelper = Read-NormalizedUtf8Text -Path $coreOperationHelperPath
+$coreOperationJournal = Read-NormalizedUtf8Text -Path $coreOperationJournalPath
+$desktopLib = Read-NormalizedUtf8Text -Path $desktopLibPath
+$frontendControl = Read-NormalizedUtf8Text -Path $frontendControlPath
+$coreUpdateEligibility = Read-NormalizedUtf8Text -Path $coreUpdateEligibilityPath
+$coreLifecycle = Read-NormalizedUtf8Text -Path $coreLifecyclePath
+$coreLifecycleTests = Read-NormalizedUtf8Text -Path $coreLifecycleTestsPath
+$managementPanel = Read-NormalizedUtf8Text -Path $managementPanelPath
+$localeTests = Read-NormalizedUtf8Text -Path $localeTestsPath
+$desktopPackageSource = Read-NormalizedUtf8Text -Path $desktopPackagePath
+$eventCapabilitySource = Read-NormalizedUtf8Text -Path $eventCapabilityPath
+$desktopBootstrap = Read-NormalizedUtf8Text -Path $desktopBootstrapPath
+$frontendLocale = Read-NormalizedUtf8Text -Path $frontendLocalePath
+$desktopI18n = Read-NormalizedUtf8Text -Path $desktopI18nPath
+$systemLocale = Read-NormalizedUtf8Text -Path $systemLocalePath
+$packagedEventSmoke = Read-NormalizedUtf8Text -Path $packagedEventSmokePath
+$packagedGuiAcceptance = Read-NormalizedUtf8Text -Path $packagedGuiAcceptancePath
+$packagedGuiAcceptanceTests = Read-NormalizedUtf8Text -Path $packagedGuiAcceptanceTestsPath
+$desktopMain = Read-NormalizedUtf8Text -Path $desktopMainPath
+$windowsPackager = Read-NormalizedUtf8Text -Path $windowsPackagerPath
+$coreOperationParser = Read-NormalizedUtf8Text -Path $coreOperationParserPath
+$wokcoreInstallTests = Read-NormalizedUtf8Text -Path $wokcoreInstallTestsPath
+$cliStartTests = Read-NormalizedUtf8Text -Path $cliStartTestsPath
+$cliStart = Read-NormalizedUtf8Text -Path $cliStartPath
 $jobs = Get-WorkflowJobs -Lines $workflowLines
 
 $requiredJobs = @(
@@ -3572,6 +3578,7 @@ $expectedWokCorePublicKey = @"
 untrusted comment: minisign public key 7EF262CD8E9FE136
 RWQ24Z+OzWLyfjz0X7JFepiizNYEsUBt/cJisQWQ9o9EAK8TURVs9hts
 "@
+$expectedWokCorePublicKey = $expectedWokCorePublicKey.Replace("`r`n", "`n")
 if (
     $wokcorePublicKey.TrimEnd("`r", "`n") -ne
     $expectedWokCorePublicKey.TrimEnd("`r", "`n")

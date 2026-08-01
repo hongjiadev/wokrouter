@@ -381,6 +381,22 @@ try {
         Assert-ContractPasses -Root $root -Scenario "real workflow fixture"
     }
 
+    Invoke-Scenario -Name "foundation checker accepts CRLF fixture sources" -Test {
+        $root = New-ContractFixture
+        foreach ($file in Get-ChildItem -LiteralPath $root -Recurse -File) {
+            $source = [IO.File]::ReadAllText($file.FullName).Replace(
+                "`r`n",
+                "`n"
+            ).Replace("`r", "`n").Replace("`n", "`r`n")
+            [IO.File]::WriteAllText(
+                $file.FullName,
+                $source,
+                [Text.UTF8Encoding]::new($false)
+            )
+        }
+        Assert-ContractPasses -Root $root -Scenario "CRLF workflow fixture"
+    }
+
     Invoke-Scenario -Name "an unrelated timer does not obscure the external install poll" -Test {
         $root = New-ContractFixture
         Edit-FixtureFile `

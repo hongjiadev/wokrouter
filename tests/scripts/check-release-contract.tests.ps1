@@ -215,6 +215,29 @@ try {
         Assert-Passes -Root $root -Scenario "real release fixture"
     }
 
+    Invoke-Scenario -Name "release checker accepts CRLF source" -Test {
+        $root = New-ReleaseFixture
+        $crlfChecker = Join-Path $root "check-release-contract-crlf.ps1"
+        $checkerText = [IO.File]::ReadAllText($scriptUnderTest).Replace(
+            "`r`n",
+            "`n"
+        ).Replace("`n", "`r`n")
+        [IO.File]::WriteAllText(
+            $crlfChecker,
+            $checkerText,
+            [Text.UTF8Encoding]::new($false)
+        )
+
+        $originalScriptUnderTest = $script:scriptUnderTest
+        try {
+            $script:scriptUnderTest = $crlfChecker
+            Assert-Passes -Root $root -Scenario "CRLF release checker"
+        }
+        finally {
+            $script:scriptUnderTest = $originalScriptUnderTest
+        }
+    }
+
     Invoke-Scenario -Name "acceptance CLI bin must remain required-feature gated" -Test {
         $root = New-ReleaseFixture
         Edit-FixtureFile `
