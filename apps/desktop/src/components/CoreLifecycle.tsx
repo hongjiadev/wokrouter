@@ -823,6 +823,14 @@ export function CoreLifecycle() {
               : retryInstall
           }
           diagnosticsAvailable={diagnosticsAvailable}
+          coreState={status.data.state}
+          onCheckCoreStatus={async () => {
+            const result = await status.refetch();
+            if (!result.isSuccess || result.data === undefined) {
+              throw new Error("WokCore status refresh failed");
+            }
+            return result.data.state;
+          }}
           onOpenDiagnostics={
             diagnosticsAvailable
               ? () => {

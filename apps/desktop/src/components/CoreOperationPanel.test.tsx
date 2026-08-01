@@ -114,6 +114,7 @@ describe("CoreOperationPanel", () => {
           errorCode: "recovery_required",
         })}
         onRetry={vi.fn()}
+        coreState="running"
         diagnosticsAvailable
         onOpenDiagnostics={vi.fn()}
       />,
@@ -123,6 +124,9 @@ describe("CoreOperationPanel", () => {
       screen.getByRole("heading", { name: "WokCore 需要恢复" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "打开诊断" })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "查看离线恢复步骤" }),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByText("关闭此窗口不会取消 WokCore 操作。"),
     ).toBeInTheDocument();
@@ -450,6 +454,7 @@ describe("CoreOperationPanel", () => {
           errorCode: "recovery_required",
         })}
         onRetry={vi.fn()}
+        coreState="running"
         diagnosticsAvailable
         onOpenDiagnostics={vi.fn()}
       />,
@@ -465,5 +470,171 @@ describe("CoreOperationPanel", () => {
     expect(
       screen.getByRole("button", { name: "Open diagnostics" }),
     ).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Try update again" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "View offline recovery steps" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["missing", "WokCore not installed"],
+    ["stopped", "WokCore stopped"],
+    ["invalid_runtime", "WokCore runtime invalid"],
+  ] as const)(
+    "offers a WokCore-independent recovery guide while the core is %s",
+    async (coreState, expectedStatus) => {
+      const checkCoreStatus = vi.fn().mockResolvedValue(coreState);
+
+      render(
+        <CoreOperationPanel
+          operation={operation({
+            operation: "update",
+            state: "failed",
+            phase: "completed",
+            errorCode: "recovery_required",
+          })}
+          onRetry={vi.fn()}
+          coreState={coreState}
+          onCheckCoreStatus={checkCoreStatus}
+        />,
+      );
+
+      expect(
+        screen.queryByRole("button", { name: "Open diagnostics" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Try update again" }),
+      ).not.toBeInTheDocument();
+      fireEvent.click(
+        screen.getByRole("button", { name: "View offline recovery steps" }),
+      );
+
+      const guide = screen.getByRole("region", { name: "Offline recovery" });
+      expect(guide).toHaveTextContent(
+        "This guide uses only WokRouter's validated local operation record and does not call WokCore diagnostics.",
+      );
+      expect(guide).toHaveTextContent("Recovery code");
+      expect(guide).toHaveTextContent("recovery_required");
+      expect(guide).toHaveTextContent("Operation state");
+      expect(guide).toHaveTextContent("Failed");
+      expect(guide).toHaveTextContent(expectedStatus);
+      expect(guide).not.toHaveTextContent(/operation_id|pid|token|\\private/i);
+
+      fireEvent.click(
+        screen.getByRole("button", { name: "Check WokCore status" }),
+      );
+      expect(checkCoreStatus).toHaveBeenCalledOnce();
+      expect(
+        await screen.findByText(
+          `WokCore status refreshed: ${expectedStatus}.`,
+        ),
+      ).toHaveAttribute("aria-live", "polite");
+    },
+  );
+
+  it.each([
+    [
+      "en",
+      "missing",
+      "running",
+      "WokCore status refreshed: WokCore running.",
+    ],
+    [
+      "zh-CN",
+      "running",
+      "stopped",
+      "WokCore 状态已刷新：WokCore 已停止。",
+    ],
+  ] as const)(
+    "announces the refreshed WokCore state in %s instead of the stale prop",
+    async (locale, initialState, refreshedState, expectedAnnouncement) => {
+      await initializeI18n(locale);
+      const checkCoreStatus = vi.fn().mockResolvedValue(refreshedState);
+
+      render(
+        <CoreOperationPanel
+          operation={operation({
+            operation: "update",
+            state: "failed",
+            phase: "completed",
+            errorCode: "recovery_required",
+          })}
+          onRetry={vi.fn()}
+          coreState={initialState}
+          onCheckCoreStatus={checkCoreStatus}
+        />,
+      );
+
+      fireEvent.click(
+        screen.getByRole("button", {
+          name:
+            locale === "en"
+              ? "View offline recovery steps"
+              : "查看离线恢复步骤",
+        }),
+      );
+      fireEvent.click(
+        screen.getByRole("button", {
+          name:
+            locale === "en"
+              ? "Check WokCore status"
+              : "检查 WokCore 状态",
+        }),
+      );
+
+      expect(
+        await screen.findByText(expectedAnnouncement),
+      ).toHaveAttribute("role", "status");
+    },
+  );
+
+  it("renders the offline recovery action, panel, and live copy in Simplified Chinese when diagnostics capability is absent", async () => {
+    await initializeI18n("zh-CN");
+    const checkCoreStatus = vi
+      .fn()
+      .mockRejectedValue(new Error("status refresh unavailable"));
+
+    render(
+      <CoreOperationPanel
+        operation={operation({
+          operation: "update",
+          state: "failed",
+          phase: "completed",
+          errorCode: "recovery_required",
+        })}
+        onRetry={vi.fn()}
+        coreState="running"
+        onCheckCoreStatus={checkCoreStatus}
+      />,
+    );
+
+    const openGuide = screen.getByRole("button", {
+      name: "查看离线恢复步骤",
+    });
+    expect(openGuide).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(openGuide);
+    expect(openGuide).toHaveAttribute("aria-expanded", "true");
+
+    const guide = screen.getByRole("region", { name: "离线恢复" });
+    expect(guide).toHaveTextContent("恢复代码");
+    expect(guide).toHaveTextContent("recovery_required");
+    expect(guide).toHaveTextContent("操作状态");
+    expect(guide).toHaveTextContent("失败");
+    expect(guide).toHaveTextContent("WokCore 正在运行");
+    expect(guide).toHaveTextContent(
+      "仅在 WokCore 正在运行后重试更新。",
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "检查 WokCore 状态" }),
+    );
+    expect(checkCoreStatus).toHaveBeenCalledOnce();
+    expect(
+      await screen.findByText(
+        "无法刷新本地状态。请重新启动 WokRouter，再继续恢复。",
+      ),
+    ).toHaveAttribute("role", "status");
   });
 });

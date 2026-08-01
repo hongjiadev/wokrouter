@@ -406,6 +406,57 @@ it.each([
   },
 );
 
+it("wires recovered offline guidance to a local status refresh while WokCore is missing", async () => {
+  vi.mocked(getCoreStatus)
+    .mockResolvedValueOnce(missingStatus)
+    .mockResolvedValue({
+      ...runningStatus,
+      capabilities: [
+        ...runningStatus.capabilities,
+        "diagnostics.events.v1",
+      ],
+    });
+  vi.mocked(getCoreOperation).mockResolvedValue({
+    ...checkingUpdateOperation,
+    sequence: 4,
+    state: "failed",
+    phase: "completed",
+    errorCode: "recovery_required",
+  });
+  const user = userEvent.setup();
+
+  renderLifecycle();
+
+  await user.click(
+    await screen.findByRole("button", {
+      name: "View offline recovery steps",
+    }),
+  );
+  expect(
+    screen.getByRole("region", { name: "Offline recovery" }),
+  ).toHaveTextContent("WokCore not installed");
+  expect(
+    screen.queryByRole("button", { name: "Try update again" }),
+  ).not.toBeInTheDocument();
+  const callsBeforeRefresh = vi.mocked(getCoreStatus).mock.calls.length;
+
+  await user.click(
+    screen.getByRole("button", { name: "Check WokCore status" }),
+  );
+
+  await waitFor(() => {
+    expect(vi.mocked(getCoreStatus).mock.calls.length).toBeGreaterThan(
+      callsBeforeRefresh,
+    );
+  });
+  expect(
+    await screen.findByText("WokCore status refreshed: WokCore running."),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "Open diagnostics" }),
+  ).toBeEnabled();
+});
+
 it("waits for listener registration and initial operation arbitration before checking updates", async () => {
   vi.mocked(getCoreStatus).mockResolvedValue(runningStatus);
   vi.mocked(checkCoreUpdateOnce).mockResolvedValue({

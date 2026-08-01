@@ -636,6 +636,7 @@ describe("ManagementPanel", () => {
     expect(
       await screen.findByRole("heading", { name: "WokCore 工作区" }),
     ).toBeInTheDocument();
+    expect(screen.getByText("管理")).toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: "会话" }));
     expect(screen.getByText("未找到会话")).toBeInTheDocument();
     expect(

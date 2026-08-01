@@ -60,6 +60,9 @@ function New-ContractFixture {
         -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src/components/CoreLifecycle.test.tsx") `
         -Destination (Join-Path $root "apps/desktop/src/components/CoreLifecycle.test.tsx")
     Copy-Item `
+        -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src/components/ManagementPanel.tsx") `
+        -Destination (Join-Path $root "apps/desktop/src/components/ManagementPanel.tsx")
+    Copy-Item `
         -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src/locale.test.ts") `
         -Destination (Join-Path $root "apps/desktop/src/locale.test.ts")
     Copy-Item `
@@ -826,6 +829,74 @@ export async function bootstrap(): Promise<void> {
             -Root $root `
             -ExpectedText "Simplified Chinese catalog" `
             -Scenario "desktop without the Simplified Chinese catalog"
+    }
+
+    Invoke-Scenario -Name "visible management copy cannot bypass i18n through comment or key decoys" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/components/ManagementPanel.tsx" `
+            -OldText '{t("management.providers.panelLabel")}' `
+            -NewText @'
+{"Management"}
+            {/* t("management.providers.panelLabel") keeps the catalog token */}
+'@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "Management panel label must be rendered through its translation key." `
+            -Scenario "management panel with visible English and inert translation decoys"
+    }
+
+    Invoke-Scenario -Name "dead management translation decoy cannot replace the live label key" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/components/ManagementPanel.tsx" `
+            -OldText '{t("management.providers.panelLabel")}' `
+            -NewText '{t("common.retry")}'
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/components/ManagementPanel.tsx" `
+            -OldText 'export function ManagementPanel({' `
+            -NewText @'
+function unusedManagementLabel() {
+  return (
+    <p className="section-label">
+      {t("management.providers.panelLabel")}
+    </p>
+  );
+}
+
+export function ManagementPanel({
+'@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "Management panel label must be rendered through its translation key." `
+            -Scenario "management panel using a wrong live key and an unused exact-key decoy"
+    }
+
+    Invoke-Scenario -Name "hidden management translation decoy cannot replace an expression-class live label" -Test {
+        $root = New-ContractFixture
+        Edit-FixtureFile `
+            -Root $root `
+            -RelativePath "apps/desktop/src/components/ManagementPanel.tsx" `
+            -OldText @'
+<p className="section-label">
+            {t("management.providers.panelLabel")}
+          </p>
+'@ `
+            -NewText @'
+<div hidden>
+            <p className="section-label">
+              {t("management.providers.panelLabel")}
+            </p>
+          </div>
+          <p className={"section-label"}>{t("common.retry")}</p>
+'@
+        Assert-ContractRejects `
+            -Root $root `
+            -ExpectedText "Management panel label must be rendered through its translation key." `
+            -Scenario "management panel using a hidden exact-key decoy and an expression-class wrong live key"
     }
 
     Invoke-Scenario -Name "desktop PE check cannot survive only in dead code" -Test {

@@ -1,6 +1,7 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import type { CoreStatus } from "../control";
 import type { CoreOperation } from "../coreOperation";
 
 type CoreOperationPanelProps = {
@@ -8,6 +9,35 @@ type CoreOperationPanelProps = {
   onRetry: (trigger?: HTMLButtonElement) => void;
   diagnosticsAvailable?: boolean;
   onOpenDiagnostics?: () => void;
+  coreState?: CoreStatus["state"];
+  onCheckCoreStatus?: () =>
+    | CoreStatus["state"]
+    | Promise<CoreStatus["state"]>;
+};
+
+type OfflineStatusCheck =
+  | { state: "idle" | "checking" | "failed" }
+  | { state: "completed"; coreState: CoreStatus["state"] };
+
+const coreStateTitleKeys: Record<
+  CoreStatus["state"],
+  | "core.state.missing.title"
+  | "core.state.stopped.title"
+  | "core.state.starting.title"
+  | "core.state.running.title"
+  | "core.state.draining.title"
+  | "core.state.authorizationRequired.title"
+  | "core.state.incompatible.title"
+  | "core.state.invalidRuntime.title"
+> = {
+  missing: "core.state.missing.title",
+  stopped: "core.state.stopped.title",
+  starting: "core.state.starting.title",
+  running: "core.state.running.title",
+  draining: "core.state.draining.title",
+  authorization_required: "core.state.authorizationRequired.title",
+  incompatible: "core.state.incompatible.title",
+  invalid_runtime: "core.state.invalidRuntime.title",
 };
 
 const phaseKeys = {
@@ -149,8 +179,13 @@ export function CoreOperationPanel({
   onRetry,
   diagnosticsAvailable = false,
   onOpenDiagnostics,
+  coreState,
+  onCheckCoreStatus,
 }: CoreOperationPanelProps) {
   const { i18n, t } = useTranslation();
+  const [offlineRecoveryOpen, setOfflineRecoveryOpen] = useState(false);
+  const [offlineStatusCheck, setOfflineStatusCheck] =
+    useState<OfflineStatusCheck>({ state: "idle" });
   const formatBytes = useByteFormatter(i18n.resolvedLanguage);
   const countFormatter = useMemo(
     () => new Intl.NumberFormat(i18n.resolvedLanguage),
@@ -174,6 +209,8 @@ export function CoreOperationPanel({
   const isUpdate = operation.operation === "update";
   const recoveryRequired =
     isUpdate && operation.errorCode === "recovery_required";
+  const retryAvailable =
+    !recoveryRequired || coreState === undefined || coreState === "running";
   const updateIsCurrent =
     isUpdate && succeeded && operation.targetVersion === undefined;
   const announcement = recoveryRequired
@@ -211,6 +248,40 @@ export function CoreOperationPanel({
     : t("operation.progress.indeterminateAria", {
         phase: t(progressPhaseKeys[operation.phase]),
       });
+  const offlineCoreStatus =
+    coreState === undefined
+      ? t("common.unavailable")
+      : t(coreStateTitleKeys[coreState]);
+
+  async function checkOfflineCoreStatus() {
+    if (
+      onCheckCoreStatus === undefined ||
+      offlineStatusCheck.state === "checking"
+    ) {
+      return;
+    }
+    setOfflineStatusCheck({ state: "checking" });
+    try {
+      const refreshedCoreState = await onCheckCoreStatus();
+      setOfflineStatusCheck({
+        state: "completed",
+        coreState: refreshedCoreState,
+      });
+    } catch {
+      setOfflineStatusCheck({ state: "failed" });
+    }
+  }
+
+  const offlineStatusAnnouncement =
+    offlineStatusCheck.state === "checking"
+      ? t("operation.recovery.checkingStatus")
+      : offlineStatusCheck.state === "completed"
+        ? t("operation.recovery.checkCompleted", {
+            status: t(coreStateTitleKeys[offlineStatusCheck.coreState]),
+          })
+        : offlineStatusCheck.state === "failed"
+          ? t("operation.recovery.checkFailed")
+          : "";
 
   return (
     <section
@@ -285,17 +356,19 @@ export function CoreOperationPanel({
 
       {failed && (
         <div className="recovery">
-          <button
-            className="button button--primary"
-            type="button"
-            onClick={(event) => onRetry(event.currentTarget)}
-          >
-            {isUpdate && operation.errorCode === "active_requests_remain"
-              ? t("operation.recovery.retryUpdateLater")
-              : isUpdate
-                ? t("operation.recovery.retryUpdate")
-                : t("operation.install.retry")}
-          </button>
+          {retryAvailable && (
+            <button
+              className="button button--primary"
+              type="button"
+              onClick={(event) => onRetry(event.currentTarget)}
+            >
+              {isUpdate && operation.errorCode === "active_requests_remain"
+                ? t("operation.recovery.retryUpdateLater")
+                : isUpdate
+                  ? t("operation.recovery.retryUpdate")
+                  : t("operation.install.retry")}
+            </button>
+          )}
           {recoveryRequired &&
             (diagnosticsAvailable && onOpenDiagnostics ? (
               <button
@@ -306,10 +379,83 @@ export function CoreOperationPanel({
                 {t("operation.recovery.openDiagnostics")}
               </button>
             ) : (
-              <p className="action-note">
-                {t("operation.recovery.diagnosticsUnavailable")}
-              </p>
+              <>
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  aria-expanded={offlineRecoveryOpen}
+                  aria-controls="offline-recovery-guide"
+                  onClick={() =>
+                    setOfflineRecoveryOpen((isOpen) => !isOpen)
+                  }
+                >
+                  {offlineRecoveryOpen
+                    ? t("operation.recovery.hideOfflineRecovery")
+                    : t("operation.recovery.viewOfflineRecovery")}
+                </button>
+                <p className="action-note">
+                  {t("operation.recovery.diagnosticsUnavailable")}
+                </p>
+                {offlineRecoveryOpen && (
+                  <section
+                    id="offline-recovery-guide"
+                    className="offline-recovery"
+                    aria-labelledby="offline-recovery-heading"
+                  >
+                    <h2 id="offline-recovery-heading">
+                      {t("operation.recovery.offlineTitle")}
+                    </h2>
+                    <p>{t("operation.recovery.offlineDescription")}</p>
+                    <dl className="offline-recovery__facts">
+                      <div>
+                        <dt>{t("operation.recovery.recoveryCode")}</dt>
+                        <dd>
+                          <code dir="ltr">{operation.errorCode}</code>
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>{t("operation.recovery.operationState")}</dt>
+                        <dd>{t("operation.recovery.failedState")}</dd>
+                      </div>
+                      <div>
+                        <dt>{t("operation.recovery.coreStatus")}</dt>
+                        <dd>{offlineCoreStatus}</dd>
+                      </div>
+                    </dl>
+                    <div className="offline-recovery__steps">
+                      <h3>{t("operation.recovery.stepsTitle")}</h3>
+                      <ol>
+                        <li>{t("operation.recovery.stepCheck")}</li>
+                        <li>{t("operation.recovery.stepRestart")}</li>
+                        <li>{t("operation.recovery.stepRetry")}</li>
+                      </ol>
+                    </div>
+                    {onCheckCoreStatus !== undefined && (
+                      <button
+                        className="button button--secondary"
+                        type="button"
+                        disabled={offlineStatusCheck.state === "checking"}
+                        onClick={() => void checkOfflineCoreStatus()}
+                      >
+                        {offlineStatusCheck.state === "checking"
+                          ? t("operation.recovery.checkingStatus")
+                          : t("operation.recovery.checkStatus")}
+                      </button>
+                    )}
+                  </section>
+                )}
+              </>
             ))}
+          {recoveryRequired && (
+            <p
+              className="sr-only"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              {offlineStatusAnnouncement}
+            </p>
+          )}
           <p className="action-note">{t("operation.recovery.actionNote")}</p>
         </div>
       )}

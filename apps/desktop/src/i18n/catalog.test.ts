@@ -3,14 +3,14 @@ import { describe, expect, it } from "vitest";
 // @ts-expect-error Node types are intentionally not a direct desktop dependency.
 import { spawnSync } from "node:child_process";
 // @ts-expect-error Node types are intentionally not a direct desktop dependency.
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 // @ts-expect-error Node types are intentionally not a direct desktop dependency.
 import { tmpdir } from "node:os";
 // @ts-expect-error Node types are intentionally not a direct desktop dependency.
 import { join } from "node:path";
 import packageManifest from "../../package.json";
 // @ts-expect-error The standalone checker is native ESM without declarations.
-import { validateCatalogs } from "../../scripts/check-i18n-catalogs.mjs";
+import { auditProductionTsx, validateCatalogs } from "../../scripts/check-i18n-catalogs.mjs";
 import { i18n, initializeI18n } from "./index";
 import en from "./locales/en.json";
 import zhCN from "./locales/zh-CN.json";
@@ -150,6 +150,27 @@ function runCatalogChecker([english, chinese]: CatalogPair) {
           packageArguments,
           { encoding: "utf8" },
         );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+async function auditTsxSource(source: string) {
+  const directory = mkdtempSync(join(tmpdir(), "wokrouter-tsx-i18n-"));
+  const desktopDirectory = join(directory, "desktop");
+  const sourceDirectory = join(desktopDirectory, "src", "components");
+  try {
+    mkdirSync(sourceDirectory, { recursive: true });
+    writeFileSync(
+      join(desktopDirectory, "tsconfig.json"),
+      JSON.stringify({
+        compilerOptions: { jsx: "react-jsx" },
+        include: ["src"],
+      }),
+      "utf8",
+    );
+    writeFileSync(join(sourceDirectory, "Fixture.tsx"), source, "utf8");
+    return await auditProductionTsx(desktopDirectory);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -399,5 +420,185 @@ describe("desktop translation catalogs", () => {
     expect(packageManifest.scripts["i18n:check"]).toBe(
       "node scripts/check-i18n-catalogs.mjs",
     );
+  });
+
+  it.each([
+    ["JSX text", "<button>Manage providers</button>"],
+    ["JSX string expression", '<h1>{"管理"}</h1>'],
+    ["placeholder", '<input placeholder="API key" />'],
+    ["title", '<button title="Retry update" />'],
+    ["alt", '<img alt="WokCore status" />'],
+    ["aria-label", '<section aria-label="Management" />'],
+    ["aria-description", '<section aria-description="Local recovery" />'],
+    ["aria-valuetext", '<div aria-valuetext="Half complete" />'],
+    ["non-brand single-letter text", "<button>W</button>"],
+  ])("rejects untranslated production %s", async (_name, jsx) => {
+    await expect(
+      auditTsxSource(`export function Fixture() { return (${jsx}); }`),
+    ).rejects.toThrow(/Untranslated user-facing text/);
+  });
+
+  it("rejects a visible literal even when a comment and translation-key decoy remain", async () => {
+    await expect(
+      auditTsxSource(
+        `
+          export function ManagementPanel() {
+            const decoy = "management.providers.panelLabel";
+            // Management remains translated by the catalog.
+            return <p className="section-label">{"Management"}</p>;
+          }
+        `,
+      ),
+    ).rejects.toThrow(/Management/);
+  });
+
+  it.each([
+    [
+      "JSX text",
+      `
+        export function Fixture() {
+          const label = "Manage providers";
+          return <button>{label}</button>;
+        }
+      `,
+    ],
+    [
+      "visible attributes",
+      `
+        export function Fixture() {
+          const placeholder = "API key";
+          return <input placeholder={placeholder} />;
+        }
+      `,
+    ],
+    [
+      "object properties",
+      `
+        export function Fixture() {
+          const labels = { button: "Manage providers" };
+          return <button>{labels.button}</button>;
+        }
+      `,
+    ],
+    [
+      "local function results",
+      `
+        function buttonLabel() {
+          return "Manage providers";
+        }
+        export function Fixture() {
+          return <button>{buttonLabel()}</button>;
+        }
+      `,
+    ],
+    [
+      "destructured bindings",
+      `
+        export function Fixture() {
+          const { label } = { label: "Manage providers" };
+          return <button>{label}</button>;
+        }
+      `,
+    ],
+    [
+      "computed properties",
+      `
+        export function Fixture() {
+          const labels = { button: "Manage providers" };
+          return <button>{labels["button"]}</button>;
+        }
+      `,
+    ],
+    [
+      "String conversion",
+      `
+        export function Fixture() {
+          return <button>{String("Manage providers")}</button>;
+        }
+      `,
+    ],
+    [
+      "immediately invoked functions",
+      `
+        export function Fixture() {
+          return <button>{(() => "Manage providers")()}</button>;
+        }
+      `,
+    ],
+    [
+      "forwarded call arguments",
+      `
+        function buttonLabel(value: string) {
+          return value;
+        }
+        export function Fixture() {
+          return <button>{buttonLabel("Manage providers")}</button>;
+        }
+      `,
+    ],
+    [
+      "template interpolations",
+      [
+        "export function Fixture() {",
+        '  const label = "Manage providers";',
+        "  return <button>{`${label}`}</button>;",
+        "}",
+      ].join("\n"),
+    ],
+    [
+      "destructured call arguments",
+      `
+        function buttonLabel({ value }: { value: string }) {
+          return value;
+        }
+        export function Fixture() {
+          return <button>{buttonLabel({ value: "Manage providers" })}</button>;
+        }
+      `,
+    ],
+    [
+      "dynamic property keys",
+      `
+        export function Fixture() {
+          const labels = { button: "Manage providers" };
+          const key = "button";
+          return <button>{labels[key]}</button>;
+        }
+      `,
+    ],
+    [
+      "numeric element access",
+      `
+        export function Fixture() {
+          const labels = ["Manage providers"];
+          return <button>{labels[0]}</button>;
+        }
+      `,
+    ],
+    [
+      "string receiver methods",
+      `
+        export function Fixture() {
+          return <button>{"Manage providers".toUpperCase()}</button>;
+        }
+      `,
+    ],
+  ])("rejects untranslated %s referenced through a local binding", async (_name, source) => {
+    await expect(auditTsxSource(source)).rejects.toThrow(
+      /Untranslated user-facing text/,
+    );
+  });
+
+  it("allows only the exact visible product brands", async () => {
+    await expect(
+      auditTsxSource(
+        `export function App() { return <><span>WokRouter</span><span>{"WokCore"}</span></>; }`,
+      ),
+    ).resolves.toBe(1);
+    await expect(
+      auditTsxSource(
+        `export function App() { return <span>WokRouter recovery</span>; }`,
+      ),
+    ).rejects.toThrow(/WokRouter recovery/);
   });
 });

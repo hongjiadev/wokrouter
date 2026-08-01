@@ -27,6 +27,7 @@ $frontendControlPath = Join-Path $rootPath "apps/desktop/src/control.ts"
 $coreUpdateEligibilityPath = Join-Path $rootPath "apps/desktop/src/coreUpdateEligibility.ts"
 $coreLifecyclePath = Join-Path $rootPath "apps/desktop/src/components/CoreLifecycle.tsx"
 $coreLifecycleTestsPath = Join-Path $rootPath "apps/desktop/src/components/CoreLifecycle.test.tsx"
+$managementPanelPath = Join-Path $rootPath "apps/desktop/src/components/ManagementPanel.tsx"
 $localeTestsPath = Join-Path $rootPath "apps/desktop/src/locale.test.ts"
 $desktopPackagePath = Join-Path $rootPath "apps/desktop/package.json"
 $eventCapabilityPath = Join-Path $rootPath "apps/desktop/src-tauri/capabilities/main.json"
@@ -629,6 +630,7 @@ function Get-TypeScriptCodeView {
     )
 
     $view = $Source.ToCharArray()
+    $commentStrippedView = $Source.ToCharArray()
     $index = 0
     while ($index -lt $Source.Length) {
         $current = $Source[$index]
@@ -649,6 +651,10 @@ function Get-TypeScriptCodeView {
                 $end += 1
             }
             Set-RustMaskedRange -View $view -Start $index -End $end
+            Set-RustMaskedRange `
+                -View $commentStrippedView `
+                -Start $index `
+                -End $end
             $index = $end
             continue
         }
@@ -662,6 +668,10 @@ function Get-TypeScriptCodeView {
                 return $null
             }
             Set-RustMaskedRange -View $view -Start $index -End $end
+            Set-RustMaskedRange `
+                -View $commentStrippedView `
+                -Start $index `
+                -End $end
             $index = $end
             continue
         }
@@ -731,6 +741,7 @@ function Get-TypeScriptCodeView {
 
     return [pscustomobject]@{
         Code = $code
+        CommentStripped = -join $commentStrippedView
     }
 }
 
@@ -2234,6 +2245,7 @@ $frontendControl = Get-Content -LiteralPath $frontendControlPath -Raw -Encoding 
 $coreUpdateEligibility = Get-Content -LiteralPath $coreUpdateEligibilityPath -Raw -Encoding UTF8
 $coreLifecycle = Get-Content -LiteralPath $coreLifecyclePath -Raw -Encoding UTF8
 $coreLifecycleTests = Get-Content -LiteralPath $coreLifecycleTestsPath -Raw -Encoding UTF8
+$managementPanel = Get-Content -LiteralPath $managementPanelPath -Raw -Encoding UTF8
 $localeTests = Get-Content -LiteralPath $localeTestsPath -Raw -Encoding UTF8
 $desktopPackageSource = Get-Content -LiteralPath $desktopPackagePath -Raw -Encoding UTF8
 $eventCapabilitySource = Get-Content -LiteralPath $eventCapabilityPath -Raw -Encoding UTF8
@@ -2513,6 +2525,60 @@ if ($null -ne $desktopBootstrapCodeView) {
 $desktopI18nCodeView = Get-TypeScriptCodeView `
     -Source $desktopI18n `
     -Description "Desktop i18n module"
+$managementPanelCodeView = Get-TypeScriptCodeView `
+    -Source $managementPanel `
+    -Description "Desktop management panel"
+if ($null -ne $managementPanelCodeView) {
+    $managementPanelItem = Get-UniqueBracedItem `
+        -Source $managementPanel `
+        -SignaturePattern '(?m)^export[ \t]+function[ \t]+ManagementPanel[ \t]*\(' `
+        -Description "Desktop ManagementPanel component" `
+        -TopLevel `
+        -CodeView $managementPanelCodeView
+    $managementLabelValid = $false
+    if ($null -ne $managementPanelItem) {
+        $bodyOffset = $managementPanelItem.OpeningBraceIndex + 1
+        $managementPanelBodyView = [pscustomobject]@{
+            Code = $managementPanelItem.CodeBody
+            CommentStripped = $managementPanelCodeView.CommentStripped.Substring(
+                $bodyOffset,
+                $managementPanelItem.Body.Length
+            )
+        }
+        $renderStatements = @(
+            Get-TypeScriptDirectStatements `
+                -Source $managementPanelItem.Body `
+                -Description "Desktop ManagementPanel component body" `
+                -CodeView $managementPanelBodyView |
+                Where-Object { $_.Code -match '(?s)^return[ \t\r\n]*\(' }
+        )
+        if ($renderStatements.Count -eq 1) {
+            $renderStatement = $renderStatements[0]
+            $renderCommentStripped = $managementPanelBodyView.CommentStripped.Substring(
+                $renderStatement.Index,
+                $renderStatement.Length
+            )
+            $liveManagementLabel = [regex]::Match(
+                $renderCommentStripped,
+                '(?s)^return\s*\(\s*(?<section><section\s+className\s*=\s*"management-panel"\s+aria-labelledby\s*=\s*"management-heading"\s*>)\s*(?<header><header\s+className\s*=\s*"management-header"\s*>)\s*(?<container><div\s*>)\s*(?<label><p\s+className\s*=\s*"section-label"\s*>\s*\{\s*t\s*\(\s*"management\.providers\.panelLabel"\s*\)\s*\}\s*</p>)'
+            )
+            $managementLabelValid = $liveManagementLabel.Success
+            foreach ($groupName in @("section", "header", "container", "label")) {
+                if (
+                    -not $managementLabelValid -or
+                    $renderStatement.Code[$liveManagementLabel.Groups[$groupName].Index] -ne '<'
+                ) {
+                    $managementLabelValid = $false
+                    break
+                }
+            }
+        }
+    }
+    if (-not $managementLabelValid) {
+        Add-ContractFailure `
+            -Message "Management panel label must be rendered through its translation key."
+    }
+}
 $i18nInitializer = Get-UniqueBracedItem `
     -Source $desktopI18n `
     -SignaturePattern '(?m)^export[ \t]+async[ \t]+function[ \t]+initializeI18n[ \t]*\(' `
