@@ -589,7 +589,7 @@ async fn runtime_identity_missing_session_refreshes_only_from_a_trusted_install_
     let selector = RuntimeSelectorHarness::new(
         None,
         |_process_id, _candidate| true,
-        |record| wokrouter_platform::discover_wokcore_executable(record),
+        wokrouter_platform::discover_wokcore_executable,
     );
     let selected = selector.select(&fixture.paths).await.unwrap();
 
